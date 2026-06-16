@@ -40,9 +40,13 @@ async def persist_call(state: SessionState) -> str | None:
                 ended_at=now,
                 duration_ms=duration_ms,
                 escalated=state.escalated,
+                recording_url=state.recording_url,
+                # §11 audit + §14 latency dashboards: consent log + trace id.
                 metrics={
                     "turns": len(state.transcript),
                     "consent_captured": state.consent_captured,
+                    "consent_at": state.consent_at.isoformat() if state.consent_at else None,
+                    "trace_id": state.trace_id,
                 },
             )
             db.add(call)

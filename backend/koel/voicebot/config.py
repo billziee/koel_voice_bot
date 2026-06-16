@@ -30,10 +30,19 @@ class VoiceBotSettings(CommonSettings):
     session_grace_ttl_seconds: int = 15  # Redis grace on disconnect
     session_active_ttl_seconds: int = 3600  # active session TTL
     heartbeat_interval_seconds: int = 5  # ping/pong dead-connection detection
+    # Declare the peer dead if no pong arrives within this window (~2 missed
+    # pings). Detected liveness loss is routed to the same 15s grace path.
+    heartbeat_timeout_seconds: int = 12
 
     # Language fallback (PRD §06): escalate below this STT language confidence
     # for an unsupported language.
     language_confidence_threshold: float = 0.6
+
+    # RBI fair-practice calling-hours window (PRD §11). Off by default so demos
+    # run any time; enable in production to refuse out-of-hours dials.
+    enforce_calling_hours: bool = False
+    calling_hours_start: int = 9  # inclusive, local hour (24h)
+    calling_hours_end: int = 21  # exclusive, local hour (24h)
 
 
 @lru_cache

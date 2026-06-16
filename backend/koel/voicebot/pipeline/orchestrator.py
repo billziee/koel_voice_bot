@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
 from koel.common.schemas import Language, Tone
-from koel.common.telemetry import span
+from koel.common.telemetry import current_trace_id, span
 from koel.nlp.schemas import Intent, NlpResponse, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
@@ -59,8 +60,13 @@ class Orchestrator:
         text: str,
         tone: Tone,
         intent: str | None = None,
+        ambient: bool = True,
     ) -> Turn:
-        """Synthesize + stream a bot utterance and append it to the transcript."""
+        """Synthesize + stream a bot utterance and append it to the transcript.
+
+        ``ambient`` mixes the call-floor bed under the speech (PRD §06); callers
+        set it False to mute the bed during an escalation handoff.
+        """
         turn = Turn(
             index=state.next_turn_index(),
             speaker="bot",
@@ -83,6 +89,9 @@ class Orchestrator:
             )
         )
         with span("tts.synthesize", session_id=state.session_id, tone=tone.value):
+            # Capture the trace id for the §11 audit / §14 latency dashboards.
+            if state.trace_id is None:
+                state.trace_id = current_trace_id()
             audio = await self._clients.synthesize(
                 SynthesizeRequest(
                     session_id=state.session_id,
@@ -90,6 +99,8 @@ class Orchestrator:
                     language=state.language,
                     tone=tone,
                     speaking_rate=1.0,
+                    ambient=ambient,
+                    ambient_profile=state.ambient_profile if ambient else None,
                 )
             )
         await send(
@@ -124,8 +135,10 @@ class Orchestrator:
         greeting = f"{greeting} Do minute baat kar sakte hain?"
 
         await self._send_bot_turn(state, send, text=greeting, tone=state.default_tone, intent="greeting")
-        # Consent captured at call open with the automated disclosure spoken.
+        # Consent captured at call open with the automated disclosure spoken,
+        # stamped with a timestamp for the §11 audit trail.
         state.consent_captured = True
+        state.consent_at = datetime.now(UTC)
         state.status = CallStatus.listening
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.listening))
 
@@ -182,8 +195,16 @@ class Orchestrator:
 
         # --- Apply intent-driven control flow ---
         if nlp.intent == Intent.opt_out:
+            # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
+            # speak one acknowledgement, and END the call now. Do not continue
+            # the script or wait on a separate end_call signal.
             await self._clients.flag_customer(state.customer_id or "", "opt_out", "customer opt-out")
-        elif nlp.intent == Intent.busy:
+            await self._send_bot_turn(
+                state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
+            )
+            await self.end_call(state, send, outcome="declined")
+            return
+        if nlp.intent == Intent.busy:
             # Deferral → schedule a callback rather than treat it as a loss.
             await self._clients.flag_customer(state.customer_id or "", "callback", "customer busy")
         await self._send_bot_turn(
@@ -250,7 +271,10 @@ class Orchestrator:
         )
 
     async def _escalate_unsupported_language(self, state: SessionState, send: Sender) -> None:
-        await self._send_bot_turn(state, send, text=_FALLBACK_TEXT, tone=Tone.empathetic)
+        # Mute the ambient bed for the handoff line (PRD §06).
+        await self._send_bot_turn(
+            state, send, text=_FALLBACK_TEXT, tone=Tone.empathetic, ambient=False
+        )
         if state.customer_id:
             await self._clients.flag_customer(
                 state.customer_id, "unsupported_language", "language outside EN/HI/Hinglish"

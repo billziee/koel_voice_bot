@@ -58,6 +58,13 @@ class SessionState(BaseModel):
     default_tone: Tone = Tone.neutral
     ambient_profile: str = "callfloor"
     greeting_template: str = ""  # from bot config; rendered with CRM fields at greet
+    # Per-bot backchannel overrides (PRD §05): {language: [words…]} merged on top
+    # of the default dictionary so a bot instance can tune its Gate-2 vocabulary.
+    backchannels: dict[str, list[str]] = Field(default_factory=dict)
+    # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
+    # trace_id stitches the call to its OTel trace for the latency dashboards.
+    recording_url: str | None = None
+    trace_id: str | None = None
 
     status: CallStatus = CallStatus.connecting
     # CRM fields seeded at session init (name, product, offer, dpd…).
@@ -71,6 +78,7 @@ class SessionState(BaseModel):
     escalated: bool = False
     outcome: str = "in_progress"
     consent_captured: bool = False  # DPDP / IRDAI consent (PRD §11)
+    consent_at: datetime | None = None  # timestamp consent was captured (PRD §11)
 
     started_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

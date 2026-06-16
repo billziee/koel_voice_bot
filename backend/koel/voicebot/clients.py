@@ -9,6 +9,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 import httpx
+from opentelemetry.propagate import inject
 
 from koel.common.auth import issue_token
 from koel.common.config import CommonSettings
@@ -35,6 +36,9 @@ class ServiceClients:
         cid = get_correlation_id()
         if cid:
             headers["x-correlation-id"] = cid
+        # Inject W3C trace context (traceparent/tracestate) so the AI-service
+        # spans stitch into the same distributed trace as this turn (PRD §08).
+        inject(headers)
         return headers
 
     # --- STT ---

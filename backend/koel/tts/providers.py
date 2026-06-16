@@ -38,6 +38,28 @@ def _silent_pcm(duration_ms: int) -> bytes:
     return b"\x00\x00" * samples  # 16-bit silence
 
 
+def _ambient_pcm(duration_ms: int, gain: float) -> bytes:
+    """Low-level comfort-noise bed (PRD §06 Ambient Audio Layer).
+
+    Deterministic LCG noise so the bytes are reproducible (no RNG state) and the
+    line carries call-floor texture instead of dead digital silence. In the stub
+    the speech itself is silent, so this bed *is* the audible mix; the real
+    Orpheus provider would sum this under the synthesized voice.
+    """
+    samples = int(_SAMPLE_RATE * duration_ms / 1000)
+    amp = max(0, int(3000 * gain))  # peak amplitude of the bed
+    if amp == 0:
+        return _silent_pcm(duration_ms)
+    out = bytearray()
+    seed = 0x2545F4914F6CDD1D & 0x7FFFFFFF
+    span_ = 2 * amp + 1
+    for _ in range(samples):
+        seed = (1103515245 * seed + 12345) & 0x7FFFFFFF
+        val = (seed % span_) - amp
+        out += int(val).to_bytes(2, "little", signed=True)
+    return bytes(out)
+
+
 class TtsProvider(ABC):
     @abstractmethod
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult: ...
@@ -55,9 +77,13 @@ class StubOrpheusProvider(TtsProvider):
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
         prosody = resolve_prosody(request)
         duration = self._duration_ms(request.text, prosody)
+        if request.ambient and request.ambient_profile:
+            pcm = _ambient_pcm(duration, request.ambient_gain)
+        else:
+            pcm = _silent_pcm(duration)
         return SynthesisResult(
             session_id=request.session_id,
-            audio_b64=base64.b64encode(_silent_pcm(duration)).decode(),
+            audio_b64=base64.b64encode(pcm).decode(),
             duration_ms=duration,
             prosody=prosody,
         )

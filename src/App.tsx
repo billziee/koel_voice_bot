@@ -176,11 +176,14 @@ const TONE_STYLES: Record<Tone, string> = {
 // ============================================================================
 const now = Date.now();
 
+// Named instances mirror the PRD §09 Screen 1 examples (HDFC Credit Card,
+// ICICI Credit Card, Insurance Bot) while keeping all four use cases covered.
 const INITIAL_BOTS: Bot[] = [
-  { id: 'b1', name: 'HDFC Card Cross-Sell', useCase: 'Credit Card', language: 'Hinglish', status: 'Active', calls: 1240, conversionNum: 14.2, conversion: '14.2%', avgDuration: '1m 38s', escalationRate: '9.1%', lastActive: '2 min ago', lastActiveTs: now - 120000 },
-  { id: 'b2', name: 'ICICI Pre-Due Collections', useCase: 'Collections', language: 'Hindi', status: 'Active', calls: 8900, conversionNum: 32.1, conversion: '32.1%', avgDuration: '0m 54s', escalationRate: '4.3%', lastActive: '14 sec ago', lastActiveTs: now - 14000 },
-  { id: 'b3', name: 'MaxLife Term Pitch', useCase: 'Insurance', language: 'English', status: 'Paused', calls: 450, conversionNum: 8.4, conversion: '8.4%', avgDuration: '3m 12s', escalationRate: '18.6%', lastActive: '3 days ago', lastActiveTs: now - 259200000 },
-  { id: 'b4', name: 'Axis Loan Origination', useCase: 'Personal Loan', language: 'Hinglish', status: 'Active', calls: 3200, conversionNum: 21.5, conversion: '21.5%', avgDuration: '2m 05s', escalationRate: '11.8%', lastActive: '1 hr ago', lastActiveTs: now - 3600000 },
+  { id: 'b1', name: 'HDFC Credit Card', useCase: 'Credit Card', language: 'Hinglish', status: 'Active', calls: 1240, conversionNum: 14.2, conversion: '14.2%', avgDuration: '1m 38s', escalationRate: '9.1%', lastActive: '2 min ago', lastActiveTs: now - 120000 },
+  { id: 'b2', name: 'ICICI Credit Card', useCase: 'Credit Card', language: 'Hinglish', status: 'Active', calls: 2110, conversionNum: 12.7, conversion: '12.7%', avgDuration: '1m 51s', escalationRate: '8.4%', lastActive: '40 sec ago', lastActiveTs: now - 40000 },
+  { id: 'b3', name: 'Insurance Bot', useCase: 'Insurance', language: 'English', status: 'Active', calls: 450, conversionNum: 8.4, conversion: '8.4%', avgDuration: '3m 12s', escalationRate: '18.6%', lastActive: '6 min ago', lastActiveTs: now - 360000 },
+  { id: 'b4', name: 'ICICI Pre-Due Collections', useCase: 'Collections', language: 'Hindi', status: 'Active', calls: 8900, conversionNum: 32.1, conversion: '32.1%', avgDuration: '0m 54s', escalationRate: '4.3%', lastActive: '14 sec ago', lastActiveTs: now - 14000 },
+  { id: 'b5', name: 'Axis Loan Origination', useCase: 'Personal Loan', language: 'Hinglish', status: 'Active', calls: 3200, conversionNum: 21.5, conversion: '21.5%', avgDuration: '2m 05s', escalationRate: '11.8%', lastActive: '1 hr ago', lastActiveTs: now - 3600000 },
 ];
 
 // Item 33: offer amount added to Credit Card CRM
@@ -954,8 +957,8 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
                 )}
               </div>
 
-              {/* Stat row */}
-              <div className="grid grid-cols-3 rounded-md overflow-hidden border" style={{ borderColor: theme.ruleSubtle, gap: 1, backgroundColor: theme.ruleSubtle }}>
+              {/* Stat row — calls, conversion, avg duration, escalation (PRD §09 Screen 1) */}
+              <div className="grid grid-cols-4 rounded-md overflow-hidden border" style={{ borderColor: theme.ruleSubtle, gap: 1, backgroundColor: theme.ruleSubtle }}>
                 <div className="py-1.5 px-2.5" style={{ backgroundColor: theme.inset }}>
                   <div className="text-[10.5px] uppercase tracking-wide" style={{ color: theme.faint }}>Calls</div>
                   <div className="text-sm font-medium mt-0.5" style={{ color: theme.ink, fontVariantNumeric: 'tabular-nums' }}>{bot.calls.toLocaleString()}</div>
@@ -967,6 +970,10 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
                 <div className="py-1.5 px-2.5" style={{ backgroundColor: theme.inset }}>
                   <div className="text-[10.5px] uppercase tracking-wide" style={{ color: theme.faint }}>Avg dur</div>
                   <div className="text-sm font-medium mt-0.5" style={{ color: theme.ink, fontVariantNumeric: 'tabular-nums' }}>{bot.avgDuration}</div>
+                </div>
+                <div className="py-1.5 px-2.5" style={{ backgroundColor: theme.inset }}>
+                  <div className="text-[10.5px] uppercase tracking-wide" style={{ color: theme.faint }}>Esc.</div>
+                  <div className="text-sm font-medium mt-0.5" style={{ color: theme.ink, fontVariantNumeric: 'tabular-nums' }}>{bot.escalationRate}</div>
                 </div>
               </div>
 
@@ -1092,6 +1099,9 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const oscillatorRef = useRef<OscillatorNode | null>(null);
+  // Real AnalyserNode tapped off the audio graph so the waveform reflects
+  // actual amplitude/spectrum data, not Math.random() (PRD §09 Screen 3).
+  const analyserRef = useRef<AnalyserNode | null>(null);
 
   // Item 52: Ambient audio loop
   useEffect(() => {
@@ -1120,11 +1130,17 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
           filter.frequency.value = 400;
 
           gain.gain.value = 0.05; // Very subtle
-          
+
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 64;
+
           osc.connect(filter);
           filter.connect(gain);
           gain.connect(ctx.destination);
-          
+          // Tap the post-gain signal into the analyser the visualizer reads.
+          gain.connect(analyser);
+          analyserRef.current = analyser;
+
           osc.start();
           oscillatorRef.current = osc;
         }
@@ -1988,7 +2004,7 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
             <div className="border-t shadow-[0_-10px_40px_rgba(0,0,0,0.05)]" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
               {/* Item 41: larger centered visualizer */}
               <div className="h-24 md:h-28 flex items-center justify-center border-b gap-8" style={{ borderColor: theme.surface }}>
-                <CircularVisualizer state={callState} theme={theme} />
+                <CircularVisualizer state={callState} theme={theme} analyser={analyserRef} />
               </div>
 
               {/* Simulation deck */}
@@ -2138,7 +2154,7 @@ function GuardrailItem({ active, label, pulsing, theme }: { active: boolean; lab
 // ============================================================================
 // Items 9, 28, 41: Amplitude-reactive circular waveform visualiser
 // ============================================================================
-function CircularVisualizer({ state, theme }: { state: CallState; theme: ReturnType<typeof getTheme> }) {
+function CircularVisualizer({ state, theme, analyser }: { state: CallState; theme: ReturnType<typeof getTheme>; analyser?: React.RefObject<AnalyserNode | null> }) {
   const config: Record<string, { color: string; text: string; active: boolean }> = {
     idle: { color: '#CBD5E1', text: 'Connection Idle', active: false },
     connecting: { color: '#94A3B8', text: 'Handshaking…', active: true },
@@ -2160,6 +2176,18 @@ function CircularVisualizer({ state, theme }: { state: CallState; theme: ReturnT
   useEffect(() => {
     if (reducedMotion.current) return;
 
+    // Per-state amplitude gain — applied to real analyser data when available,
+    // otherwise used to drive a graceful fallback animation.
+    const stateGain = (): number => {
+      if (state === 'bot_speaking' || state === 'user_speaking') return 1;
+      if (state === 'escalating') return 0.7;
+      if (state === 'processing' || state === 'connecting' || state === 'reconnecting') return 0.5;
+      if (state === 'listening') return 0.3;
+      return 0.05;
+    };
+
+    const freq = new Uint8Array(bars);
+
     const animate = () => {
       const svg = svgRef.current;
       if (!svg) { rafRef.current = requestAnimationFrame(animate); return; }
@@ -2167,9 +2195,21 @@ function CircularVisualizer({ state, theme }: { state: CallState; theme: ReturnT
       const lines = svg.querySelectorAll('line');
       const amps = amplitudesRef.current;
 
+      // Read real spectrum data off the AnalyserNode when the audio graph is
+      // live; fall back to a per-state synthetic shape otherwise.
+      const node = analyser?.current ?? null;
+      let live = false;
+      if (node) {
+        try { node.getByteFrequencyData(freq); live = true; } catch { live = false; }
+      }
+      const gain = stateGain();
+
       for (let i = 0; i < bars; i++) {
         let target = 0;
-        if (state === 'bot_speaking' || state === 'user_speaking') {
+        if (live) {
+          // 0..255 → bar length, scaled by the call-state gain.
+          target = (freq[i] / 255) * 16 * gain + 0.5;
+        } else if (state === 'bot_speaking' || state === 'user_speaking') {
           target = 4 + Math.random() * 10;
         } else if (state === 'listening') {
           target = 1 + Math.random() * 3;
@@ -2199,7 +2239,7 @@ function CircularVisualizer({ state, theme }: { state: CallState; theme: ReturnT
 
     rafRef.current = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [state, bars]);
+  }, [state, bars, analyser]);
 
   return (
     <div className="flex items-center gap-5">

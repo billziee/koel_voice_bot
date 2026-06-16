@@ -10,19 +10,42 @@ TRAI DND scrub (PRD §11): a DND customer is refused here before any dial.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from koel.common.auth import CurrentUser, issue_token
 from koel.common.errors import ApiError
+from koel.common.logging import get_logger, mask_account, mask_name
 from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.voicebot.deps import Runtime, get_runtime
 from koel.voicebot.session.models import SessionState
 
+logger = get_logger("koel.voicebot.sessions")
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
+
+# DPDP Act §11 data minimisation: load only the CRM attributes each use case
+# actually needs into the session. Use cases not listed here load all attributes.
+_USE_CASE_ATTRS: dict[str, set[str]] = {
+    "credit_card": {
+        "product", "offer_type", "annual_fee_waived", "existing_cards",
+        "bureau_score", "benefits",
+    },
+    "collections": {"outstanding_amount", "due_date", "dpd", "segment", "min_payment"},
+    "personal_loan": {"pre_approved_amount", "tenure_months", "indicative_emi", "interest_rate"},
+    "insurance": {"product", "sum_assured", "annual_premium", "nominee_required", "irdai_disclosures"},
+}
+
+
+def _minimise_attributes(use_case: str, attributes: dict) -> dict:
+    """Keep only use-case-relevant CRM fields (DPDP purpose limitation, §11)."""
+    allowed = _USE_CASE_ATTRS.get(use_case)
+    if allowed is None:
+        return dict(attributes)
+    return {k: v for k, v in attributes.items() if k in allowed}
 
 
 class StartSessionRequest(BaseModel):
@@ -45,6 +68,17 @@ async def start_session(
     user: CurrentUser,
     runtime: Runtime = Depends(get_runtime),
 ) -> StartSessionResponse:
+    # RBI fair-practice calling-hours window (PRD §11). Opt-in via config so
+    # demos run any time; when enabled, out-of-hours dials are refused.
+    if runtime.settings.enforce_calling_hours:
+        hour = datetime.now().hour
+        if not (runtime.settings.calling_hours_start <= hour < runtime.settings.calling_hours_end):
+            raise ApiError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="outside_calling_hours",
+                message="Calls are only permitted within RBI fair-practice hours.",
+            )
+
     async with session_scope() as db:
         bot: BotConfig | None = await db.get(BotConfig, payload.bot_id)
     if bot is None or not bot.active:
@@ -68,7 +102,8 @@ async def start_session(
             "name": customer.name,
             "bank": customer.bank,
             "phone": customer.phone,
-            **customer.attributes,
+            # DPDP §11: only load attributes this use case needs.
+            **_minimise_attributes(bot.use_case.value, customer.attributes),
         }
 
     session_id = uuid.uuid4().hex
@@ -80,6 +115,9 @@ async def start_session(
         default_tone = Tone(bot.default_tone)
     except ValueError:
         default_tone = Tone.neutral
+
+    # Per-bot backchannel overrides for Gate 2 (PRD §05), if configured.
+    backchannels = bot.config.get("backchannels", {}) if isinstance(bot.config, dict) else {}
 
     state = SessionState(
         session_id=session_id,
@@ -94,8 +132,25 @@ async def start_session(
         ambient_profile=bot.ambient_profile,
         greeting_template=bot.greeting_template or "",
         crm_context=crm_context,
+        backchannels=backchannels if isinstance(backchannels, dict) else {},
+        # Intended recording object for the §11/§14 audit trail (30-day S3).
+        recording_url=f"s3://koel-recordings/{session_id}.wav",
     )
     await runtime.store.save(state)
+
+    # Business event with PII masked (PRD §08/§14): name initials + masked id.
+    logger.info(
+        "session_started",
+        extra={
+            "extra_fields": {
+                "session_id": session_id,
+                "bot_id": bot.id,
+                "customer": mask_account(payload.customer_id),
+                "customer_name": mask_name(crm_context.get("name")),
+                "use_case": bot.use_case.value,
+            }
+        },
+    )
 
     return StartSessionResponse(
         session_id=session_id,
