@@ -11,7 +11,7 @@ interfaces.
 |----------------|-------------------------|------|------|
 | VoiceBot_svc   | `koel.voicebot.main`    | 8100 | Orchestrator: session lifecycle, STT→NLP→TTS routing, WebSocket, barge-in, filler, recovery |
 | STT_svc        | `koel.stt.main`         | 8101 | Speech-to-text (Whisper interface; stub provider) |
-| NLP_svc        | `koel.nlp.main`         | 8102 | Intent + RAG-grounded response + tone tag (Bedrock interface; stub provider) |
+| NLP_svc        | `koel.nlp.main`         | 8102 | Intent + RAG-grounded response + tone tag (stub or live Groq inference) |
 | TTS_svc        | `koel.tts.main`         | 8103 | Tone-aware TTS (Orpheus interface; stub provider) |
 | Dummy CRM      | `koel.crm.main`         | 8104 | Synthetic customer records behind the production CRM contract |
 
@@ -135,9 +135,11 @@ An end-to-end audit drove these fixes:
 
 ## Known MVP limitations (by design)
 
-- **AI models are stub providers.** STT/NLP/TTS run deterministic stubs (silent
-  PCM, keyword intent, hash embeddings) behind the real provider interfaces.
-  Whisper/Bedrock/Orpheus/Titan drop in with no orchestrator change.
+- **AI models are stub providers by default.** STT/NLP/TTS run deterministic
+  stubs (silent PCM, keyword intent, hash embeddings) behind the real provider
+  interfaces; Whisper/Orpheus/Titan drop in with no orchestrator change.
+  **NLP can run live**: set `KOEL_NLP_PROVIDER=groq` + `KOEL_GROQ_API_KEY=...`
+  to generate grounded turns via Groq (falls back to the stub on any error).
 - **Ambient audio layer** (§06) is config-only — not mixed into the stub audio.
 - **OTel cross-service stitching** — each service emits manual per-hop spans and
   a shared correlation id links logs, but W3C `traceparent` is not yet propagated

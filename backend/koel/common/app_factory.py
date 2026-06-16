@@ -14,7 +14,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry import context as otel_context
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.propagate import extract
 
 from koel import __version__
 from koel.common.config import CommonSettings, get_common_settings
@@ -74,7 +76,14 @@ def create_app(
         # Honour an inbound correlation id (FE → VB_Svc → AI svc) or mint one.
         cid = request.headers.get(CORRELATION_HEADER) or uuid.uuid4().hex
         set_correlation_id(cid)
-        response = await call_next(request)
+        # Attach any inbound W3C trace context so this service's manual spans
+        # become children of the caller's trace — one stitched distributed
+        # trace across FE → VB_Svc → AI svc (PRD §08).
+        token = otel_context.attach(extract(dict(request.headers)))
+        try:
+            response = await call_next(request)
+        finally:
+            otel_context.detach(token)
         response.headers[CORRELATION_HEADER] = cid
         return response
 

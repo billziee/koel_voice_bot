@@ -6,7 +6,8 @@ state that complicates testing. Accessors raise if used before startup.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 
 from fastapi import Request
 
@@ -26,6 +27,9 @@ class Runtime:
     bargein: BargeInClassifier
     filler: FillerCache
     orchestrator: Orchestrator
+    # Strong refs to detached grace-window finalizers (PRD §05 dropped calls),
+    # so they survive after the WebSocket handler returns.
+    background_tasks: set[asyncio.Task] = field(default_factory=set)
 
 
 def build_runtime(settings: VoiceBotSettings) -> Runtime:

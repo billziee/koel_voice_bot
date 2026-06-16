@@ -50,19 +50,34 @@ class BargeInClassifier:
     def _normalise(text: str) -> str:
         return " ".join(text.lower().strip().split())
 
-    def is_backchannel(self, text: str, language: Language) -> bool:
+    def is_backchannel(
+        self, text: str, language: Language, *, extra: set[str] | None = None
+    ) -> bool:
         norm = self._normalise(text)
         if not norm:
             return True
-        return norm in self._dicts.get(language, set())
+        vocab = self._dicts.get(language, set())
+        if extra:
+            vocab = vocab | extra
+        return norm in vocab
 
     def evaluate(
-        self, *, partial_text: str, speech_duration_ms: int, language: Language
+        self,
+        *,
+        partial_text: str,
+        speech_duration_ms: int,
+        language: Language,
+        extra_backchannels: set[str] | None = None,
     ) -> BargeInDecision:
-        """Gate 2. Called only after Gate 1 fired a BARGE_IN_CANDIDATE."""
+        """Gate 2. Called only after Gate 1 fired a BARGE_IN_CANDIDATE.
+
+        ``extra_backchannels`` lets the caller fold in a per-bot dictionary
+        (PRD §05: "configurable per bot instance and language") on top of the
+        per-language defaults without mutating the shared classifier.
+        """
         # Sub-threshold speech is passive listening, not an interrupt.
         if speech_duration_ms < self._max_ms:
             return BargeInDecision(interrupt=False, reason="too_short")
-        if self.is_backchannel(partial_text, language):
+        if self.is_backchannel(partial_text, language, extra=extra_backchannels):
             return BargeInDecision(interrupt=False, reason="backchannel")
         return BargeInDecision(interrupt=True, reason="sustained_speech")

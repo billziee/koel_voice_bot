@@ -11,7 +11,7 @@ dependencies = [
     "python-jose[cryptography]>=3.3",
     "bcrypt>=4.0",
     "redis>=5.0",
-    "sqlalchemy>=2.0",
+    "sqlalchemy[asyncio]>=2.0",  # [asyncio] pulls greenlet, required by the async engine
     "asyncpg>=0.29",
     "pgvector>=0.2.5",
     "httpx>=0.27",
@@ -27,6 +27,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "aiosqlite>=0.20",  # in-memory SQLAlchemy engine for integration tests
     "ruff>=0.4",
     "mypy>=1.10",
 ]

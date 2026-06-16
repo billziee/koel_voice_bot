@@ -33,6 +33,11 @@ class SynthesizeRequest(BaseModel):
     speaking_rate: float = 1.0  # bot-config override, multiplies tone rate
     # Stream chunks back vs. return a single clip. Streaming enables barge-in.
     stream: bool = True
+    # Ambient audio layer (PRD §06): mix a low-level call-floor bed under the
+    # speech so the line isn't dead-silent. Muted during escalation handoff.
+    ambient: bool = False
+    ambient_profile: str | None = None
+    ambient_gain: float = 0.06  # relative loudness of the bed under speech
 
 
 class SynthesisChunk(BaseModel):

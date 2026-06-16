@@ -4,9 +4,10 @@ PRD §08: distributed traces spanning FE → VB_Svc → AI microservices, every
 request carrying a trace ID, latency measured at each hop so the <300ms turn
 budget (PRD §05) is attributable per service.
 
-Trace context propagates over HTTP automatically via the FastAPI/HTTPX
-instrumentors; for the WebSocket pipeline we create spans manually with the
-``span()`` helper so each turn's STT/NLP/TTS hops are individually timed.
+Trace context propagates over HTTP via explicit W3C inject/extract: outbound
+fan-out calls inject ``traceparent`` (koel.voicebot.clients) and each service's
+correlation middleware extracts it (koel.common.app_factory), so the manual
+``span()`` hops below stitch into one distributed trace across FE → VB_Svc → AI.
 """
 
 from __future__ import annotations
