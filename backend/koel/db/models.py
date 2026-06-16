@@ -1,0 +1,192 @@
+"""SQLAlchemy models — sessions, call logs, transcripts, CRM, RAG knowledge base.
+
+Maps directly onto the PRD §10 action item "Database Schema Design": PostgreSQL
+schema for sessions, call logs, transcripts, and CRM records, plus the pgvector
+knowledge base for RAG.
+
+PII discipline (PRD §14): customer name + account number are stored on CRM
+records (synthetic data only in MVP) but MUST be masked in logs — see
+``koel.common.logging``. Transcripts persist post-call for QA/compliance (§06).
+"""
+
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import UTC, datetime
+
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# Embedding dimension for the RAG store. 1024 matches Bedrock Titan Embeddings v2.
+EMBEDDING_DIM = 1024
+
+
+def _uuid() -> str:
+    return uuid.uuid4().hex
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+# --- Enums shared with the API layer ----------------------------------------
+
+
+class CallDirection(str, enum.Enum):
+    outgoing = "outgoing"
+    incoming = "incoming"
+
+
+class CallOutcome(str, enum.Enum):
+    """Outcome tags written on call end (PRD §05 step 6, §05 resilience table)."""
+
+    converted = "converted"
+    declined = "declined"
+    escalated = "escalated"
+    no_answer = "no_answer"
+    customer_unresponsive = "customer_unresponsive"
+    call_dropped = "call_dropped"
+    unsupported_language = "unsupported_language"
+    in_progress = "in_progress"
+
+
+class UseCase(str, enum.Enum):
+    credit_card = "credit_card"
+    collections = "collections"
+    personal_loan = "personal_loan"
+    insurance = "insurance"
+    custom = "custom"
+
+
+# --- CRM (Dummy CRM, PRD §06 / §10) -----------------------------------------
+
+
+class CrmCustomer(Base):
+    """Synthetic customer record. Real CRM swaps in behind the same contract."""
+
+    __tablename__ = "crm_customers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120))  # PII — mask in logs
+    phone: Mapped[str] = mapped_column(String(20))
+    language: Mapped[str] = mapped_column(String(16), default="hinglish")
+    bank: Mapped[str] = mapped_column(String(80), default="HDFC Bank")
+    use_case: Mapped[UseCase] = mapped_column(Enum(UseCase), default=UseCase.credit_card)
+    # Use-case-specific fields (offer amount, product, DPD, EMI, premium…) kept
+    # as JSON so each use case defines its own schema without migrations (§06).
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)
+    dnd: Mapped[bool] = mapped_column(default=False)  # TRAI DND flag (§11)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# --- Bot configuration (PRD §06 Configuration Panel) ------------------------
+
+
+class BotConfig(Base):
+    """A configured bot instance. The product's moat: new use cases are config."""
+
+    __tablename__ = "bot_configs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120))
+    use_case: Mapped[UseCase] = mapped_column(Enum(UseCase))
+    language: Mapped[str] = mapped_column(String(16), default="hinglish")
+    voice_gender: Mapped[str] = mapped_column(String(16), default="female")
+    speaking_rate: Mapped[float] = mapped_column(Float, default=1.0)
+    greeting_template: Mapped[str] = mapped_column(Text, default="")
+    rag_enabled: Mapped[bool] = mapped_column(default=True)
+    rag_index: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    default_tone: Mapped[str] = mapped_column(String(16), default="neutral")
+    ambient_profile: Mapped[str] = mapped_column(String(16), default="callfloor")
+    # Free-form config: CRM field mapping, escalation rules, success criteria.
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# --- Calls & transcripts ----------------------------------------------------
+
+
+class CallLog(Base):
+    """One row per call. Written on session end (PRD §05 step 6)."""
+
+    __tablename__ = "call_logs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    bot_id: Mapped[str] = mapped_column(ForeignKey("bot_configs.id"))
+    customer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("crm_customers.id"), nullable=True
+    )
+    direction: Mapped[CallDirection] = mapped_column(
+        Enum(CallDirection), default=CallDirection.outgoing
+    )
+    language: Mapped[str] = mapped_column(String(16), default="hinglish")
+    outcome: Mapped[CallOutcome] = mapped_column(
+        Enum(CallOutcome), default=CallOutcome.in_progress
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    escalated: Mapped[bool] = mapped_column(default=False)
+    recording_url: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Latency rollups + consent log + trace id for the §14 NFR dashboards.
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    transcript_turns: Mapped[list[TranscriptTurn]] = relationship(
+        back_populates="call", cascade="all, delete-orphan"
+    )
+
+
+class TranscriptTurn(Base):
+    """A single conversational turn. Persisted for QA, compliance, replay (§06)."""
+
+    __tablename__ = "transcript_turns"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    call_id: Mapped[str] = mapped_column(ForeignKey("call_logs.id"), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer)
+    speaker: Mapped[str] = mapped_column(String(16))  # "bot" | "customer"
+    text: Mapped[str] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    intent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tone: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    interrupted: Mapped[bool] = mapped_column(default=False)  # barge-in (§05)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    call: Mapped[CallLog] = relationship(back_populates="transcript_turns")
+
+
+# --- RAG knowledge base (pgvector) ------------------------------------------
+
+
+class KnowledgeChunk(Base):
+    """Product knowledge, disclosures, objection-handling scripts (PRD §06 RAG)."""
+
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    rag_index: Mapped[str] = mapped_column(String(64), index=True)
+    use_case: Mapped[UseCase] = mapped_column(Enum(UseCase))
+    language: Mapped[str] = mapped_column(String(16), default="en")
+    title: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

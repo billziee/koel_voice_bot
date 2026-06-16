@@ -1,0 +1,110 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&family=Lora:wght@600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* CSS Custom Properties — light / dark theme (Item 61)               */
+/* ------------------------------------------------------------------ */
+:root {
+  --koel-primary: #053BEE;
+  --koel-primary-dark: #032CB8;
+  --koel-primary-light: #E8EDFF;
+  --koel-primary-subtle: #F2F5FF;
+  --koel-surface: #F5F7FA;
+  --koel-surface-card: #FFFFFF;
+  --koel-ink: #000A1B;
+  --koel-ink-2: #3A4150;
+  --koel-ink-muted: #67707F;
+  --koel-faint: #98A0AD;
+  --koel-rule: #E2E6ED;
+  --koel-rule-subtle: #ECEFF4;
+  --koel-accent: #EB5324;
+  --koel-accent-light: #FFF0EB;
+  --koel-green: #05604F;
+  --koel-green-light: #EDFAF4;
+  --koel-green-mid: #2DBD74;
+  --koel-destructive: #D93520;
+  --koel-destructive-light: #FEF2F0;
+  --koel-warning: #8A5800;
+  --koel-warning-light: #FFF7E6;
+  --koel-sidebar-bg: #FFFFFF;
+  --koel-inset: #F8FAFC;
+  --koel-otel-bg: #000A1B;
+  --koel-transcript-bg: #F5F7FA;
+}
+
+.dark {
+  --koel-primary: #7DA2FF;
+  --koel-primary-dark: #A3BFFF;
+  --koel-primary-light: #1E2D5E;
+  --koel-primary-subtle: #0F1A3A;
+  --koel-surface: #0B1120;
+  --koel-surface-card: #111827;
+  --koel-ink: #E5E7EB;
+  --koel-ink-2: #D1D5DB;
+  --koel-ink-muted: #9CA3AF;
+  --koel-faint: #6B7280;
+  --koel-rule: #374151;
+  --koel-rule-subtle: #1F2937;
+  --koel-accent: #F97316;
+  --koel-accent-light: #431407;
+  --koel-green: #34D399;
+  --koel-green-light: #064E3B;
+  --koel-green-mid: #10B981;
+  --koel-destructive: #EF4444;
+  --koel-destructive-light: #450A0A;
+  --koel-warning: #F59E0B;
+  --koel-warning-light: #451A03;
+  --koel-sidebar-bg: #0F172A;
+  --koel-inset: #0F172A;
+  --koel-otel-bg: #020617;
+  --koel-transcript-bg: #0F172A;
+}
+
+/* ------------------------------------------------------------------ */
+/* Entrance animation utilities                                       */
+/* ------------------------------------------------------------------ */
+@layer utilities {
+  .animate-in {
+    animation: koel-fade-in 0.3s ease-out both;
+  }
+  .fade-in {
+    animation-name: koel-fade-in;
+  }
+  .slide-in-from-bottom-2 {
+    animation-name: koel-in-bottom;
+  }
+  .slide-in-from-right-4 {
+    animation-name: koel-in-right;
+  }
+}
+
+@keyframes koel-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes koel-in-bottom {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes koel-in-right {
+  from { opacity: 0; transform: translateX(1rem); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced-motion fallback (Item 56)                                  */
+/* ------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-ping,
+  .animate-in,
+  .fade-in,
+  .slide-in-from-bottom-2,
+  .slide-in-from-right-4 {
+    animation: none !important;
+    transition: none !important;
+  }
+}

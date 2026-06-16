@@ -1,0 +1,74 @@
+"""Shared configuration.
+
+Every setting is environment-driven (12-factor) so the same image runs in dev,
+CI, and the demo box without code changes. Service-specific settings subclass
+``CommonSettings``.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class CommonSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="KOEL_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # --- Environment ---
+    environment: str = "development"  # development | staging | production
+    debug: bool = True
+
+    # --- Data residency (PRD §11: AWS ap-south-1) ---
+    aws_region: str = "ap-south-1"
+
+    # --- Logging (PRD §08 log-level discipline) ---
+    log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
+    log_json: bool = True  # structured JSON logs for Kibana/ES ingestion
+
+    # --- OpenTelemetry (PRD §08 distributed tracing) ---
+    otel_enabled: bool = True
+    otel_exporter_otlp_endpoint: str | None = None  # e.g. http://otel-collector:4317
+    otel_console_export: bool = False  # dump spans to stdout in dev
+    # FastAPI inbound-HTTP auto-instrumentation. Off by default: the current
+    # instrumentor errors on unmatched routes (e.g. CORS preflight OPTIONS).
+    # Manual per-hop spans (koel.common.telemetry.span) provide the latency
+    # tracing the <300ms budget needs regardless. Enable with a fixed lib.
+    otel_instrument_fastapi: bool = False
+
+    # --- Auth (PRD §08: JWT on REST + WebSocket) ---
+    jwt_secret: str = "dev-only-insecure-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_access_ttl_seconds: int = 3600
+    # Short-lived token minted for the WebSocket upgrade specifically.
+    jwt_ws_ttl_seconds: int = 120
+
+    # --- CORS: the React dashboard origin(s) allowed to call the API ---
+    # Comma-separated, or "*" in dev. Bearer-token auth (not cookies) so "*" is safe.
+    cors_allow_origins: str = "*"
+
+    # --- Redis (PRD §08: all session state in Redis with TTL) ---
+    redis_url: str = "redis://localhost:6379/0"
+
+    # --- PostgreSQL + pgvector ---
+    database_url: str = "postgresql+asyncpg://koel:koel@localhost:5432/koel"
+
+    # --- Inter-service base URLs (the orchestrator fans out to these) ---
+    stt_svc_url: str = "http://localhost:8101"
+    nlp_svc_url: str = "http://localhost:8102"
+    tts_svc_url: str = "http://localhost:8103"
+    crm_svc_url: str = "http://localhost:8104"
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+
+@lru_cache
+def get_common_settings() -> CommonSettings:
+    return CommonSettings()

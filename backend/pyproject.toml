@@ -1,0 +1,50 @@
+[project]
+name = "koel-backend"
+version = "1.2.0"
+description = "KOEL Voice Bot — FastAPI backend: orchestrator + STT/NLP/TTS/CRM microservices"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "python-jose[cryptography]>=3.3",
+    "bcrypt>=4.0",
+    "redis>=5.0",
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.29",
+    "pgvector>=0.2.5",
+    "httpx>=0.27",
+    "websockets>=12.0",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "opentelemetry-exporter-otlp>=1.24",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["koel*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+# UP042: we use `(str, Enum)` deliberately for broad serialization compatibility
+# rather than 3.11 StrEnum. B008: FastAPI Depends() in defaults is idiomatic.
+ignore = ["UP042", "B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
