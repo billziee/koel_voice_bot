@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — High-Level Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:8px;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 12px;border-radius:7px;transition:.15s;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs</small></span>
+  <span class="nav-links">
+    <a href="HLD.html" class="active">HLD</a>
+    <a href="LLD.html">LLD</a>
+  </span>
+</nav>
+<main><p class="doc-meta">HLD · KOEL Voice Bot</p><div id="content"><h1 id="koel-voice-bot-high-level-design-hld">KOEL Voice Bot — High-Level Design (HLD)</h1>
+<blockquote>
+<p>Status: reflects the implemented MVP (backend + demo frontend) as validated against
+<code>koel-voice-bot-prd-v1.2.html</code>. Companion document: <a href="./LLD.md">LLD.md</a>.</p>
+</blockquote>
+<hr />
+<h2 id="1-purpose-scope">1. Purpose &amp; scope</h2>
+<p>KOEL is a low-latency, multilingual (English / Hindi / Hinglish) <strong>outbound voice-bot
+platform for Indian financial services</strong> — credit-card cross-sell, pre-due collections,
+personal-loan and insurance pitches. The design thesis (PRD §01) is that <strong>sub-300 ms
+conversational turn latency is the product</strong>; everything else (use case, persona, script,
+CRM mapping) is <em>configuration</em>, not code.</p>
+<p>This HLD covers the system architecture, the major data flows, and the cross-cutting
+concerns (auth, observability, resilience, compliance). Method- and field-level detail is
+in the <a href="./LLD.md">LLD</a>.</p>
+<hr />
+<h2 id="2-goals-non-functional-requirements">2. Goals &amp; non-functional requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Target (PRD §02/§14)</th>
+<th>How the design serves it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Turn latency</td>
+<td>&lt;300 ms P95 (audio-in → audio-out)</td>
+<td>Persistent WebSocket; streaming AI svcs; per-hop OTel spans; pre-rendered filler audio masks slow turns</td>
+</tr>
+<tr>
+<td>Languages</td>
+<td>EN / HI / Hinglish, mid-call switch</td>
+<td>Per-utterance <code>language_id</code>; orchestrator switches <code>state.language</code>; graceful fallback + escalate on unsupported langs</td>
+</tr>
+<tr>
+<td>Intent accuracy</td>
+<td>&gt;85%</td>
+<td>LLM (Groq) classification with forced JSON schema; heuristic stub fallback</td>
+</tr>
+<tr>
+<td>Barge-in stop</td>
+<td>&lt;150 ms confirmed-interrupt → silence</td>
+<td>Dual-gated interruption engine; <code>TTS_KILL</code> over the socket</td>
+</tr>
+<tr>
+<td>Session recovery</td>
+<td>15 s grace, resume by Session ID</td>
+<td>Redis grace-TTL + reconnect path + dropped-call finalizer</td>
+</tr>
+<tr>
+<td>Tone coverage</td>
+<td>100% of NLP turns carry a tone tag</td>
+<td><code>tone</code> is a required field on <code>NlpResponse</code>; TTS maps tone → prosody</td>
+</tr>
+<tr>
+<td>Auth</td>
+<td>100% REST + WS JWT-validated</td>
+<td>JWT bearer on every REST route; short-lived WS token validated <em>before</em> upgrade</td>
+</tr>
+<tr>
+<td>Observability</td>
+<td>Distributed trace FE→VB→AI</td>
+<td>W3C trace-context inject/extract + manual per-hop spans + correlation id</td>
+</tr>
+<tr>
+<td>Statelessness</td>
+<td>No in-memory app state</td>
+<td>All call state in Redis with TTL → horizontal scale, no sticky sessions</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-system-context">3. System context</h2>
+<div class="mermaid">graph LR
+  subgraph Client
+    FE["React dashboard<br/>(Vite SPA)"]
+  end
+  subgraph "VB_Svc :8100 — Orchestrator"
+    VB["VoiceBot_svc<br/>session lifecycle · WS · pipeline"]
+  end
+  subgraph "AI microservices"
+    STT["STT_svc :8101<br/>Whisper (stub)"]
+    NLP["NLP_svc :8102<br/>Groq (real) / stub"]
+    TTS["TTS_svc :8103<br/>Orpheus (stub)"]
+  end
+  CRM["Dummy CRM :8104"]
+  REDIS["Redis<br/>session state"]
+  PG["PostgreSQL + pgvector<br/>calls · transcripts · RAG · bots · customers"]
+  GROQ["Groq API<br/>llama-3.3-70b"]
+
+  FE <-->|"REST + WebSocket (JWT)"| VB
+  VB -->|HTTP svc-to-svc JWT| STT
+  VB -->|HTTP| NLP
+  VB -->|HTTP| TTS
+  VB -->|HTTP| CRM
+  VB <--> REDIS
+  VB --> PG
+  CRM --> PG
+  NLP --> PG
+  NLP -.->|live inference| GROQ
+</div>
+<p>The orchestrator owns the conversation; the AI services are stateless and independently
+swappable. Each AI/CRM call carries a service-to-service JWT and a propagated correlation +
+W3C trace context.</p>
+<hr />
+<h2 id="4-component-responsibilities">4. Component responsibilities</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Module</th>
+<th>Port</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Frontend</strong></td>
+<td><code>src/App.tsx</code> + <code>src/lib/koel.ts</code></td>
+<td>(Vite)</td>
+<td>Login, bot dashboard, config panel, <strong>active-call</strong> (WS, transcript, waveform, CRM panel, state badge), call history. Real WS client with a simulated demo fallback.</td>
+</tr>
+<tr>
+<td><strong>VoiceBot_svc</strong></td>
+<td><code>koel/voicebot/*</code></td>
+<td>8100</td>
+<td>The orchestration brain: REST API (auth, bots, sessions, history), authenticated WebSocket call socket, the per-turn pipeline (STT→NLP→TTS), barge-in, filler, silence, reconnect/grace, persistence.</td>
+</tr>
+<tr>
+<td><strong>STT_svc</strong></td>
+<td><code>koel/stt/*</code></td>
+<td>8101</td>
+<td>Speech→text; returns <code>language_id</code> + confidence per utterance. Stub provider (real Whisper/SageMaker is a <code>NotImplementedError</code> seam).</td>
+</tr>
+<tr>
+<td><strong>NLP_svc</strong></td>
+<td><code>koel/nlp/*</code></td>
+<td>8102</td>
+<td>Intent + RAG-grounded response + tone tag. <strong>Real Groq provider</strong> (OpenAI-compatible, JSON mode) selectable via config; deterministic stub otherwise.</td>
+</tr>
+<tr>
+<td><strong>TTS_svc</strong></td>
+<td><code>koel/tts/*</code></td>
+<td>8103</td>
+<td>Tone→prosody synthesis + ambient bed. Stub emits sized PCM; real Orpheus is a seam.</td>
+</tr>
+<tr>
+<td><strong>Dummy CRM</strong></td>
+<td><code>koel/crm/*</code></td>
+<td>8104</td>
+<td>Synthetic customer records behind the production CRM contract; flags (DND/opt-out/callback/retry).</td>
+</tr>
+<tr>
+<td><strong>Shared core</strong></td>
+<td><code>koel/common/*</code>, <code>koel/db/*</code></td>
+<td>—</td>
+<td><code>create_app</code> factory, JWT auth, config, structured logging, OTel, error envelope, SQLAlchemy models + session.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-technology-stack">5. Technology stack</h2>
+<ul>
+<li><strong>Backend:</strong> Python 3.11, FastAPI (async, native WebSocket), Pydantic v2 / pydantic-settings.</li>
+<li><strong>Transport:</strong> WebSocket (full-duplex, JSON envelopes, base64 audio) + REST (Richardson L2).</li>
+<li><strong>AI:</strong> Groq <code>llama-3.3-70b-versatile</code> (live NLP); Whisper / Orpheus / Bedrock-Titan are interface seams (stubbed in MVP).</li>
+<li><strong>State:</strong> Redis (session state, TTL). <strong>Data:</strong> PostgreSQL 16 + pgvector (calls, transcripts, bots, customers, RAG knowledge).</li>
+<li><strong>Observability:</strong> OpenTelemetry (manual per-hop spans + W3C propagation), structured JSON logs with correlation id.</li>
+<li><strong>Frontend:</strong> React 18 + Vite + Tailwind, lucide-react.</li>
+<li><strong>Infra (dev):</strong> Docker Compose (Colima-compatible) — Postgres + Redis + 5 services from one image. Prod target (PRD): AWS ap-south-1, EC2 + SageMaker.</li>
+</ul>
+<hr />
+<h2 id="6-key-data-flows">6. Key data flows</h2>
+<h3 id="61-outbound-call-happy-path">6.1 Outbound call — happy path</h3>
+<div class="mermaid">sequenceDiagram
+  participant FE
+  participant VB as VB_Svc
+  participant CRM
+  participant STT
+  participant NLP
+  participant TTS
+  participant R as Redis
+  participant PG as Postgres
+
+  FE->>VB: POST /v1/auth/login → access token
+  FE->>VB: POST /v1/sessions (bot_id, customer_id)
+  VB->>CRM: GET /customers/{id}
+  CRM-->>VB: record (DND? attributes)
+  VB->>R: save SessionState (DPDP-minimised CRM ctx)
+  VB-->>FE: session_id + ws_token
+  FE->>VB: WS connect /ws/calls/{id}?token=...
+  VB->>VB: authenticate (JWT, owner check)
+  VB->>TTS: synthesize greeting (+disclosure, ambient)
+  VB-->>FE: transcript + audio_chunk (greeting)
+  loop each customer turn
+    FE->>VB: audio_chunk (is_final)
+    VB->>STT: transcribe
+    STT-->>VB: text + language_id + confidence
+    VB->>NLP: respond (ctx: CRM + RAG + history)
+    Note over VB,TTS: if NLP > filler_trigger_ms → inject filler clip
+    NLP-->>VB: response_text + intent + tone + flags
+    VB->>TTS: synthesize (tone→prosody, ambient)
+    VB-->>FE: transcript + audio_chunk
+  end
+  VB->>PG: persist_call (transcript, outcome, metrics)
+  VB->>R: delete session
+  VB-->>FE: call_ended (outcome)
+</div>
+<h3 id="62-conversation-resilience-flows-prd-05">6.2 Conversation-resilience flows (PRD §05)</h3>
+<ul>
+<li><strong>Barge-in (dual gate):</strong> Gate 1 = client VAD → <code>barge_in_candidate</code>. Gate 2 = VB classifies the partial transcript: &lt;300 ms or matches the (per-language + per-bot) backchannel dictionary → ignore; else <code>TTS_KILL</code> (carrying <code>stop_target_ms</code>), mark the bot turn <code>interrupted</code>, route the utterance as the active turn.</li>
+<li><strong>Filler:</strong> if NLP hasn't returned within <code>filler_trigger_ms</code> (300 ms), a pre-rendered, language+tone-matched clip is injected (rotated, never twice consecutively) to mask latency.</li>
+<li><strong>No-input:</strong> 5 s silence → re-prompt (<code>NO_INPUT_1</code> logged); a further 5 s → close as <code>customer_unresponsive</code>, CRM flagged <code>retry</code>. The timer is <strong>independent of heartbeat pongs</strong> (only real client frames reset it).</li>
+<li><strong>Disconnect / reconnect:</strong> socket drop → status <code>reconnecting</code>, Redis TTL shortened to 15 s. Reconnect with same Session ID within the window → resume + <code>RECONNECTED</code> span. <strong>No reconnect → a detached finalizer records <code>call_dropped</code>, persists the partial transcript, and flags the CRM for callback.</strong></li>
+<li><strong>Heartbeat:</strong> ping every 5 s; if no pong within ~12 s the peer is declared dead and routed onto the grace path.</li>
+<li><strong>Language fallback:</strong> unsupported language above confidence threshold → apology in Hindi/English + immediate escalation, session tagged <code>unsupported_language</code>.</li>
+</ul>
+<div class="mermaid">stateDiagram-v2
+  [*] --> connecting
+  connecting --> bot_speaking: greet
+  bot_speaking --> listening
+  listening --> processing: final transcript
+  processing --> bot_speaking: NLP+TTS
+  listening --> escalating: human/high-intent/unsupported-lang
+  bot_speaking --> reconnecting: socket drop
+  listening --> reconnecting: socket drop
+  reconnecting --> listening: reconnect ≤15s
+  reconnecting --> ended: grace expiry → call_dropped
+  processing --> ended: opt-out / end / no-input
+  escalating --> ended
+  ended --> [*]
+</div>
+<hr />
+<h2 id="7-cross-cutting-concerns">7. Cross-cutting concerns</h2>
+<ul>
+<li><strong>Authentication &amp; authZ:</strong> JWT bearer on every REST route; a separate short-lived <strong>WS token</strong> validated <em>before</em> the socket upgrades (1008 on failure); the WS token's <code>sub</code> must own the session (no eavesdropping). Internal AI/CRM calls require a <code>role=service</code> principal. Production fails fast if the default JWT secret is unchanged.</li>
+<li><strong>Observability:</strong> every service inherits <code>/health</code>, <code>/docs</code>, structured JSON logs (level + correlation id), and OTel. The orchestrator emits manual spans per hop (<code>nlp.respond</code>, <code>tts.synthesize</code>, <code>ws.reconnected</code>…); W3C <code>traceparent</code> is injected on fan-out and extracted inbound so spans stitch into one trace. <code>trace_id</code> is persisted on each call.</li>
+<li><strong>Configuration:</strong> 12-factor, all <code>KOEL_</code>-prefixed env vars. The same image runs dev/CI/demo; behaviour (thresholds, provider selection, calling hours) is config.</li>
+<li><strong>Error handling:</strong> one shared error envelope (<code>{code, message, detail, correlation_id}</code>); 4xx = WARN, unhandled = 500 ERROR; AI-call failures inside a turn never crash the socket — they surface an error frame and finalize once.</li>
+<li><strong>Session lifecycle:</strong> all call state lives in <code>SessionState</code> in Redis (TTL), serialized on every mutation → any VB instance can resume a re-bound socket.</li>
+</ul>
+<hr />
+<h2 id="8-deployment-view">8. Deployment view</h2>
+<div class="mermaid">graph TB
+  subgraph "docker-compose (dev/demo)"
+    direction TB
+    PG[(postgres:5432<br/>pgvector/pg16)]
+    RE[(redis:7)]
+    IMG["koel-backend:latest (one image)"]
+    IMG --> S1[stt:8101]
+    IMG --> S2[nlp:8102]
+    IMG --> S3[tts:8103]
+    IMG --> S4[crm:8104]
+    IMG --> S5[voicebot:8100]
+  end
+  S5 --> PG & RE
+  S2 & S4 --> PG
+</div>
+<ul>
+<li>One image, five <code>uvicorn</code> entrypoints (module per service). <code>scripts/bootstrap_db.py</code> creates tables + pgvector extension and seeds CRM + bots + RAG (idempotent). <code>scripts/demo_call.py</code> / <code>demo_resilience.py</code> drive live calls.</li>
+<li><strong>Production target (PRD):</strong> AWS ap-south-1 (data residency), EC2 for app services, SageMaker GPU endpoints for Whisper/Orpheus, managed Bedrock or Groq for NLP, S3 for recordings (30-day retention).</li>
+</ul>
+<hr />
+<h2 id="9-compliance-security-posture-prd-11">9. Compliance &amp; security posture (PRD §11)</h2>
+<ul>
+<li><strong>RBI:</strong> bot self-identifies the bank + automated-call disclosure at greeting; opt-in calling-hours window refuses out-of-hours dials.</li>
+<li><strong>IRDAI:</strong> automated disclosure spoken; consent captured with a <strong>timestamp</strong>; escalation to a human for binding steps.</li>
+<li><strong>DPDP:</strong> consent at call open; <strong>data minimisation</strong> (only use-case-relevant CRM fields loaded into the session); PII (name) masked in logs.</li>
+<li><strong>TRAI:</strong> DND scrub <em>before</em> dialling (409); opt-out <strong>immediately</strong> flags the CRM and ends the call.</li>
+<li><strong>Auditability:</strong> per call — transcript, outcome, consent (+timestamp), <code>recording_url</code>, and <code>trace_id</code> persisted; correlation id links logs across hops.</li>
+</ul>
+<hr />
+<h2 id="10-scalability-resilience">10. Scalability &amp; resilience</h2>
+<ul>
+<li><strong>Stateless services</strong> + Redis-held session → horizontal scaling without sticky sessions; a reconnect can land on any VB instance.</li>
+<li><strong>Graceful degradation everywhere:</strong> RAG retrieval, filler, Groq NLP, and the CRM flag are all best-effort — failures degrade (stub / skip / log) rather than drop the call.</li>
+<li><strong>Exactly-once finalization</strong> of every call (in-band end, service error, or grace-expiry drop) → no lost transcripts.</li>
+<li><strong>Provider isolation:</strong> STT/NLP/TTS behind stable contracts → swap Groq↔Bedrock, stub↔Whisper with no orchestrator change.</li>
+</ul>
+<hr />
+<h2 id="11-current-state-real-vs-stub">11. Current state — real vs. stub</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NLP (intent/response/tone)</td>
+<td><strong>Real Groq</strong> (<code>llama-3.3-70b</code>), config-gated, stub fallback</td>
+</tr>
+<tr>
+<td>RAG retrieval</td>
+<td>Real pgvector query; <strong>HashEmbedder</strong> stub embeddings</td>
+</tr>
+<tr>
+<td>STT</td>
+<td>Stub (type-to-talk); real Whisper is a seam</td>
+</tr>
+<tr>
+<td>TTS</td>
+<td>Stub (sized PCM + ambient bed); real Orpheus is a seam</td>
+</tr>
+<tr>
+<td>Orchestration, resilience, auth, compliance, observability</td>
+<td><strong>Fully implemented &amp; tested</strong> (37 tests; verified live)</td>
+</tr>
+<tr>
+<td>Frontend</td>
+<td>Full SPA; real WS client; default demo path is simulated; type-to-talk (no mic)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-risks-future-work">12. Risks &amp; future work</h2>
+<ul>
+<li><strong>Real audio path:</strong> browser mic capture + real Whisper STT + real Orpheus TTS streaming (the current frontend sends type-to-talk text).</li>
+<li><strong>RAG quality:</strong> swap <code>HashEmbedder</code> for Bedrock Titan / a real embedding model.</li>
+<li><strong>Telephony:</strong> Twilio/Exotel bridge for real PSTN calls (the orchestrator is transport-agnostic by design).</li>
+<li><strong>Horizontal hardening:</strong> Redis keyspace-notification-driven finalizer (today a per-connection detached task), multi-tenant bot management, load testing to the 10-concurrent-session demo target.</li>
+</ul></div></main>
+<footer>Generated from <code>docs/HLD.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  // Prose/tables are static HTML (offline-readable); only diagrams need JS.
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>

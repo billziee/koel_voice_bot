@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — Low-Level Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:8px;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 12px;border-radius:7px;transition:.15s;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs</small></span>
+  <span class="nav-links">
+    <a href="HLD.html">HLD</a>
+    <a href="LLD.html" class="active">LLD</a>
+  </span>
+</nav>
+<main><p class="doc-meta">LLD · KOEL Voice Bot</p><div id="content"><h1 id="koel-voice-bot-low-level-design-lld">KOEL Voice Bot — Low-Level Design (LLD)</h1>
+<blockquote>
+<p>Code-level design for the implemented MVP. Companion: <a href="./HLD.md">HLD.md</a>.
+Paths are relative to <code>backend/</code> unless noted. Line references are indicative.</p>
+</blockquote>
+<hr />
+<h2 id="1-module-layout">1. Module layout</h2>
+<pre><code>backend/koel/
+├── common/              # shared infrastructure (inherited by every service)
+│   ├── app_factory.py   # create_app(): docs, OTel, CORS, correlation+trace mw, /health
+│   ├── auth.py          # JWT issue/decode, REST dep, WS auth, service principal
+│   ├── config.py        # CommonSettings (KOEL_-prefixed, .env)
+│   ├── logging.py       # JSON/console formatters, correlation ContextVar, PII masks
+│   ├── telemetry.py     # OTel provider, span() ctx-mgr, current_trace_id()
+│   ├── errors.py        # ApiError + envelope + exception handlers
+│   └── schemas.py       # HealthResponse, Language, Tone enums
+├── db/
+│   ├── models.py        # SQLAlchemy: CrmCustomer, BotConfig, CallLog, TranscriptTurn, KnowledgeChunk
+│   └── session.py       # async engine, sessionmaker, session_scope()
+├── voicebot/            # VB_Svc — the orchestrator (port 8100)
+│   ├── main.py          # app, lifespan (runtime + filler warm), WS endpoint
+│   ├── config.py        # VoiceBotSettings (resilience thresholds)
+│   ├── deps.py          # Runtime dataclass + build_runtime + get_runtime
+│   ├── clients.py       # ServiceClients (httpx, svc-JWT, trace inject)
+│   ├── persistence.py   # persist_call() → Postgres
+│   ├── api/             # auth.py, bots.py, sessions.py, history.py (REST)
+│   ├── ws/              # protocol.py (message envelopes), handler.py (CallSession)
+│   ├── session/         # models.py (SessionState/Turn/CallStatus), store.py (Redis)
+│   └── pipeline/        # orchestrator.py, bargein.py, filler.py, silence.py
+├── stt/  nlp/  tts/     # AI microservices (main + providers + schemas; nlp also config + rag)
+└── crm/                 # Dummy CRM (main + schemas + seed)
+</code></pre>
+<hr />
+<h2 id="2-shared-core-koelcommon">2. Shared core (<code>koel/common</code>)</h2>
+<h3 id="21-app_factorycreate_app">2.1 <code>app_factory.create_app(...)</code></h3>
+<p>Single entry point every service builds on. Wires uniformly:
+- OpenAPI at <code>/docs</code>, <code>/redoc</code>, <code>/openapi.json</code>; <code>/health</code> (<code>HealthResponse</code>).
+- <strong>Correlation + trace middleware</strong> (outermost after CORS): reads/mints <code>x-correlation-id</code>, sets the <code>ContextVar</code>, and <code>otel_context.attach(extract(headers))</code> so downstream manual spans are children of the caller's trace; detaches in <code>finally</code>.
+- CORS (Bearer auth → <code>*</code> safe in dev), exception handlers, OTel resource.
+- <strong>Fail-fast:</strong> raises in production if <code>jwt_secret</code> is the dev default.
+- Accepts a custom <code>lifespan</code> (VB_Svc uses it to build the <code>Runtime</code> and warm the filler cache).</p>
+<h3 id="22-authpy">2.2 <code>auth.py</code></h3>
+<ul>
+<li><code>TokenClaims{ sub, kind, role, iat, exp, jti }</code>; <code>TokenKind = "access" | "ws"</code>.</li>
+<li><code>issue_token(subject, *, kind, role="operator", settings=None)</code> — HS256; TTL = <code>jwt_access_ttl_seconds</code> (3600) or <code>jwt_ws_ttl_seconds</code> (120).</li>
+<li><code>decode_token(...)</code> validates signature + <code>kind</code>; raises <code>ApiError(401)</code> on mismatch.</li>
+<li><code>require_access_token</code> (REST dep) → <code>CurrentUser</code> (Annotated). <code>require_service_principal</code> enforces <code>role=="service"</code> for AI/CRM endpoints (<code>ServicePrincipal</code>).</li>
+<li><code>authenticate_websocket(ws)</code> — validates the <code>?token=</code> query param as a <code>ws</code> token <strong>before</strong> <code>accept()</code>; closes 1008 on failure; returns claims.</li>
+</ul>
+<h3 id="23-loggingpy">2.3 <code>logging.py</code></h3>
+<ul>
+<li><code>_JsonFormatter</code> emits <code>{ts, level, logger, message, correlation_id, **extra_fields}</code>; <code>configure_logging</code> is idempotent.</li>
+<li>Correlation id in a <code>ContextVar</code> (set per request by middleware, per session by the WS handler).</li>
+<li>PII masks: <code>mask_name("Rahul Sharma") → "R. S."</code>, <code>mask_account(x) → "****1234"</code>.</li>
+</ul>
+<h3 id="24-telemetrypy">2.4 <code>telemetry.py</code></h3>
+<ul>
+<li><code>configure_telemetry</code> installs a <code>TracerProvider</code> once per process (OTLP exporter if <code>otel_exporter_otlp_endpoint</code>; console if <code>otel_console_export</code>).</li>
+<li><code>span(name, **attrs)</code> — context manager that records exceptions + sets error status.</li>
+<li><code>current_trace_id()</code> → 32-hex of the active span (persisted on the call).</li>
+</ul>
+<h3 id="25-errorspy">2.5 <code>errors.py</code></h3>
+<p><code>ApiError(status_code, code, message, detail)</code> → envelope <code>{code, message, detail, correlation_id}</code>. Handlers: <code>ApiError</code>→its status (WARN), <code>RequestValidationError</code>→422, catch-all→500 (ERROR).</p>
+<hr />
+<h2 id="3-data-model-koeldbmodelspy">3. Data model (<code>koel/db/models.py</code>)</h2>
+<div class="mermaid">erDiagram
+  CrmCustomer ||--o{ CallLog : "customer_id (nullable)"
+  BotConfig   ||--o{ CallLog : "bot_id"
+  CallLog     ||--o{ TranscriptTurn : "call_id (cascade)"
+  KnowledgeChunk }o--|| BotConfig : "rag_index (logical)"
+
+  CrmCustomer {
+    str id PK
+    str name "PII — mask in logs"
+    str phone
+    str language
+    str bank
+    enum use_case
+    json attributes "use-case fields + flags[]"
+    bool dnd
+  }
+  BotConfig {
+    str id PK
+    str name
+    enum use_case
+    str language
+    str voice_gender
+    float speaking_rate
+    text greeting_template
+    bool rag_enabled
+    str rag_index
+    str default_tone
+    str ambient_profile
+    json config "CRM mapping, backchannels, rules"
+    bool active
+  }
+  CallLog {
+    str id PK
+    str session_id
+    str bot_id FK
+    str customer_id FK
+    enum direction
+    str language
+    enum outcome
+    datetime started_at
+    datetime ended_at
+    int duration_ms
+    bool escalated
+    str recording_url
+    json metrics "turns, consent_captured, consent_at, trace_id"
+  }
+  TranscriptTurn {
+    str id PK
+    str call_id FK
+    int turn_index
+    str speaker "bot|customer"
+    text text
+    str language
+    str intent
+    str tone
+    bool interrupted
+    float confidence
+  }
+  KnowledgeChunk {
+    str id PK
+    str rag_index
+    enum use_case
+    str language
+    str title
+    text content
+    vector embedding "1024-d (pgvector)"
+  }
+</div>
+<ul>
+<li><code>CallOutcome</code> enum: <code>converted, declined, escalated, no_answer, customer_unresponsive, call_dropped, unsupported_language, in_progress</code>.</li>
+<li><code>UseCase</code>: <code>credit_card, collections, personal_loan, insurance, custom</code>.</li>
+<li><code>session.py</code>: <code>get_engine()</code>/<code>get_sessionmaker()</code> (lru-cached); <code>session_scope()</code> async ctx-mgr (commit on success, rollback on error). Tests monkeypatch <code>get_sessionmaker</code> to an in-memory SQLite maker.</li>
+</ul>
+<hr />
+<h2 id="4-websocket-protocol-voicebotwsprotocolpy">4. WebSocket protocol (<code>voicebot/ws/protocol.py</code>)</h2>
+<p>JSON envelopes; <code>ServerMessage.of(type, **data)</code> packs kwargs into <code>data</code>.</p>
+<p><strong>Client → Server (<code>ClientMessageType</code>):</strong>
+| type | payload | meaning |
+|---|---|---|
+| <code>audio_chunk</code> | <code>audio_b64, is_final, sample_rate</code> | streamed mic audio (final = end-of-utterance) |
+| <code>barge_in_candidate</code> | <code>data{partial_text, speech_duration_ms, language}</code> | Gate-1 VAD fired while bot spoke |
+| <code>pong</code> | — | heartbeat reply (does NOT reset no-input) |
+| <code>end_call</code> | — | user hung up |</p>
+<p><strong>Server → Client (<code>ServerMessageType</code>):</strong>
+| type | key <code>data</code> fields |
+|---|---|
+| <code>call_state</code> | <code>status</code>, optional <code>reason</code>, escalation <code>transcript</code>+<code>crm_context</code> |
+| <code>transcript</code> | <code>speaker, text, tone?, index</code> |
+| <code>audio_chunk</code> | <code>audio_b64, duration_ms, index</code> |
+| <code>tts_kill</code> | <code>reason, stop_target_ms</code> |
+| <code>filler</code> | <code>text, audio_b64, tone</code> |
+| <code>reconnected</code> | <code>text, last_turn</code> |
+| <code>ping</code> | — |
+| <code>error</code> | <code>code, message</code> |
+| <code>call_ended</code> | <code>outcome, escalated, turns</code> |</p>
+<hr />
+<h2 id="5-session-state-store-voicebotsession">5. Session state &amp; store (<code>voicebot/session</code>)</h2>
+<h3 id="51-sessionstate-pydantic-serialized-to-redis-on-every-mutation">5.1 <code>SessionState</code> (Pydantic, serialized to Redis on every mutation)</h3>
+<p>Identity: <code>session_id, bot_id, owner_sub, customer_id, use_case</code>. Config snapshot: <code>language, rag_enabled, rag_index, default_tone, ambient_profile, greeting_template, backchannels{lang:[...]}</code>. Runtime: <code>status (CallStatus), crm_context, transcript[Turn], last_confirmed_turn_index, no_input_strikes, escalated, outcome</code>. Audit: <code>consent_captured, consent_at, recording_url, trace_id</code>. Helpers: <code>add_turn</code>, <code>next_turn_index</code>, <code>recent_history(limit=8)</code>.</p>
+<p><code>Turn{ index, speaker, text, language, intent, tone, interrupted, confidence, at }</code>.</p>
+<p><code>CallStatus</code>: <code>connecting · bot_speaking · listening · processing · escalating · reconnecting · ended</code>.</p>
+<h3 id="52-redissessionstore-storepy">5.2 <code>RedisSessionStore</code> (<code>store.py</code>)</h3>
+<p>Key <code>koel:session:{id}</code>. <code>save</code> (active TTL 3600 s), <code>load</code>, <code>begin_grace</code> (TTL→15 s on disconnect), <code>restore_active_ttl</code> (on reconnect; False if already expired), <code>delete</code>, <code>ping</code>.</p>
+<hr />
+<h2 id="6-the-orchestrator-voicebotpipelineorchestratorpy">6. The orchestrator (<code>voicebot/pipeline/orchestrator.py</code>)</h2>
+<p>Transport-agnostic: takes a <code>send: ServerMessage → Awaitable</code> callback.</p>
+<ul>
+<li><strong><code>greet(state, send)</code></strong> — render <code>greeting_template</code> with CRM fields (<code>_render_template</code> fills <code>{key}</code>/<code>{customer.key}</code>/<code>{offer.key}</code>), force the automated-call disclosure, send the turn, set <code>consent_captured=True</code> + <code>consent_at=now</code>, → <code>listening</code>.</li>
+<li><strong><code>_send_bot_turn(state, send, *, text, tone, intent=None, ambient=True)</code></strong> — append <code>Turn</code>, emit <code>call_state(bot_speaking)</code> + <code>transcript</code>, capture <code>trace_id</code> (first turn), call TTS (tone→prosody, ambient bed unless muted), emit <code>audio_chunk</code>.</li>
+<li><strong><code>handle_final_transcript(state, send, stt)</code></strong> — reset no-input; append customer turn; <strong>language fallback</strong> (<code>_is_unsupported_language</code> → <code>_escalate_unsupported_language</code>, ambient muted); mid-call language switch (supported only); <code>processing</code>; <strong><code>_respond_with_filler</code></strong>; intent control flow.</li>
+<li><strong><code>_respond_with_filler</code></strong> — <code>asyncio.wait_for(shield(nlp_task), timeout=filler_trigger_ms)</code>; on timeout inject a filler clip then await NLP.</li>
+<li><strong>Intent control flow:</strong> <code>opt_out</code> → flag CRM + one ack + <strong>end immediately</strong>; <code>busy</code> → flag <code>callback</code>; then send the turn; <code>escalate</code> → <code>_escalate</code> (full-context handoff, <code>outcome=escalated</code>); <code>end_call</code> → <code>converted</code> if positive intent else <code>declined</code>.</li>
+</ul>
+<div class="mermaid">flowchart TD
+  A[final transcript] --> B{unsupported lang?}
+  B -- yes --> Z[apologise + escalate + tag]
+  B -- no --> C[switch lang if supported]
+  C --> D[processing]
+  D --> E[NLP race vs filler]
+  E --> F{intent}
+  F -- opt_out --> G[flag CRM + ack + END]
+  F -- busy --> H[flag callback]
+  F -- other --> I[send bot turn]
+  H --> I
+  I --> J{escalate?}
+  J -- yes --> K[full-context handoff + END]
+  J -- no --> L{end_call?}
+  L -- yes --> M[converted/declined END]
+  L -- no --> N[listening]
+</div>
+<h3 id="61-pipeline-sub-modules">6.1 Pipeline sub-modules</h3>
+<ul>
+<li><strong><code>bargein.BargeInClassifier</code></strong> — <code>evaluate(partial_text, speech_duration_ms, language, extra_backchannels=None)</code> → <code>BargeInDecision(interrupt, reason)</code>. Rules: <code>&lt; backchannel_max_speech_ms</code> → <code>too_short</code>; normalised text ∈ (per-language dict ∪ per-bot <code>extra</code>) → <code>backchannel</code>; else <code>sustained_speech</code> (interrupt). Default dictionaries per EN/HI/Hinglish.</li>
+<li><strong><code>filler.FillerCache</code></strong> — <code>load(language, clips)</code> (warmed at startup), <code>next_clip(session_id, language)</code> rotates and never repeats consecutively (per-session cursor); <code>filler_tone_for(use_case)</code>.</li>
+<li><strong><code>silence.on_no_input(strikes, language)</code></strong> → <code>NoInputOutcome(action, text, event)</code>: strikes 0 → <code>reprompt</code>/<code>NO_INPUT_1</code>; ≥1 → <code>close</code>/<code>customer_unresponsive</code>. Localised prompt/close text.</li>
+</ul>
+<hr />
+<h2 id="7-websocket-handler-callsession-voicebotwshandlerpy">7. WebSocket handler — <code>CallSession</code> (<code>voicebot/ws/handler.py</code>)</h2>
+<p>Owns one socket bound to one <code>SessionState</code>. Concurrency: a <code>_send_lock</code>; a heartbeat task; detached finalizer tasks held on <code>Runtime.background_tasks</code>.</p>
+<p><strong><code>run()</code></strong> → <code>accept()</code>; if <code>resumed</code> emit <code>RECONNECTED</code> inside a <code>ws.reconnected</code> span; else <code>greet</code>; persist; start <code>_heartbeat_loop</code>; <code>_receive_loop</code>; on <code>WebSocketDisconnect</code> → <code>_on_disconnect</code>.</p>
+<p><strong><code>_receive_loop()</code></strong> — deadline-based no-input timer:</p>
+<pre><code class="language-python">window_ms = no_input_reprompt_ms if strikes == 0 else no_input_close_ms
+remaining = (self._last_input_at + window_ms/1000) - time.monotonic()
+if remaining &lt;= 0: await self._handle_no_input(); continue
+raw = await wait_for(ws.receive_text(), timeout=remaining)
+... if msg.type != pong: self._last_input_at = time.monotonic()   # pongs are NOT input
+</code></pre>
+<p>AI/turn errors → <code>_fail_call</code> (error frame + finalize once, never crash the socket).</p>
+<p><strong><code>_handle_barge_in(msg)</code></strong> — only while <code>_bot_speaking</code>; fold per-bot <code>backchannels[lang]</code> into <code>extra_backchannels</code>; on interrupt clear speaking, mark last bot turn <code>interrupted</code>, send <code>tts_kill(reason, stop_target_ms)</code>.</p>
+<p><strong><code>_handle_no_input()</code></strong> — log <code>outcome.event</code>; reprompt branch increments strikes + <strong>resets <code>_last_input_at</code></strong> (fresh close window) + sends re-prompt; close branch → <code>customer_unresponsive</code>, CRM <code>retry</code>, <code>end_call</code>.</p>
+<p><strong><code>_heartbeat_loop()</code></strong> — every 5 s send <code>ping</code>; if <code>now - _last_pong &gt; heartbeat_timeout_seconds</code> (12 s) close 1001 → receive loop raises → grace path.</p>
+<p><strong><code>_on_disconnect()</code></strong> (idempotent) — if <code>ended</code> → finalize; else <code>reconnecting</code> + <code>begin_grace</code> + schedule <strong><code>_await_grace_then_finalize</code></strong>.</p>
+<p><strong><code>_await_grace_then_finalize()</code></strong> — <code>sleep(grace_ttl)</code>; reload from store; if status moved off <code>reconnecting</code> → a reconnect owns it, return; else set <code>call_dropped</code>, flag CRM <code>callback</code>, <code>_finalize</code>.</p>
+<p><strong><code>_finalize()</code></strong> — exactly-once: <code>persist_call(state)</code>; on success <code>store.delete</code>; else leave on TTL for retry.</p>
+<div class="mermaid">sequenceDiagram
+  participant FE
+  participant VB as CallSession
+  participant R as Redis
+  participant PG
+  FE--xVB: socket drops
+  VB->>R: status=reconnecting, begin_grace(15s)
+  VB->>VB: schedule _await_grace_then_finalize (detached)
+  alt reconnect ≤ 15s
+    FE->>VB: WS reconnect (same id)
+    VB->>R: restore_active_ttl, status=listening
+    VB-->>FE: RECONNECTED (span)
+    Note over VB: finalizer wakes, sees status≠reconnecting → no-op
+  else no reconnect
+    Note over VB: finalizer wakes after 15s
+    VB->>PG: persist_call(outcome=call_dropped)
+    VB->>R: delete, flag CRM=callback
+  end
+</div>
+<hr />
+<h2 id="8-ai-microservices">8. AI microservices</h2>
+<h3 id="81-nlp-koelnlp">8.1 NLP (<code>koel/nlp</code>)</h3>
+<ul>
+<li><strong><code>schemas</code></strong>: <code>TurnContext{session_id, bot_id, use_case, language, customer_text, history, crm_context, rag_enabled, rag_index}</code>; <code>NlpResponse{session_id, response_text, intent, tone(req), escalate, escalation_reason, end_call, confidence, retrieved[]}</code>. <code>Intent</code> (11): high_interest, interested, objection, not_interested, busy, promise_to_pay, dispute, request_human, opt_out, smalltalk, unknown.</li>
+<li><strong><code>config.NlpSettings</code></strong>: <code>nlp_provider("stub"|"groq")</code>, <code>groq_api_key</code>, <code>groq_base_url</code>, <code>groq_model="llama-3.3-70b-versatile"</code>, <code>groq_temperature=0.3</code>, <code>groq_max_tokens=512</code>, <code>groq_timeout_s=8.0</code>; <code>groq_enabled = provider=="groq" and api_key</code>.</li>
+<li><strong><code>providers.GroqNlpProvider</code></strong> — builds a system prompt (Hinglish rules, intent/tone enums, anti-hallucination, JSON contract) + user prompt (use case, language, CRM, RAG chunks, last-8 history, customer turn); POST <code>…/chat/completions</code> with <code>response_format=json_object</code>; <code>_parse</code> coerces intent/tone (defaults on invalid), clamps confidence; <strong>any exception → <code>StubNlpProvider</code> fallback</strong>. <code>main._build_provider()</code> selects by <code>groq_enabled</code>; lifespan <code>aclose()</code>.</li>
+<li><strong><code>StubNlpProvider</code></strong> — keyword intent heuristics, templated empathetic responses, repetition guard, per-use-case default tone.</li>
+<li><strong><code>rag</code></strong>: <code>HashEmbedder</code> (deterministic stub) + <code>retrieve()</code> cosine-distance NN over <code>knowledge_chunks</code> scoped by <code>rag_index</code> (real pgvector query). Best-effort: failures degrade to no context.</li>
+</ul>
+<h3 id="82-stt-koelstt">8.2 STT (<code>koel/stt</code>)</h3>
+<p><code>TranscribeRequest{session_id, audio_b64, sample_rate, is_final, language_hint}</code> → <code>TranscriptResult{text, is_final, language_id, language_confidence, speech_duration_ms, word_confidence}</code>. <code>StubWhisperProvider</code>: "type-to-talk" (<code>b"TEXT:"</code> prefix returned verbatim) + heuristic language detection (Marathi/Bengali/Tamil markers → <code>Language.other</code> @0.95 to exercise fallback). Real <code>WhisperSageMakerProvider</code> is a <code>NotImplementedError</code> seam.</p>
+<h3 id="83-tts-koeltts">8.3 TTS (<code>koel/tts</code>)</h3>
+<p><code>SynthesizeRequest{session_id, text, language, tone, voice_gender, speaking_rate, stream, ambient, ambient_profile, ambient_gain}</code>. <code>TONE_PROSODY</code> maps each <code>Tone</code> → <code>Prosody{pitch, rate, energy}</code>; <code>resolve_prosody</code> multiplies rate by <code>speaking_rate</code>. <code>StubOrpheusProvider.synthesize</code> sizes PCM by text length/rate; <strong>ambient bed</strong> (<code>_ambient_pcm</code>, deterministic LCG low-amplitude noise) mixed when <code>ambient and ambient_profile</code>. <code>stream()</code> emits ~120 ms chunks for barge-in boundaries.</p>
+<h3 id="84-crm-koelcrm">8.4 CRM (<code>koel/crm</code>)</h3>
+<p>Richardson-L2 over <code>crm_customers</code>: <code>GET /v1/customers</code>, <code>GET /{id}</code>, <code>POST /{id}/interactions</code> (201), <code>POST /{id}/flags</code> (201; <code>opt_out</code> also sets <code>dnd=True</code>; flags stored in <code>attributes.flags[]</code>). <code>seed.py</code> = 5 synthetic profiles (one per use case + a DND record). All endpoints require a <code>ServicePrincipal</code>.</p>
+<hr />
+<h2 id="9-configuration-reference-koel_-env">9. Configuration reference (<code>KOEL_</code> env)</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ENVIRONMENT</code> / <code>DEBUG</code></td>
+<td>development / true</td>
+<td>env + debug</td>
+</tr>
+<tr>
+<td><code>AWS_REGION</code></td>
+<td>ap-south-1</td>
+<td>data residency</td>
+</tr>
+<tr>
+<td><code>JWT_SECRET</code> / <code>JWT_ALGORITHM</code></td>
+<td>dev secret / HS256</td>
+<td>token signing (fail-fast in prod)</td>
+</tr>
+<tr>
+<td><code>JWT_ACCESS_TTL_SECONDS</code> / <code>JWT_WS_TTL_SECONDS</code></td>
+<td>3600 / 120</td>
+<td>token TTLs</td>
+</tr>
+<tr>
+<td><code>REDIS_URL</code> / <code>DATABASE_URL</code></td>
+<td>localhost</td>
+<td>session + data stores</td>
+</tr>
+<tr>
+<td><code>STT/NLP/TTS/CRM_SVC_URL</code></td>
+<td>localhost:8101-4</td>
+<td>fan-out targets</td>
+</tr>
+<tr>
+<td><code>NLP_PROVIDER</code> / <code>GROQ_API_KEY</code> / <code>GROQ_MODEL</code></td>
+<td>stub / — / llama-3.3-70b</td>
+<td>live NLP selection</td>
+</tr>
+<tr>
+<td><code>TURN_LATENCY_BUDGET_MS</code></td>
+<td>300</td>
+<td>budget</td>
+</tr>
+<tr>
+<td><code>BACKCHANNEL_MAX_SPEECH_MS</code> / <code>BARGE_IN_STOP_TARGET_MS</code></td>
+<td>300 / 150</td>
+<td>barge-in</td>
+</tr>
+<tr>
+<td><code>FILLER_TRIGGER_MS</code></td>
+<td>300</td>
+<td>latency masking</td>
+</tr>
+<tr>
+<td><code>NO_INPUT_REPROMPT_MS</code> / <code>NO_INPUT_CLOSE_MS</code></td>
+<td>5000 / 5000</td>
+<td>silence rules</td>
+</tr>
+<tr>
+<td><code>SESSION_GRACE_TTL_SECONDS</code> / <code>SESSION_ACTIVE_TTL_SECONDS</code></td>
+<td>15 / 3600</td>
+<td>reconnect window / TTL</td>
+</tr>
+<tr>
+<td><code>HEARTBEAT_INTERVAL_SECONDS</code> / <code>HEARTBEAT_TIMEOUT_SECONDS</code></td>
+<td>5 / 12</td>
+<td>liveness</td>
+</tr>
+<tr>
+<td><code>LANGUAGE_CONFIDENCE_THRESHOLD</code></td>
+<td>0.6</td>
+<td>unsupported-lang escalate</td>
+</tr>
+<tr>
+<td><code>ENFORCE_CALLING_HOURS</code> / <code>CALLING_HOURS_START</code> / <code>_END</code></td>
+<td>false / 9 / 21</td>
+<td>RBI window</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-rest-api-reference-all-jwt-protected-unless-noted">10. REST API reference (all JWT-protected unless noted)</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Auth</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>POST</td>
+<td><code>/v1/auth/login</code></td>
+<td>none</td>
+<td><code>{username,password}</code> → <code>{access_token}</code> (seeded <code>demo</code>/<code>koel-demo</code>)</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/v1/auth/ws-token</code></td>
+<td>access</td>
+<td>→ short-lived <code>ws_token</code></td>
+</tr>
+<tr>
+<td>GET / POST / GET</td>
+<td><code>/v1/bots</code> · <code>/v1/bots</code> · <code>/v1/bots/{id}</code></td>
+<td>access</td>
+<td>list / create(201) / get(404)</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/v1/sessions</code></td>
+<td>access</td>
+<td>start call; CRM fetch, <strong>DND→409</strong>, <strong>RBI hours→403</strong>, DPDP-minimised ctx; → <code>session_id</code>+<code>ws_token</code>. Bot inactive/missing→404</td>
+</tr>
+<tr>
+<td>GET / GET</td>
+<td><code>/v1/calls</code> · <code>/v1/calls/{id}</code></td>
+<td>access</td>
+<td>history (filters bot/outcome/language, limit≤200) / detail+transcript(404)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/v1/customers</code> · <code>/{id}</code> · POST flags/interactions</td>
+<td><strong>service</strong></td>
+<td>internal CRM contract</td>
+</tr>
+<tr>
+<td>WS</td>
+<td><code>/ws/calls/{session_id}?token=</code></td>
+<td><strong>ws-token</strong></td>
+<td>upgrade rejected 1008 if invalid / not owner / unknown / expired</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/health</code>, <code>/docs</code></td>
+<td>none</td>
+<td>every service</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="11-token-trace-flows">11. Token &amp; trace flows</h2>
+<ul>
+<li><strong>REST:</strong> <code>Authorization: Bearer &lt;access&gt;</code> → <code>require_access_token</code> → <code>TokenClaims</code>.</li>
+<li><strong>WS:</strong> <code>POST /v1/sessions</code> returns a <code>ws</code> token; client opens <code>…?token=</code>; <code>authenticate_websocket</code> validates kind+sig before <code>accept()</code>; <code>main.call_socket</code> checks <code>claims.sub == state.owner_sub</code> and <code>restore_active_ttl</code> on resume.</li>
+<li><strong>Service-to-service:</strong> <code>ServiceClients._headers()</code> mints a fresh <code>role=service</code> access token per fan-out, adds <code>x-correlation-id</code>, and <code>inject(headers)</code> (W3C <code>traceparent</code>). Inbound middleware <code>extract</code>s it → manual spans stitch into one trace; <code>current_trace_id()</code> is persisted on the call.</li>
+</ul>
+<hr />
+<h2 id="12-key-algorithms-summary">12. Key algorithms (summary)</h2>
+<ol>
+<li><strong>Dual-gate barge-in</strong> — Gate 1 client VAD; Gate 2 duration+dictionary classification (per-language ∪ per-bot). §6.1 / <code>bargein.py</code>.</li>
+<li><strong>Filler racing</strong> — <code>wait_for(shield(nlp), filler_trigger_ms)</code>; inject rotated clip on timeout. <code>orchestrator._respond_with_filler</code>.</li>
+<li><strong>Pong-independent no-input</strong> — deadline from <code>_last_input_at</code>; pongs don't reset; reprompt restarts the clock. <code>handler._receive_loop</code>.</li>
+<li><strong>Dropped-call finalizer</strong> — detached task after grace TTL; reconnect-aware; exactly-once persist + CRM callback. <code>handler._await_grace_then_finalize</code>.</li>
+<li><strong>Language fallback</strong> — unsupported <code>language_id</code> ≥ threshold → apologise + escalate + tag. <code>orchestrator._is_unsupported_language</code>.</li>
+<li><strong>Tone → prosody</strong> — <code>TONE_PROSODY[tone]</code> × <code>speaking_rate</code>. <code>tts/providers.resolve_prosody</code>.</li>
+<li><strong>Ambient mixing</strong> — deterministic LCG noise bed under TTS; muted on handoff. <code>tts/providers._ambient_pcm</code>.</li>
+</ol>
+<hr />
+<h2 id="13-testing-strategy-backendtests-37-tests">13. Testing strategy (<code>backend/tests</code>, 37 tests)</h2>
+<ul>
+<li><strong>Unit:</strong> <code>test_bargein</code> (Gate 2), <code>test_silence_and_filler</code> (no-input + rotation), <code>test_nlp_conversation</code> (stub quality), <code>test_auth_and_prosody</code> (JWT + tone→prosody), <code>test_audit_fixes</code> (PII mask + service authZ), <code>test_resilience_fixes</code> (per-bot dict, ambient, immediate opt-out).</li>
+<li><strong>Integration</strong> (<code>conftest.py</code>: in-memory <strong>SQLite</strong> via monkeypatched <code>get_sessionmaker</code>, <code>FakeStore</code>, <code>FakeClients</code>, app over <code>httpx.ASGITransport</code>, minted JWT):</li>
+<li><code>test_sessions_api</code> — DPDP minimisation, recording_url/backchannels seeding, DND 409, inactive 404, RBI hours 403/201, unauth 401.</li>
+<li><code>test_persistence</code> — <code>persist_call</code> round-trip (outcome coercion, audit metrics, transcript turns).</li>
+<li><code>test_ws_finalizer</code> — grace-expiry → <code>call_dropped</code> + CRM callback + persist; reconnect suppresses it.</li>
+<li><strong>Live drivers:</strong> <code>scripts/demo_call.py</code> (happy path) and <code>scripts/demo_resilience.py</code> (dropped/reconnect/no-input) against <code>docker compose</code> — used to verify end-to-end with real Groq + Postgres + Redis.</li>
+<li><strong>Gates:</strong> <code>pytest -q</code>, <code>ruff check</code>, <code>mypy</code> (3 pre-existing stub-import warnings only).</li>
+</ul>
+<hr />
+<h2 id="14-extension-seams">14. Extension seams</h2>
+<table>
+<thead>
+<tr>
+<th>To add</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Real Whisper STT</td>
+<td>implement <code>WhisperSageMakerProvider</code> (or a <code>GroqWhisperProvider</code> mirroring <code>GroqNlpProvider</code>); select in <code>stt/main.py</code></td>
+</tr>
+<tr>
+<td>Real Orpheus TTS</td>
+<td>implement <code>OrpheusSageMakerProvider.synthesize/stream</code>; select in <code>tts/main.py</code></td>
+</tr>
+<tr>
+<td>Real embeddings</td>
+<td>replace <code>HashEmbedder</code> with a Titan/embedding client in <code>nlp/rag.py</code></td>
+</tr>
+<tr>
+<td>Telephony (PSTN)</td>
+<td>new transport calling the same <code>Orchestrator</code> (it only needs a <code>send</code> callback)</td>
+</tr>
+<tr>
+<td>New use case / bot</td>
+<td><code>POST /v1/bots</code> config row — no code (the product's moat)</td>
+</tr>
+</tbody>
+</table></div></main>
+<footer>Generated from <code>docs/LLD.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  // Prose/tables are static HTML (offline-readable); only diagrams need JS.
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>

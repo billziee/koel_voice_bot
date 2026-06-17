@@ -28,6 +28,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "aiosqlite>=0.20",  # in-memory SQLAlchemy engine for integration tests
+    "markdown>=3.5",  # docs/build_html.py renders HLD/LLD markdown → HTML
     "ruff>=0.4",
     "mypy>=1.10",
 ]
