@@ -71,6 +71,7 @@ class CallSession:
         self._disconnect_started = False  # idempotent grace handling
         self._last_pong = time.monotonic()  # heartbeat liveness clock
         self._last_input_at = time.monotonic()  # last *real* client input (no-input timer)
+        self._speech_until = 0.0  # monotonic time the bot's current audio finishes playing
         self._send_lock = asyncio.Lock()
 
     async def send(self, message: ServerMessage) -> None:
@@ -84,6 +85,11 @@ class CallSession:
         # to the `listening` UI state does NOT clear it (PRD §05).
         if message.type == ServerMessageType.audio_chunk:
             self._bot_speaking = True
+            # The client plays this audio for duration_ms; the no-input timer
+            # must not start counting until playback finishes (PRD §05) — else
+            # a 7s greeting would trip the 5s silence timer mid-sentence.
+            duration_ms = message.data.get("duration_ms", 0) or 0
+            self._speech_until = time.monotonic() + duration_ms / 1000
 
     async def run(self) -> None:
         await self._ws.accept()
@@ -121,14 +127,17 @@ class CallSession:
     async def _receive_loop(self) -> None:
         while not self._closed:
             # No-input timer (PRD §05): 5s → re-prompt, a further 5s → close.
-            # Measured from the last *real* client input so heartbeat pongs do
-            # NOT keep resetting it (otherwise the timeout could never fire).
+            # The window is measured from whichever happened later — the last
+            # real client input or the moment the bot's audio finished playing —
+            # so the timer only starts once the bot has stopped speaking, and
+            # heartbeat pongs never reset it.
             window_ms = (
                 self._settings.no_input_reprompt_ms
                 if self._state.no_input_strikes == 0
                 else self._settings.no_input_close_ms
             )
-            remaining = (self._last_input_at + window_ms / 1000) - time.monotonic()
+            baseline = max(self._last_input_at, self._speech_until)
+            remaining = (baseline + window_ms / 1000) - time.monotonic()
             if remaining <= 0:
                 await self._handle_no_input()
                 continue
@@ -268,8 +277,9 @@ class CallSession:
         )
         if outcome.action == NoInputAction.reprompt:
             self._state.no_input_strikes += 1
-            # Restart the clock: the customer now has a fresh close window.
-            self._last_input_at = time.monotonic()
+            # Sending the re-prompt sets _speech_until to when its audio ends, so
+            # the close window starts only after the customer has heard it — not
+            # at the same instant as the first window.
             await self._orch._send_bot_turn(  # noqa: SLF001 — internal helper reuse
                 self._state, self.send, text=outcome.text, tone=self._state.default_tone
             )
