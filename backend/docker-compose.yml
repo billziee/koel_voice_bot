@@ -7,8 +7,10 @@ services:
       POSTGRES_USER: koel
       POSTGRES_PASSWORD: koel
       POSTGRES_DB: koel
+    # Host port is configurable to avoid clashes with other local Postgres
+    # instances; services reach it as `postgres:5432` on the internal network.
     ports:
-      - "5432:5432"
+      - "${KOEL_PG_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

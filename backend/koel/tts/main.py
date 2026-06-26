@@ -2,22 +2,49 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from contextlib import asynccontextmanager
+
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import StreamingResponse
 
 from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
 from koel.common.telemetry import span
-from koel.tts.providers import StubOrpheusProvider
+from koel.tts.config import get_tts_settings
+from koel.tts.providers import GroqOrpheusProvider, StubOrpheusProvider, TtsProvider
 from koel.tts.schemas import SynthesisResult, SynthesizeRequest
+
+
+def _build_provider() -> TtsProvider:
+    settings = get_tts_settings()
+    if settings.groq_enabled:
+        return GroqOrpheusProvider(
+            api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
+            model=settings.groq_orpheus_model,
+            voice=settings.groq_voice,
+            base_url=settings.groq_base_url,
+            audio_format=settings.groq_audio_format,
+            timeout_s=settings.groq_timeout_s,
+        )
+    return StubOrpheusProvider()
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    yield
+    aclose = getattr(_provider, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
 
 app = create_app(
     service_name="tts_svc",
     title="KOEL · TTS_svc",
-    description="Tone-aware neural TTS. Orpheus provider interface; stub provider for local demo.",
+    description="Tone-aware neural TTS — Groq Orpheus or deterministic stub.",
+    lifespan=_lifespan,
 )
 
-_provider = StubOrpheusProvider()
+_provider = _build_provider()
 router = APIRouter(prefix="/v1", tags=["tts"])
 
 

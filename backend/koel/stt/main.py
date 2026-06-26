@@ -2,21 +2,46 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from contextlib import asynccontextmanager
+
+from fastapi import APIRouter, FastAPI
 
 from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
 from koel.common.telemetry import span
-from koel.stt.providers import StubWhisperProvider
+from koel.stt.config import get_stt_settings
+from koel.stt.providers import GroqWhisperProvider, SttProvider, StubWhisperProvider
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
+
+
+def _build_provider() -> SttProvider:
+    settings = get_stt_settings()
+    if settings.groq_enabled:
+        return GroqWhisperProvider(
+            api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
+            model=settings.groq_whisper_model,
+            base_url=settings.groq_base_url,
+            timeout_s=settings.groq_timeout_s,
+        )
+    return StubWhisperProvider()
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    yield
+    aclose = getattr(_provider, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
 
 app = create_app(
     service_name="stt_svc",
     title="KOEL · STT_svc",
-    description="Speech-to-text. Whisper provider interface; stub provider for local demo.",
+    description="Speech-to-text — Groq Whisper or deterministic stub.",
+    lifespan=_lifespan,
 )
 
-_provider = StubWhisperProvider()
+_provider = _build_provider()
 router = APIRouter(prefix="/v1", tags=["stt"])
 
 
