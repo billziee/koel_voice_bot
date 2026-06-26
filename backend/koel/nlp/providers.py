@@ -222,11 +222,26 @@ class GroqNlpProvider(NlpProvider):
         self._client = httpx.AsyncClient(timeout=timeout_s)
         self._fallback = StubNlpProvider()
 
-    @staticmethod
-    def _build_user_prompt(ctx: TurnContext, retrieved: list[RetrievedChunk]) -> str:
+    # Per-language script directive. Hindi/Hinglish must come back in Devanagari
+    # so the neural TTS (NVIDIA Magpie hi-IN) pronounces it natively — romanized
+    # Hindi is mispronounced into gibberish. Brand/product names stay in Latin.
+    _SCRIPT_DIRECTIVE: dict[str, str] = {
+        "hi": "Respond in natural Hindi written in DEVANAGARI script (देवनागरी). "
+              "Keep product, brand and bank names in their usual Latin spelling "
+              "(e.g. HDFC, Regalia, EMI).",
+        "hinglish": "Respond the way an Indian bank agent speaks: natural Hindi in "
+                    "DEVANAGARI script (देवनागरी) with common English banking terms "
+                    "kept in Latin (e.g. HDFC, credit card, offer, EMI, lounge access). "
+                    "Do NOT romanise the Hindi words.",
+        "en": "Respond in natural English.",
+    }
+
+    @classmethod
+    def _build_user_prompt(cls, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> str:
         parts: list[str] = [
             f"USE CASE: {ctx.use_case}",
             f"LANGUAGE: {ctx.language.value}",
+            f"SCRIPT: {cls._SCRIPT_DIRECTIVE.get(ctx.language.value, cls._SCRIPT_DIRECTIVE['hinglish'])}",
         ]
         if ctx.crm_context:
             crm = ", ".join(f"{k}={v}" for k, v in ctx.crm_context.items() if v not in (None, ""))

@@ -11,14 +11,21 @@ from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
 from koel.common.telemetry import span
 from koel.tts.config import get_tts_settings
-from koel.tts.providers import GroqOrpheusProvider, StubOrpheusProvider, TtsProvider
+from koel.tts.providers import (
+    GroqOrpheusProvider,
+    NvidiaMagpieTtsProvider,
+    RoutingTtsProvider,
+    StubOrpheusProvider,
+    TtsProvider,
+)
 from koel.tts.schemas import SynthesisResult, SynthesizeRequest
 
 
 def _build_provider() -> TtsProvider:
     settings = get_tts_settings()
-    if settings.groq_enabled:
-        return GroqOrpheusProvider(
+    # Base (English / default) provider.
+    base: TtsProvider = (
+        GroqOrpheusProvider(
             api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
             model=settings.groq_orpheus_model,
             voice=settings.groq_voice,
@@ -26,7 +33,24 @@ def _build_provider() -> TtsProvider:
             audio_format=settings.groq_audio_format,
             timeout_s=settings.groq_timeout_s,
         )
-    return StubOrpheusProvider()
+        if settings.groq_enabled
+        else StubOrpheusProvider()
+    )
+    # Route Hindi/Hinglish to NVIDIA Magpie when enabled (falls back to base).
+    if settings.nvidia_enabled:
+        magpie = NvidiaMagpieTtsProvider(
+            api_key=settings.nvidia_api_key,  # type: ignore[arg-type]  # nvidia_enabled guards None
+            function_id=settings.nvidia_tts_function_id,
+            uri=settings.nvidia_tts_uri,
+            voice=settings.nvidia_tts_voice,
+            sample_rate=settings.nvidia_tts_sample_rate,
+            timeout_s=settings.nvidia_tts_timeout_s,
+            fallback=base,
+        )
+        return RoutingTtsProvider(
+            default=base, hindi=magpie, hindi_languages=settings.nvidia_language_set
+        )
+    return base
 
 
 @asynccontextmanager

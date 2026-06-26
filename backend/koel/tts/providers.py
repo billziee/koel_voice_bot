@@ -7,6 +7,7 @@ provider streams from an Orpheus SageMaker endpoint with the same chunk shape.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import struct
@@ -53,6 +54,17 @@ def _wav_duration_ms(wav: bytes) -> int:
     except (struct.error, IndexError, ZeroDivisionError):
         return 0
     return 0
+
+
+def _pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, sampwidth: int = 2) -> bytes:
+    """Wrap raw little-endian PCM in a WAV header (for providers that return PCM)."""
+    byte_rate = sample_rate * channels * sampwidth
+    return (
+        b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate,
+                                channels * sampwidth, sampwidth * 8)
+        + b"data" + struct.pack("<I", len(pcm)) + pcm
+    )
 
 _SAMPLE_RATE = 16000
 # ~60ms of speech per character is a rough but stable estimate for pacing.
@@ -215,6 +227,107 @@ class GroqOrpheusProvider(TtsProvider):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class NvidiaMagpieTtsProvider(TtsProvider):
+    """Hindi/multilingual neural TTS via NVIDIA Magpie (NVCF Riva gRPC).
+
+    Orpheus is English-only in practice; Magpie speaks hi-IN natively. Synthesis
+    is a blocking gRPC call run in a worker thread; raw PCM is wrapped to WAV and
+    the duration is exact. Any failure degrades to the supplied fallback provider.
+    """
+
+    _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-US"}
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        function_id: str,
+        uri: str,
+        voice: str,
+        sample_rate: int,
+        timeout_s: float,
+        fallback: TtsProvider,
+    ) -> None:
+        import riva.client  # lazy: only needed when NVIDIA TTS is enabled
+        from riva.client.proto.riva_audio_pb2 import AudioEncoding
+
+        self._encoding = AudioEncoding.LINEAR_PCM
+        self._auth = riva.client.Auth(
+            uri=uri,
+            use_ssl=True,
+            metadata_args=[
+                ["function-id", function_id],
+                ["authorization", f"Bearer {api_key}"],
+            ],
+        )
+        self._svc = riva.client.SpeechSynthesisService(self._auth)
+        self._voice = voice
+        self._sr = sample_rate
+        self._timeout = timeout_s
+        self._fallback = fallback
+        self._warned = False
+
+    def _blocking_synth(self, text: str, language_code: str):
+        return self._svc.synthesize(
+            text, self._voice, language_code, sample_rate_hz=self._sr, encoding=self._encoding
+        )
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            lang_code = self._LANG_CODE.get(request.language.value, "hi-IN")
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(self._blocking_synth, request.text, lang_code),
+                timeout=self._timeout,
+            )
+            pcm = resp.audio
+            if not pcm:
+                raise ValueError("Magpie returned no audio")
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning("nvidia_magpie_failed; falling back", exc_info=True)
+            return await self._fallback.synthesize(request)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(_pcm_to_wav(pcm, self._sr)).decode(),
+            duration_ms=int(len(pcm) / 2 / self._sr * 1000),
+            prosody=prosody,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        result = await self.synthesize(request)
+        yield SynthesisChunk(
+            session_id=request.session_id, seq=0, audio_b64=result.audio_b64, is_final=True
+        )
+
+
+class RoutingTtsProvider(TtsProvider):
+    """Routes synthesis by call language: Hindi/Hinglish → ``hindi`` provider
+    (NVIDIA Magpie), everything else → ``default`` (Groq Orpheus / stub)."""
+
+    def __init__(self, *, default: TtsProvider, hindi: TtsProvider, hindi_languages: set[str]) -> None:
+        self._default = default
+        self._hindi = hindi
+        self._langs = hindi_languages
+
+    def _pick(self, request: SynthesizeRequest) -> TtsProvider:
+        return self._hindi if request.language.value in self._langs else self._default
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        return await self._pick(request).synthesize(request)
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        async for chunk in self._pick(request).stream(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        for p in (self._default, self._hindi):
+            aclose = getattr(p, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
 
 class OrpheusSageMakerProvider(TtsProvider):  # pragma: no cover - production stub

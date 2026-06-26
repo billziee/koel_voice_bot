@@ -9,8 +9,14 @@ import struct
 from koel.common.schemas import Language, Tone
 from koel.stt.providers import GroqWhisperProvider
 from koel.stt.schemas import TranscribeRequest
-from koel.tts.providers import GroqOrpheusProvider, _wav_duration_ms
-from koel.tts.schemas import SynthesizeRequest
+from koel.tts.providers import (
+    GroqOrpheusProvider,
+    RoutingTtsProvider,
+    StubOrpheusProvider,
+    _pcm_to_wav,
+    _wav_duration_ms,
+)
+from koel.tts.schemas import SynthesisResult, SynthesizeRequest
 
 
 def _wav(seconds: float, sr: int = 16000) -> bytes:
@@ -63,6 +69,42 @@ async def test_whisper_falls_back_to_stub_on_unreachable_host():
     r = await prov.transcribe(TranscribeRequest(session_id="s", audio_b64=audio, is_final=True))
     assert r.is_final and r.text  # stub produced a deterministic transcript
     await prov.aclose()
+
+
+def test_pcm_to_wav_roundtrips_duration():
+    sr = 44100
+    pcm = b"\x00\x00" * sr  # 1.0s mono 16-bit
+    wav = _pcm_to_wav(pcm, sr)
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE"
+    assert abs(_wav_duration_ms(wav) - 1000) <= 2
+
+
+class _MarkerProvider(StubOrpheusProvider):
+    """Tags its output so we can assert which branch the router chose."""
+
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        res = await super().synthesize(request)
+        return res.model_copy(update={"session_id": self.marker})
+
+
+async def test_routing_sends_hindi_to_magpie_english_to_default():
+    router = RoutingTtsProvider(
+        default=_MarkerProvider("DEFAULT"),
+        hindi=_MarkerProvider("HINDI"),
+        hindi_languages={"hi", "hinglish"},
+    )
+    for lang, expect in [
+        (Language.hi, "HINDI"),
+        (Language.hinglish, "HINDI"),
+        (Language.en, "DEFAULT"),
+    ]:
+        res = await router.synthesize(
+            SynthesizeRequest(session_id="x", text="hi", language=lang, tone=Tone.neutral)
+        )
+        assert res.session_id == expect, f"{lang} routed wrong"
 
 
 async def test_orpheus_falls_back_to_stub_on_unreachable_host():

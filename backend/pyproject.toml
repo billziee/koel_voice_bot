@@ -16,6 +16,7 @@ dependencies = [
     "pgvector>=0.2.5",
     "httpx>=0.27",
     "websockets>=12.0",
+    "nvidia-riva-client>=2.15",  # NVIDIA Magpie TTS (Hindi) over NVCF gRPC
     "opentelemetry-api>=1.24",
     "opentelemetry-sdk>=1.24",
     "opentelemetry-instrumentation-fastapi>=0.45b0",
