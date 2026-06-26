@@ -20,7 +20,8 @@ class TtsSettings(CommonSettings):
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_orpheus_model: str = "canopylabs/orpheus-v1-english"
-    groq_voice: str = "tara"
+    # Groq Orpheus voices: autumn, diana, hannah (female) · austin, daniel, troy (male).
+    groq_voice: str = "autumn"
     groq_audio_format: str = "wav"  # wav decodes everywhere + carries duration
     groq_timeout_s: float = 30.0
 

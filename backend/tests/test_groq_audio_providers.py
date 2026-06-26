@@ -28,6 +28,19 @@ def test_wav_duration_parsed_from_header():
     assert _wav_duration_ms(b"not a wav") == 0
 
 
+def test_wav_duration_handles_orpheus_streaming_layout():
+    # Orpheus: a LIST chunk before data + a 0xFFFFFFFF placeholder data size.
+    sr = 24000
+    frames = b"\x00\x00" * sr  # 1.0s @ 24kHz mono 16-bit
+    wav = (
+        b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, sr, sr * 2, 2, 16)
+        + b"LIST" + struct.pack("<I", 4) + b"INFO"
+        + b"data" + struct.pack("<I", 0xFFFFFFFF) + frames
+    )
+    assert abs(_wav_duration_ms(wav) - 1000) <= 5  # not ~89,000,000
+
+
 async def test_whisper_type_to_talk_passthrough_no_network():
     # A TEXT: sentinel must be served by the stub — no Groq call, deterministic.
     prov = GroqWhisperProvider(api_key="unused", model="whisper-large-v3-turbo")

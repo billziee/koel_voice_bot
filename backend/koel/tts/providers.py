@@ -27,18 +27,29 @@ logger = logging.getLogger(__name__)
 
 
 def _wav_duration_ms(wav: bytes) -> int:
-    """Duration of a PCM WAV from its header (data size / byte rate)."""
+    """Duration of a PCM WAV from its header (data size / byte rate).
+
+    Robust to chunk ordering (e.g. a LIST chunk before data) and to streaming
+    writers like Orpheus that stamp a placeholder data size of 0xFFFFFFFF — in
+    that case (or any size overrunning the buffer) the real byte count is taken
+    from the remaining file length.
+    """
     try:
         if wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
             return 0
-        byte_rate = struct.unpack_from("<I", wav, 28)[0]  # fmt: bytes/sec
+        byte_rate = 0
         i = 12
         while i + 8 <= len(wav):
             cid = wav[i : i + 4]
             size = struct.unpack_from("<I", wav, i + 4)[0]
-            if cid == b"data":
+            body = i + 8
+            if cid == b"fmt ":
+                byte_rate = struct.unpack_from("<I", wav, body + 8)[0]  # bytes/sec
+            elif cid == b"data":
+                if size == 0xFFFFFFFF or body + size > len(wav):
+                    size = len(wav) - body  # placeholder / streamed → actual bytes
                 return int(size / byte_rate * 1000) if byte_rate else 0
-            i += 8 + size + (size & 1)
+            i = body + size + (size & 1)
     except (struct.error, IndexError, ZeroDivisionError):
         return 0
     return 0
