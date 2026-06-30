@@ -1098,58 +1098,76 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
   useEffect(() => { durationRef.current = duration; }, [duration]);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const oscillatorRef = useRef<OscillatorNode | null>(null);
-  // Real AnalyserNode tapped off the audio graph so the waveform reflects
-  // actual amplitude/spectrum data, not Math.random() (PRD §09 Screen 3).
+  // Real AnalyserNode in the playback graph so the waveform reflects the actual
+  // bot audio (voice + server-mixed call-floor bed), not a synthetic oscillator.
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const audioQueueRef = useRef<AudioBuffer[]>([]);
+  const audioPlayingRef = useRef(false);
+  const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
 
-  // Item 52: Ambient audio loop
+  // Lazily build the playback graph: source -> analyser -> masterGain -> output.
+  // masterGain is the mute switch; the analyser always sees audio so the
+  // visualizer stays amplitude-reactive even when muted.
+  const ensureAudioGraph = (): AudioContext | null => {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    const Ctor = window.AudioContext || (window as any).webkitAudioContext;
+    if (!Ctor) return null;
+    const ctx: AudioContext = new Ctor();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 64;
+    const gain = ctx.createGain();
+    gain.gain.value = soundEnabled ? 1 : 0;
+    analyser.connect(gain);
+    gain.connect(ctx.destination);
+    audioCtxRef.current = ctx;
+    analyserRef.current = analyser;
+    masterGainRef.current = gain;
+    return ctx;
+  };
+
+  const playNextAudio = () => {
+    const ctx = audioCtxRef.current;
+    const analyser = analyserRef.current;
+    const buf = audioQueueRef.current.shift();
+    if (!buf || !ctx || !analyser) { audioPlayingRef.current = false; return; }
+    audioPlayingRef.current = true;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(analyser);
+    src.onended = () => { if (audioSrcRef.current === src) audioSrcRef.current = null; playNextAudio(); };
+    audioSrcRef.current = src;
+    src.start();
+  };
+
+  // Decode a base64 WAV chunk from the backend and enqueue it for gapless playback.
+  const enqueueAudio = async (audio_b64?: string) => {
+    if (!audio_b64) return;
+    const ctx = ensureAudioGraph();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
+    try {
+      const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
+      const buffer = await ctx.decodeAudioData(bytes.buffer);
+      audioQueueRef.current.push(buffer);
+      if (!audioPlayingRef.current) playNextAudio();
+    } catch { /* undecodable chunk — skip rather than break the call */ }
+  };
+
+  // Stop playback immediately (barge-in TTS_KILL, or call end) and drop the queue.
+  const flushPlayback = () => {
+    audioQueueRef.current = [];
+    if (audioSrcRef.current) {
+      try { audioSrcRef.current.onended = null; audioSrcRef.current.stop(); } catch { /* already stopped */ }
+      audioSrcRef.current = null;
+    }
+    audioPlayingRef.current = false;
+  };
+
+  // Keep the mute switch in sync; release playback when the call is not active.
   useEffect(() => {
-    if (!soundEnabled || callState === 'escalating' || callState === 'idle' || callState === 'ended') {
-      if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
-        audioCtxRef.current.suspend();
-      }
-      return;
-    }
-    
-    if (soundEnabled) {
-      if (!audioCtxRef.current) {
-        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioContext) {
-          const ctx = new AudioContext();
-          audioCtxRef.current = ctx;
-          
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          const filter = ctx.createBiquadFilter();
-          
-          osc.type = 'triangle';
-          osc.frequency.value = 140; // low frequency murmur
-          
-          filter.type = 'lowpass';
-          filter.frequency.value = 400;
-
-          gain.gain.value = 0.05; // Very subtle
-
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 64;
-
-          osc.connect(filter);
-          filter.connect(gain);
-          gain.connect(ctx.destination);
-          // Tap the post-gain signal into the analyser the visualizer reads.
-          gain.connect(analyser);
-          analyserRef.current = analyser;
-
-          osc.start();
-          oscillatorRef.current = osc;
-        }
-      }
-      
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
-      }
-    }
+    if (masterGainRef.current) masterGainRef.current.gain.value = soundEnabled ? 1 : 0;
+    if (callState === 'idle' || callState === 'ended') flushPlayback();
   }, [soundEnabled, callState]);
 
   const demoActiveRef = useRef(false);
@@ -1250,8 +1268,10 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
     const id = nextId();
     const timestamp = durationRef.current;
     setTranscript(prev => [...prev, { ...msg, id, timestamp }]);
-    // Item 52: speak bot messages if sound enabled
-    if (soundEnabled && msg.kind === 'bot' && typeof window !== 'undefined' && window.speechSynthesis) {
+    // Demo mode only: synthesize bot speech in the browser. In live mode the real
+    // bot audio (Orpheus/Magpie + ambient bed) streams from VB_Svc and is played
+    // via enqueueAudio(), so browser SpeechSynthesis would double up — skip it.
+    if (!liveCall && soundEnabled && msg.kind === 'bot' && typeof window !== 'undefined' && window.speechSynthesis) {
       const utter = new SpeechSynthesisUtterance(msg.text);
       utter.rate = msg.tone === 'firm' ? 0.9 : msg.tone === 'cheerful' ? 1.1 : 1.0;
       utter.pitch = msg.tone === 'empathetic' ? 0.9 : 1.0;
@@ -1381,11 +1401,13 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
         onCallState: (status) => setCallState(status as CallState),
         onTranscript: (speaker, text, d) =>
           addMsg({ kind: speaker === 'bot' ? 'bot' : 'user', text, tone: d.tone as Tone | undefined }),
+        onAudio: (d) => { void enqueueAudio(d.audio_b64 as string | undefined); },
         onFiller: (text) => {
           addMsg({ kind: 'filler', text });
           logEvent('NLP first token >300ms — pre-rendered filler injected (latency masking)', 'warn');
         },
         onTtsKill: (reason) => {
+          flushPlayback();  // halt in-flight bot audio immediately (barge-in)
           setTranscript(prev => {
             const copy = [...prev];
             for (let i = copy.length - 1; i >= 0; i--) {

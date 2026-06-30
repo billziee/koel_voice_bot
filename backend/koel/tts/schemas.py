@@ -40,11 +40,19 @@ class SynthesizeRequest(BaseModel):
     ambient_gain: float = 0.06  # relative loudness of the bed under speech
 
 
+# Canonical output: 24 kHz mono 16-bit PCM-in-WAV. Providers resample/declare to
+# this so the client decoder, ambient mixer, and barge-in buffering are deterministic.
+CANONICAL_SAMPLE_RATE = 24000
+
+
 class SynthesisChunk(BaseModel):
     session_id: str
     seq: int
     audio_b64: str
     is_final: bool = False
+    sample_rate: int = CANONICAL_SAMPLE_RATE
+    channels: int = 1
+    audio_format: str = "wav"
 
 
 class SynthesisResult(BaseModel):
@@ -54,3 +62,7 @@ class SynthesisResult(BaseModel):
     audio_b64: str
     duration_ms: int
     prosody: Prosody
+    # Declared output format so the client never has to guess the rate (PRD §06).
+    sample_rate: int = CANONICAL_SAMPLE_RATE
+    channels: int = 1
+    audio_format: str = "wav"

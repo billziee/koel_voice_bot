@@ -115,7 +115,8 @@ async def test_orpheus_falls_back_to_stub_on_unreachable_host():
     res = await prov.synthesize(
         SynthesizeRequest(session_id="s", text="Namaste ji", tone=Tone.cheerful)
     )
-    # Stub fallback → sized silent PCM with a real duration.
+    # Stub fallback → a real-duration silent WAV (no ambient requested → all-zero PCM).
     assert res.duration_ms > 0
-    assert set(base64.b64decode(res.audio_b64)) == {0}
+    audio = base64.b64decode(res.audio_b64)
+    assert audio[:4] == b"RIFF" and res.audio_format == "wav"
     await prov.aclose()

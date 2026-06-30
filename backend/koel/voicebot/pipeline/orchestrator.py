@@ -109,6 +109,8 @@ class Orchestrator:
                 audio_b64=audio.audio_b64,
                 duration_ms=audio.duration_ms,
                 index=turn.index,
+                sample_rate=audio.sample_rate,
+                audio_format=audio.audio_format,
             )
         )
         return turn
