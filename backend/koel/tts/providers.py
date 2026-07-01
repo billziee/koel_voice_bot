@@ -197,7 +197,9 @@ class GroqOrpheusProvider(TtsProvider):
                     "Groq console to enable real TTS). Suppressing further warnings.",
                     exc_info=True,
                 )
-            return await self._fallback.synthesize(request)
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True  # surface the degrade on the orchestrator span (E)
+            return result
 
         duration = _wav_duration_ms(audio) or self._fallback._duration_ms(request.text, prosody)  # noqa: SLF001
         if request.ambient and request.ambient_profile:

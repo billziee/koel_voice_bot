@@ -228,7 +228,7 @@ class Orchestrator:
             # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
             # speak one acknowledgement, and END the call now. Do not continue
             # the script or wait on a separate end_call signal.
-            await self._clients.flag_customer(state.customer_id or "", "opt_out", "customer opt-out")
+            await self._flag_best_effort(state.customer_id, "opt_out", "customer opt-out")
             await self._send_bot_turn(
                 state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
             )
@@ -236,7 +236,7 @@ class Orchestrator:
             return
         if nlp.intent == Intent.busy:
             # Deferral → schedule a callback rather than treat it as a loss.
-            await self._clients.flag_customer(state.customer_id or "", "callback", "customer busy")
+            await self._flag_best_effort(state.customer_id, "callback", "customer busy")
         await self._send_bot_turn(
             state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
         )
@@ -254,11 +254,25 @@ class Orchestrator:
         state.status = CallStatus.listening
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.listening))
 
+    async def _flag_best_effort(self, customer_id: str | None, flag: str, reason: str) -> None:
+        """Flag the CRM without letting a CRM outage abort the turn (PRD §12).
+
+        Critical for opt_out: the caller must still hear the acknowledgement and
+        have the call end even if the CRM write fails — we do not re-contact them.
+        """
+        if not customer_id:
+            return
+        try:
+            await self._clients.flag_customer(customer_id, flag, reason)
+        except Exception:  # noqa: BLE001 — best-effort; the turn proceeds regardless
+            logger.warning("crm_flag_failed flag=%s customer=%s", flag, customer_id, exc_info=True)
+
     async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
         """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
         ctx = TurnContext(
             session_id=state.session_id,
             bot_id=state.bot_id,
+            org_id=state.org_id,
             use_case=state.use_case,
             language=state.language,
             customer_text=state.transcript[-1].text,
@@ -310,10 +324,9 @@ class Orchestrator:
         await self._send_bot_turn(
             state, send, text=_FALLBACK_TEXT, tone=Tone.empathetic, ambient=False
         )
-        if state.customer_id:
-            await self._clients.flag_customer(
-                state.customer_id, "unsupported_language", "language outside EN/HI/Hinglish"
-            )
+        await self._flag_best_effort(
+            state.customer_id, "unsupported_language", "language outside EN/HI/Hinglish"
+        )
         state.outcome = "unsupported_language"
         await self._escalate(state, send, reason="unsupported_language")
 

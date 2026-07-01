@@ -88,7 +88,9 @@ async def start_session(
 
     async with session_scope() as db:
         bot: BotConfig | None = await db.get(BotConfig, payload.bot_id)
-    if bot is None or not bot.active:
+    # Tenant isolation (AF): a scoped operator cannot start a session on another
+    # org's bot (would hijack its config/RAG). 404 so the bot's existence isn't leaked.
+    if bot is None or not bot.active or (user.org_id is not None and bot.org_id != user.org_id):
         raise ApiError(
             status_code=status.HTTP_404_NOT_FOUND,
             code="bot_not_found",
@@ -145,8 +147,9 @@ async def start_session(
         greeting_template=bot.greeting_template or "",
         crm_context=crm_context,
         backchannels=backchannels if isinstance(backchannels, dict) else {},
-        # Intended recording object for the §11/§14 audit trail (30-day S3).
-        recording_url=f"s3://koel-recordings/{session_id}.wav",
+        # recording_url is populated on call end with the REAL S3 object (or left
+        # NULL when recording is disabled) — never a phantom URL (audit finding).
+        recording_url=None,
     )
     await runtime.store.save(state)
 

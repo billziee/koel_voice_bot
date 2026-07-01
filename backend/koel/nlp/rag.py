@@ -79,7 +79,12 @@ class NvidiaEmbedder(Embedder):
                 },
             )
             resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
+            vec = resp.json()["data"][0]["embedding"]
+            # Guard the dimension (plan V): a wrong-width vector would break the
+            # pgvector query, so treat it as a failure and degrade to the stub.
+            if len(vec) != EMBEDDING_DIM:
+                raise ValueError(f"embedding dim {len(vec)} != {EMBEDDING_DIM}")
+            return vec
         except Exception:  # noqa: BLE001 — RAG is best-effort; degrade to the stub
             if not self._warned:
                 self._warned = True
@@ -117,6 +122,7 @@ async def retrieve(
     embedder: Embedder,
     top_k: int = 3,
     score_threshold: float = 0.0,
+    org_id: str | None = None,
 ) -> list[RetrievedChunk]:
     embedding = await embedder.embed(query, input_type="query")
     async with session_scope() as db:
@@ -130,6 +136,10 @@ async def retrieve(
             .order_by("distance")
             .limit(top_k)
         )
+        # Tenant isolation (AF): a scoped bot only retrieves its org's chunks, so
+        # two orgs sharing a rag_index name can't read each other's KB.
+        if org_id is not None:
+            stmt = stmt.where(KnowledgeChunk.org_id == org_id)
         rows = (await db.execute(stmt)).all()
 
     # Drop weakly-relevant chunks so the LLM isn't "grounded" on noise (PRD §12).

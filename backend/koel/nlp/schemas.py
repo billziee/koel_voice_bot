@@ -30,6 +30,7 @@ class TurnContext(BaseModel):
 
     session_id: str
     bot_id: str
+    org_id: str | None = None  # tenant scope for RAG retrieval isolation (AF)
     use_case: str
     language: Language
     customer_text: str

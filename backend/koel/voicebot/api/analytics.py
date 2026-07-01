@@ -6,12 +6,13 @@ over ``call_logs``. Tenant-scoped (AF): a scoped operator only sees their org.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from koel.common.auth import CurrentUser
-from koel.db.models import CallLog, CallOutcome
+from koel.common.errors import ApiError
+from koel.db.models import BotConfig, CallLog, CallOutcome
 from koel.db.session import session_scope
 
 router = APIRouter(prefix="/v1", tags=["analytics"])
@@ -84,6 +85,17 @@ async def _aggregate(bot_id: str | None, org_id: str | None) -> list[BotStats]:
 
 @router.get("/bots/{bot_id}/stats", response_model=BotStats)
 async def bot_stats(bot_id: str, user: CurrentUser) -> BotStats:
+    # Tenant isolation (AF): a scoped operator can only read their own bots'
+    # stats — 404 for anything else so a bot's existence in another org isn't leaked.
+    if user.org_id is not None:
+        async with session_scope() as db:
+            bot = await db.get(BotConfig, bot_id)
+        if bot is None or bot.org_id != user.org_id:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="bot_not_found",
+                message=f"No bot with id {bot_id}.",
+            )
     stats = await _aggregate(bot_id, user.org_id)
     if stats:
         return stats[0]

@@ -56,7 +56,9 @@ async def test_recording_url_and_backchannels_seeded_into_state(app_client, acce
     r = await _start(client, access_headers)
     assert r.status_code == 201, r.text
     state = runtime.store.data[r.json()["session_id"]]
-    assert state.recording_url and state.recording_url.startswith("s3://koel-recordings/")
+    # recording_url is populated on call end with the real object (or None when
+    # recording is disabled) — no phantom URL at session start (audit fix).
+    assert state.recording_url is None
     assert state.backchannels == {"hinglish": ["bilkul", "sahi"]}
 
 

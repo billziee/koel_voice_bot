@@ -64,6 +64,10 @@ source = ["koel"]
 omit = ["koel/*/main.py", "*/__init__.py"]
 
 [tool.coverage.report]
-fail_under = 75
+# Achieved ~90%; the gate is set a few points below as a floor so ordinary
+# refactors don't trip CI while new/undertested code still fails the build. The
+# uncovered remainder is infra-bound (pgvector KB endpoints, Magpie gRPC) and is
+# exercised by the CI service-container run + live verification, not unit mocks.
+fail_under = 85
 show_missing = true
 exclude_lines = ["pragma: no cover", "raise NotImplementedError", "if __name__"]

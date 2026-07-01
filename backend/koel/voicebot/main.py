@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
     runtime = build_runtime(settings)
     app.state.runtime = runtime
     app.state.active_calls = 0
+    app.state.active_sessions = set()  # session_ids with a live socket (concurrency guard)
     logger.info("voicebot_svc starting; redis_ok=%s", await runtime.store.ping())
     await _warm_filler_cache(runtime)
     yield
@@ -84,6 +85,19 @@ async def lifespan(app: FastAPI):
         logger.info("draining_ws_calls active=%d", app.state.active_calls)
         await asyncio.sleep(0.5)
         waited += 0.5
+    # Let in-flight grace finalizers (sleeping on the 15s reconnect window) run to
+    # completion so a call dropped just before shutdown is still persisted — else
+    # their sleep is cancelled mid-flight and the call is lost.
+    pending = [t for t in runtime.background_tasks if not t.done()]
+    if pending:
+        logger.info("awaiting_%d_grace_finalizers_before_shutdown", len(pending))
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=settings.session_grace_ttl_seconds + 5,
+            )
+        except TimeoutError:
+            logger.warning("grace_finalizers_did_not_drain_in_time")
     await runtime.clients.aclose()
     await runtime.store.close()
     await knowledge.aclose_embedder()
@@ -154,6 +168,16 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             await websocket.close(code=1008, reason="session expired")
             return
 
+    # Concurrency guard: only ONE live socket per session at a time. A second
+    # concurrent connect (double-tab, racey reconnect) would resume the same
+    # state and clobber turns on write-back — reject it. (Single-worker scope;
+    # multi-worker needs a Redis lock — see docs/SECURITY.md.)
+    active_sessions = websocket.app.state.active_sessions
+    if session_id in active_sessions:
+        await websocket.close(code=1008, reason="session already active")
+        return
+    active_sessions.add(session_id)
+
     # Track in-flight calls so the lifespan can drain them on SIGTERM (P).
     websocket.app.state.active_calls += 1
     try:
@@ -171,6 +195,7 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
         )
     finally:
         websocket.app.state.active_calls -= 1
+        active_sessions.discard(session_id)
 
 
 # Re-export the supported-language set for clients/tests.

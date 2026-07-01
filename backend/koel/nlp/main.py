@@ -73,6 +73,7 @@ async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
                     embedder=_embedder,
                     top_k=top_k,
                     score_threshold=threshold,
+                    org_id=ctx.org_id,
                 )
             except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
                 retrieved = []

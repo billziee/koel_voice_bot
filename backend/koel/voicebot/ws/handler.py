@@ -13,6 +13,7 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 
 import httpx
@@ -23,11 +24,13 @@ from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
 from koel.common.telemetry import span
 from koel.stt.schemas import TranscribeRequest
+from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.persistence import persist_call
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
+from koel.voicebot.recording import upload_recording
 from koel.voicebot.session.models import CallStatus, SessionState
 from koel.voicebot.session.store import RedisSessionStore
 from koel.voicebot.ws.protocol import (
@@ -38,6 +41,9 @@ from koel.voicebot.ws.protocol import (
 )
 
 logger = get_logger("koel.voicebot.ws")
+
+# Cap the recording buffer so a very long call can't exhaust memory (~a few MB).
+_MAX_RECORDING_FRAMES = 500
 
 
 class CallSession:
@@ -74,6 +80,7 @@ class CallSession:
         self._last_input_at = time.monotonic()  # last *real* client input (no-input timer)
         self._speech_until = 0.0  # monotonic time the bot's current audio finishes playing
         self._send_lock = asyncio.Lock()
+        self._audio_buffer: list[bytes] = []  # bot WAV frames for the call recording (K)
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -91,6 +98,13 @@ class CallSession:
             # a 7s greeting would trip the 5s silence timer mid-sentence.
             duration_ms = message.data.get("duration_ms", 0) or 0
             self._speech_until = time.monotonic() + duration_ms / 1000
+            # Buffer bot WAV audio for the call recording (K), capped to bound memory.
+            is_wav = message.data.get("audio_format", "wav") == "wav"
+            if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+                try:
+                    self._audio_buffer.append(base64.b64decode(message.data.get("audio_b64", "")))
+                except (ValueError, base64.binascii.Error):
+                    pass
 
     async def run(self) -> None:
         # Echo our subprotocol when the client negotiated one (token-in-subprotocol
@@ -144,12 +158,12 @@ class CallSession:
             baseline = max(self._last_input_at, self._speech_until)
             remaining = (baseline + window_ms / 1000) - time.monotonic()
             if remaining <= 0:
-                await self._handle_no_input()
+                await self._safe_no_input()
                 continue
             try:
                 raw = await asyncio.wait_for(self._ws.receive_text(), timeout=remaining)
             except TimeoutError:
-                await self._handle_no_input()
+                await self._safe_no_input()
                 continue
 
             try:
@@ -266,6 +280,16 @@ class CallSession:
             )
         # else: backchannel / too short → keep talking (no message needed)
 
+    async def _safe_no_input(self) -> None:
+        """Run the no-input handler; a TTS/CRM failure here must not crash the
+        socket and silently drop the call (same never-drop posture as _dispatch)."""
+        try:
+            await self._handle_no_input()
+        except WebSocketDisconnect:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self._fail_call("no_input_failed", "A service error interrupted the turn.", exc)
+
     async def _handle_no_input(self) -> None:
         if self._state.status in (CallStatus.ended, CallStatus.escalating):
             return
@@ -381,6 +405,7 @@ class CallSession:
         if self._finalized:
             return
         self._finalized = True
+        await self._upload_recording()
         call_id = await persist_call(self._state)
         if call_id is not None:
             # Only flush Redis once the call is safely in PostgreSQL; otherwise
@@ -388,6 +413,15 @@ class CallSession:
             await self._store.delete(self._state.session_id)
         else:
             self._finalized = False  # allow a later attempt to persist
+
+    async def _upload_recording(self) -> None:
+        """Mux the buffered bot audio and upload it (K), then point recording_url at
+        the real object — or NULL it out when recording is disabled, so we never
+        persist a URL that resolves to nothing (audit finding)."""
+        wav = concat_wavs(self._audio_buffer) if self._audio_buffer else b""
+        url = await upload_recording(self._state.session_id, wav) if wav else None
+        # Persist only a URL that actually has bytes behind it (or None).
+        self._state.recording_url = url
 
     async def _persist_state(self) -> None:
         await self._store.save(self._state)

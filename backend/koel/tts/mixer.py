@@ -122,6 +122,27 @@ def wav_sample_rate(wav: bytes) -> int:
         return 0
 
 
+def concat_wavs(wavs: list[bytes], *, default_sr: int = 24000) -> bytes:
+    """Concatenate mono PCM-WAV clips into one WAV (K, call-recording buffer).
+
+    Non-WAV / undecodable clips are skipped. Returns b"" for no decodable input.
+    All KOEL bot audio is canonical 24 kHz mono, so PCM is joined without resampling.
+    """
+    pcm_parts: list[bytes] = []
+    sr = default_sr
+    for wav in wavs:
+        try:
+            pcm, rate, _channels, _bits = _read_wav(wav)
+        except (ValueError, struct.error, IndexError):
+            continue
+        if pcm.size:
+            pcm_parts.append(pcm.tobytes())
+            sr = rate or sr
+    if not pcm_parts:
+        return b""
+    return _to_wav(b"".join(pcm_parts), sr)
+
+
 def to_ulaw_8k(wav: bytes) -> bytes:
     """Transcode a PCM WAV to raw 8 kHz mono G.711 µ-law (PCMU) — the telephony
     seam (F). PSTN/Twilio Media Streams carry raw µ-law, not WAV, so this returns

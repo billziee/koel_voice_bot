@@ -31,10 +31,23 @@ class RateLimiter:
         self._window = window_s
         self._clock = clock
         self._hits: dict[str, list[float]] = defaultdict(list)
+        self._checks = 0
+
+    # Sweep idle keys every N checks so the dict can't grow unbounded with unique
+    # IPs (a cheap defence against memory exhaustion from spoofed source IPs).
+    _SWEEP_EVERY = 1024
+
+    def _maybe_sweep(self, now: float) -> None:
+        self._checks += 1
+        if self._checks % self._SWEEP_EVERY:
+            return
+        for k in [k for k, ts in self._hits.items() if not ts or now - ts[-1] >= self._window]:
+            del self._hits[k]
 
     def check(self, key: str) -> bool:
         """Record a hit; return True if within the limit, False if it should be rejected."""
         now = self._clock()
+        self._maybe_sweep(now)
         bucket = [t for t in self._hits[key] if now - t < self._window]
         if len(bucket) >= self._max:
             self._hits[key] = bucket
