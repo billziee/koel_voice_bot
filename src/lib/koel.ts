@@ -221,6 +221,11 @@ export class LiveCall {
     this.send({ type: 'audio_chunk', audio_b64, is_final: true, sample_rate: sampleRate });
   }
 
+  /** Send a captured microphone utterance (base64 webm/mp4/ogg) to real STT (Whisper). */
+  sendAudioChunk(audioB64: string, format = 'webm'): void {
+    this.send({ type: 'audio_chunk', audio_b64: audioB64, is_final: true, audio_format: format });
+  }
+
   /** Gate-1 barge-in candidate fired while the bot is speaking. */
   bargeIn(partialText: string, speechDurationMs: number, language = 'hinglish'): void {
     this.send({

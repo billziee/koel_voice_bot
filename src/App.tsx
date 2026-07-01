@@ -10,6 +10,7 @@ import {
   type BackendBot,
   type NewBotPayload,
 } from './lib/koel';
+import { MicCapture, micSupported } from './lib/audio';
 import {
   Play, Square, Mic, Settings, Clock, PhoneCall, Plus,
   BarChart2, User, Database, Activity, ShieldAlert, Zap,
@@ -1170,6 +1171,43 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
     if (callState === 'idle' || callState === 'ended') flushPlayback();
   }, [soundEnabled, callState]);
 
+  // --- real microphone capture (live mode) ---
+  const [micOn, setMicOn] = useState(false);
+  const micRef = useRef<MicCapture | null>(null);
+
+  const stopMic = () => {
+    micRef.current?.stop();
+    micRef.current = null;
+    setMicOn(false);
+  };
+
+  const toggleMic = async () => {
+    if (micOn) { stopMic(); return; }
+    if (!liveCall) { logEvent('Microphone is only available in live mode (real VB_Svc).', 'warn'); return; }
+    try {
+      const cap = new MicCapture({
+        onUtterance: (b64, fmt) => {
+          logEvent(`Mic utterance captured (${fmt}) → streaming to STT`, 'info');
+          liveCallRef.current?.sendAudioChunk(b64, fmt);
+        },
+        onError: (err) => logEvent(`Mic error: ${err instanceof Error ? err.message : String(err)}`, 'warn'),
+      });
+      await cap.start();
+      micRef.current = cap;
+      setMicOn(true);
+      logEvent('Microphone armed — speak; VAD endpoints each utterance', 'ok');
+    } catch (err) {
+      logEvent(`Microphone access denied/unavailable: ${err instanceof Error ? err.message : String(err)}`, 'warn');
+      setMicOn(false);
+    }
+  };
+
+  // Release the mic when the call ends and on unmount.
+  useEffect(() => {
+    if (callState === 'idle' || callState === 'ended') stopMic();
+  }, [callState]);
+  useEffect(() => () => stopMic(), []);
+
   const demoActiveRef = useRef(false);
   const [demoStepTooltip, setDemoStepTooltip] = useState<{ id: string, text: string } | null>(null);
 
@@ -2033,6 +2071,20 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
               <div className="p-3 md:p-4" style={{ backgroundColor: theme.surface }}>
                 <div className="flex items-center gap-3 overflow-x-auto pb-1">
                   <span className="text-[11px] font-bold uppercase tracking-widest whitespace-nowrap px-3 py-1.5 rounded-md border" style={{ color: theme.inkMuted, backgroundColor: theme.surfaceCard, borderColor: theme.rule }}>Customer Replies</span>
+                  {liveCall && micSupported() && (
+                    <button
+                      onClick={toggleMic}
+                      title={micOn ? 'Stop microphone' : 'Speak to the bot (real mic → Whisper STT)'}
+                      aria-pressed={micOn}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-full border text-sm font-semibold whitespace-nowrap transition-all shadow-sm focus-visible:ring-2"
+                      style={micOn
+                        ? { backgroundColor: theme.accent, borderColor: theme.accent, color: '#fff' }
+                        : { backgroundColor: theme.surfaceCard, borderColor: theme.rule, color: theme.ink }}
+                    >
+                      <Mic size={14} className={micOn ? 'animate-pulse' : ''} />
+                      {micOn ? 'Listening…' : 'Mic'}
+                    </button>
+                  )}
                   {callState === 'listening' ? (
                     scenario.chips.map((chip, idx) => {
                       const isDemoTarget = demoStepTooltip?.id === `chip-${idx}`;

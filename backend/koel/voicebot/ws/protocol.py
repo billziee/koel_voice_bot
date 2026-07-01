@@ -55,6 +55,9 @@ class ClientMessage(BaseModel):
     audio_b64: str | None = None
     is_final: bool = False
     sample_rate: int = 16000
+    # Container of the captured mic audio (webm/mp4/wav/…) so STT names the file
+    # with the right extension for the codec (real mic sends webm/opus).
+    audio_format: str = "wav"
     data: dict[str, Any] = Field(default_factory=dict)
 
 

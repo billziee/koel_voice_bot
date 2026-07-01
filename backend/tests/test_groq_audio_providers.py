@@ -29,6 +29,21 @@ def _wav(seconds: float, sr: int = 16000) -> bytes:
     )
 
 
+def test_stt_mime_map_and_ws_audio_format_plumbing():
+    # The mic sends webm/opus (or mp4/ogg); STT must map the container → MIME so
+    # Whisper identifies the codec, and the WS ClientMessage must carry the format.
+    from koel.stt.providers import _AUDIO_MIME
+    from koel.voicebot.ws.protocol import ClientMessage
+
+    for fmt in ("webm", "mp4", "ogg", "wav"):
+        assert fmt in _AUDIO_MIME
+    m = ClientMessage.model_validate(
+        {"type": "audio_chunk", "audio_b64": "x", "is_final": True, "audio_format": "webm"}
+    )
+    assert m.audio_format == "webm"
+    assert ClientMessage.model_validate({"type": "audio_chunk"}).audio_format == "wav"  # default
+
+
 def test_wav_duration_parsed_from_header():
     assert abs(_wav_duration_ms(_wav(1.5)) - 1500) <= 2
     assert _wav_duration_ms(b"not a wav") == 0

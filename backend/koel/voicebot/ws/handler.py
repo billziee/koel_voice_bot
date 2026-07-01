@@ -215,6 +215,7 @@ class CallSession:
                 audio_b64=msg.audio_b64 or "",
                 sample_rate=msg.sample_rate,
                 is_final=msg.is_final,
+                audio_format=msg.audio_format,
             )
         )
         if not stt.is_final:
