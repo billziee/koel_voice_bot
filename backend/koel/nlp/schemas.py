@@ -47,6 +47,13 @@ class RetrievedChunk(BaseModel):
     score: float
 
 
+class Citation(BaseModel):
+    """A KB chunk the reply grounded a product fact in (PRD §12 anti-hallucination)."""
+
+    title: str
+    excerpt: str = ""
+
+
 class NlpResponse(BaseModel):
     """Structured turn output. ``tone`` is always present (PRD §14 schema validation)."""
 
@@ -59,3 +66,8 @@ class NlpResponse(BaseModel):
     end_call: bool = False
     confidence: float = Field(ge=0.0, le=1.0, default=0.8)
     retrieved: list[RetrievedChunk] = Field(default_factory=list)
+    # KB chunks the reply cited; empty when the turn asserts no product fact.
+    citations: list[Citation] = Field(default_factory=list)
+    # False when a product-fact assertion could not be tied to a citation — the
+    # orchestrator/eval can treat this as a soft grounding failure (never hard-drop).
+    grounded: bool = True

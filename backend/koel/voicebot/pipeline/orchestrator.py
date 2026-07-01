@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from koel.common.logging import get_logger
 from koel.common.schemas import Language, Tone
 from koel.common.telemetry import current_trace_id, span
+from koel.common.text_guard import redact_pii
 from koel.nlp.schemas import Intent, NlpResponse, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
@@ -67,6 +68,9 @@ class Orchestrator:
         ``ambient`` mixes the call-floor bed under the speech (PRD §06); callers
         set it False to mute the bed during an escalation handoff.
         """
+        # Never speak/persist a raw account/card/phone number (PRD §11/§14). Names
+        # and short figures (fees, rewards) are preserved — see redact_pii.
+        text = redact_pii(text)
         turn = Turn(
             index=state.next_turn_index(),
             speaker="bot",
