@@ -125,9 +125,12 @@ async def start_session(
         owner_sub=user.sub,
         customer_id=payload.customer_id,
         use_case=bot.use_case.value,
+        org_id=bot.org_id,
         language=language,
         rag_enabled=bot.rag_enabled,
         rag_index=bot.rag_index,
+        rag_top_k=bot.rag_top_k,
+        rag_score_threshold=bot.rag_score_threshold,
         default_tone=default_tone,
         ambient_profile=bot.ambient_profile,
         greeting_template=bot.greeting_template or "",
@@ -154,7 +157,7 @@ async def start_session(
 
     return StartSessionResponse(
         session_id=session_id,
-        ws_token=issue_token(user.sub, kind="ws", role=user.role),
+        ws_token=issue_token(user.sub, kind="ws", role=user.role, org_id=user.org_id),
         ws_url=f"/ws/calls/{session_id}",
         crm_context=crm_context,
         language=language.value,

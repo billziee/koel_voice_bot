@@ -60,12 +60,19 @@ async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
     if ctx.rag_enabled and ctx.rag_index:
         with span("nlp.rag_retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
             try:
+                # Per-bot overrides (W) win over the service defaults when set.
+                top_k = ctx.rag_top_k if ctx.rag_top_k is not None else _settings.rag_top_k
+                threshold = (
+                    ctx.rag_score_threshold
+                    if ctx.rag_score_threshold is not None
+                    else _settings.rag_score_threshold
+                )
                 retrieved = await retrieve(
                     ctx.customer_text,
                     rag_index=ctx.rag_index,
                     embedder=_embedder,
-                    top_k=_settings.rag_top_k,
-                    score_threshold=_settings.rag_score_threshold,
+                    top_k=top_k,
+                    score_threshold=threshold,
                 )
             except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
                 retrieved = []

@@ -51,10 +51,14 @@ class SessionState(BaseModel):
     # eavesdrop another's live call (authZ, not just authN).
     owner_sub: str | None = None
     customer_id: str | None = None
+    org_id: str | None = None  # tenant scope carried onto the CallLog (AF)
     use_case: str
     language: Language = Language.hinglish
     rag_enabled: bool = True
     rag_index: str | None = None
+    # Per-bot RAG tuning overrides (W); None → NLP_svc defaults.
+    rag_top_k: int | None = None
+    rag_score_threshold: float | None = None
     default_tone: Tone = Tone.neutral
     ambient_profile: str = "callfloor"
     greeting_template: str = ""  # from bot config; rendered with CRM fields at greet

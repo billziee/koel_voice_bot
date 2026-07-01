@@ -33,6 +33,7 @@ class TokenClaims(BaseModel):
     sub: str  # user id / demo username
     kind: TokenKind
     role: str = "operator"
+    org_id: str | None = None  # tenant scope (AF); None = single-tenant pilot
     exp: int
     iat: int
     jti: str
@@ -47,6 +48,7 @@ def issue_token(
     *,
     kind: TokenKind,
     role: str = "operator",
+    org_id: str | None = None,
     settings: CommonSettings | None = None,
 ) -> str:
     settings = settings or get_common_settings()
@@ -56,6 +58,7 @@ def issue_token(
         "sub": subject,
         "kind": kind,
         "role": role,
+        "org_id": org_id,
         "iat": issued,
         "exp": issued + ttl,
         "jti": uuid.uuid4().hex,

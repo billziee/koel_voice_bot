@@ -39,6 +39,9 @@ class TurnContext(BaseModel):
     crm_context: dict = Field(default_factory=dict)
     rag_enabled: bool = True
     rag_index: str | None = None
+    # Per-bot RAG tuning overrides (W); None → NLP_svc config defaults.
+    rag_top_k: int | None = None
+    rag_score_threshold: float | None = None
 
 
 class RetrievedChunk(BaseModel):

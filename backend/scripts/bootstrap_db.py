@@ -1,6 +1,7 @@
 """Bootstrap the database for local/demo (PRD §10 steps 2 & 4).
 
-Creates the pgvector extension, all tables, then seeds:
+Schema is owned by Alembic (O) — this runs ``alembic upgrade head`` (which also
+creates the pgvector extension + HNSW index), then seeds:
   - the Dummy CRM customers (all four use cases + a DND record),
   - three demo bot instances (HDFC / ICICI / Insurance, per PRD §09),
   - a small RAG knowledge base for the credit-card use case.
@@ -11,14 +12,33 @@ Run: python -m scripts.bootstrap_db
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+from pathlib import Path
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from koel.crm.seed import SEED_CUSTOMERS
-from koel.db.models import Base, BotConfig, CrmCustomer, KnowledgeChunk, UseCase
-from koel.db.session import get_engine, session_scope
+from koel.db.models import BotConfig, CrmCustomer, KnowledgeChunk, UseCase
+from koel.db.session import session_scope
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.rag import build_embedder
+
+# Backend root (contains alembic.ini) so migrations run regardless of CWD.
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_migrations() -> None:
+    """Apply Alembic migrations synchronously before the async seed phase.
+
+    Run as a subprocess (not alembic.command) because env.py drives its own
+    asyncio loop, which cannot be nested inside this script's asyncio.run.
+    """
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=_BACKEND_ROOT,
+        check=True,
+    )
 
 DEMO_BOTS = [
     {
@@ -70,19 +90,7 @@ KB_CC: list[dict] = [
 ]
 
 
-async def main() -> None:
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
-        # HNSW index for sub-100ms cosine ANN at scale (idempotent; pgvector >= 0.5).
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw "
-                "ON knowledge_chunks USING hnsw (embedding vector_cosine_ops)"
-            )
-        )
-
+async def _seed() -> None:
     embedder = build_embedder(get_nlp_settings())
 
     async with session_scope() as db:
@@ -116,8 +124,9 @@ async def main() -> None:
     aclose = getattr(embedder, "aclose", None)
     if aclose is not None:
         await aclose()
-    print("Bootstrap complete: tables created, CRM + bots + knowledge base seeded.")
+    print("Bootstrap complete: migrations applied, CRM + bots + knowledge base seeded.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _run_migrations()  # sync: owns schema (Alembic) before the async seed
+    asyncio.run(_seed())

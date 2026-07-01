@@ -242,6 +242,8 @@ class Orchestrator:
             crm_context=state.crm_context,
             rag_enabled=state.rag_enabled,
             rag_index=state.rag_index,
+            rag_top_k=state.rag_top_k,
+            rag_score_threshold=state.rag_score_threshold,
         )
         with span("nlp.respond", session_id=state.session_id):
             nlp_task = asyncio.create_task(self._clients.respond(ctx))

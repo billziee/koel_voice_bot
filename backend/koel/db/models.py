@@ -82,6 +82,9 @@ class CrmCustomer(Base):
     __tablename__ = "crm_customers"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Nullable tenant scope (AF). Single-tenant pilot leaves it NULL; a later
+    # backfill assigns orgs without a schema change (multi-tenancy deferred to P2).
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(120))  # PII — mask in logs
     phone: Mapped[str] = mapped_column(String(20))
     language: Mapped[str] = mapped_column(String(16), default="hinglish")
@@ -103,6 +106,7 @@ class BotConfig(Base):
     __tablename__ = "bot_configs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF
     name: Mapped[str] = mapped_column(String(120))
     use_case: Mapped[UseCase] = mapped_column(Enum(UseCase))
     language: Mapped[str] = mapped_column(String(16), default="hinglish")
@@ -111,6 +115,9 @@ class BotConfig(Base):
     greeting_template: Mapped[str] = mapped_column(Text, default="")
     rag_enabled: Mapped[bool] = mapped_column(default=True)
     rag_index: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Per-bot RAG tuning overrides (W). NULL → fall back to the NLP_svc defaults.
+    rag_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rag_score_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_tone: Mapped[str] = mapped_column(String(16), default="neutral")
     ambient_profile: Mapped[str] = mapped_column(String(16), default="callfloor")
     # Free-form config: CRM field mapping, escalation rules, success criteria.
@@ -128,6 +135,7 @@ class CallLog(Base):
     __tablename__ = "call_logs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     bot_id: Mapped[str] = mapped_column(ForeignKey("bot_configs.id"))
     customer_id: Mapped[str | None] = mapped_column(
@@ -182,6 +190,7 @@ class KnowledgeChunk(Base):
     __tablename__ = "knowledge_chunks"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF
     rag_index: Mapped[str] = mapped_column(String(64), index=True)
     use_case: Mapped[UseCase] = mapped_column(Enum(UseCase))
     language: Mapped[str] = mapped_column(String(16), default="en")
@@ -189,4 +198,36 @@ class KnowledgeChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# --- CRM interaction log + config audit (AD / AF) ---------------------------
+
+
+class InteractionLogRow(Base):
+    """Persisted CRM interaction (AD). idempotency_key makes retried writes safe."""
+
+    __tablename__ = "interaction_logs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    customer_id: Mapped[str] = mapped_column(String(32), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    event: Mapped[str] = mapped_column(String(64))
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Orchestrator retries send the same key → unique constraint dedupes the write.
+    idempotency_key: Mapped[str | None] = mapped_column(String(80), nullable=True, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class BotConfigAudit(Base):
+    """Who changed a bot config, when, and the before/after (AF governance)."""
+
+    __tablename__ = "bot_config_audits"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    bot_id: Mapped[str] = mapped_column(String(32), index=True)
+    user_sub: Mapped[str] = mapped_column(String(120))
+    op: Mapped[str] = mapped_column(String(16))  # "create" | "update"
+    before: Mapped[dict] = mapped_column(JSON, default=dict)
+    after: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

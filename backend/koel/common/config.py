@@ -57,6 +57,12 @@ class CommonSettings(BaseSettings):
 
     # --- PostgreSQL + pgvector ---
     database_url: str = "postgresql+asyncpg://koel:koel@localhost:5432/koel"
+    # Connection pool (Postgres only; PRD §14 stability under load). Sized for a
+    # per-service uvicorn worker — tune with worker count against RDS max_connections.
+    db_pool_size: int = 10
+    db_max_overflow: int = 5
+    db_pool_recycle_s: int = 1800  # recycle before RDS/proxy idle timeout
+    db_pool_timeout_s: int = 30
 
     # --- Inter-service base URLs (the orchestrator fans out to these) ---
     stt_svc_url: str = "http://localhost:8101"
