@@ -4,6 +4,7 @@ import {
   getBots as apiGetBots,
   startSession as apiStartSession,
   createBot,
+  patchBot,
   getKnowledgeIndexes,
   createKnowledgeChunk,
   getAllStats,
@@ -574,10 +575,25 @@ export default function KoelApp() {
         escalationRate: '0%', lastActive: 'just now', lastActiveTs: Date.now(),
       }]);
       setBotConfigs(prev => ({ ...prev, [newId]: config }));
+    } else if (live && token) {
+      // Existing bot → persist the edit to VB_Svc (PATCH) so it survives reload
+      // and is audited server-side (S/AF). Falls back to local-only on failure.
+      const backendId = bots.find(b => b.id === botId)?.backendId;
+      if (backendId) {
+        try {
+          const { use_case: _uc, ...patch } = configToNewBot(config);
+          await patchBot(token, backendId, patch);
+          showToast('Configuration saved to VB_Svc — effective on next session start.');
+          setCurrentView('dashboard');
+          return;
+        } catch {
+          showToast('Could not save to backend — kept locally only.');
+        }
+      }
     }
     showToast('Configuration saved — takes effect on next session start.');
     setCurrentView('dashboard');
-  }, [showToast, live, token]);
+  }, [showToast, live, token, bots]);
 
   const handleLogin = useCallback(async (opts: { live: boolean; token: string | null }) => {
     setLive(opts.live);

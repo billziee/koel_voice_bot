@@ -66,6 +66,11 @@ class CommonSettings(BaseSettings):
     db_pool_recycle_s: int = 1800  # recycle before RDS/proxy idle timeout
     db_pool_timeout_s: int = 30
 
+    # --- Call recording + retention (K, PRD §11 audit / 30-day retention) ---
+    s3_recording_bucket: str = ""  # empty = recording disabled (dev); set in prod
+    s3_region: str = "ap-south-1"
+    recording_retention_days: int = 30
+
     # --- Inter-service base URLs (the orchestrator fans out to these) ---
     stt_svc_url: str = "http://localhost:8101"
     nlp_svc_url: str = "http://localhost:8102"

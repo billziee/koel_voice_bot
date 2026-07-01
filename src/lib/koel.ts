@@ -107,6 +107,18 @@ export async function createBot(token: string, payload: NewBotPayload): Promise<
   return jsonOrThrow(res);
 }
 
+// Partial in-place edit (S/AF) — server persists + writes an audit row.
+export type BotConfigPatch = Partial<Omit<NewBotPayload, 'use_case'>> & { active?: boolean };
+
+export async function patchBot(token: string, botId: string, patch: BotConfigPatch): Promise<BackendBot> {
+  const res = await fetch(`${KOEL_API}/v1/bots/${encodeURIComponent(botId)}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  });
+  return jsonOrThrow(res);
+}
+
 // ---- Analytics (AE) --------------------------------------------------------
 
 export interface BotStats {

@@ -65,16 +65,48 @@ async def _warm_filler_cache(runtime) -> None:
             logger.warning("filler_warm_failed language=%s", language.value)
 
 
+# How long the lifespan waits for in-flight WS calls to finish on SIGTERM (P).
+_DRAIN_TIMEOUT_S = 12.0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     runtime = build_runtime(settings)
     app.state.runtime = runtime
+    app.state.active_calls = 0
     logger.info("voicebot_svc starting; redis_ok=%s", await runtime.store.ping())
     await _warm_filler_cache(runtime)
     yield
+    # Graceful SIGTERM drain (P): stop accepting new calls, let live ones finish
+    # (or hit the grace-TTL finalizer) before tearing down pools.
+    waited = 0.0
+    while app.state.active_calls > 0 and waited < _DRAIN_TIMEOUT_S:
+        logger.info("draining_ws_calls active=%d", app.state.active_calls)
+        await asyncio.sleep(0.5)
+        waited += 0.5
     await runtime.clients.aclose()
     await runtime.store.close()
     await knowledge.aclose_embedder()
+
+
+async def _readiness() -> dict[str, bool]:
+    """Readiness probe (P): DB + Redis reachable. Best-effort per dependency."""
+    from sqlalchemy import text
+
+    from koel.db.session import get_engine
+
+    checks: dict[str, bool] = {}
+    try:
+        async with get_engine().connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["postgres"] = True
+    except Exception:  # noqa: BLE001
+        checks["postgres"] = False
+    try:
+        checks["redis"] = bool(await app.state.runtime.store.ping())
+    except Exception:  # noqa: BLE001
+        checks["redis"] = False
+    return checks
 
 
 app = create_app(
@@ -83,6 +115,7 @@ app = create_app(
     description="Orchestrator: session lifecycle, STT→NLP→TTS routing, barge-in, filler, recovery.",
     settings=settings,
     lifespan=lifespan,
+    readiness_check=_readiness,
 )
 
 app.include_router(auth.router)
@@ -121,18 +154,23 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             await websocket.close(code=1008, reason="session expired")
             return
 
-    await handle_connection(
-        websocket,
-        session_id=session_id,
-        state=state,
-        settings=settings,
-        store=runtime.store,
-        orchestrator=runtime.orchestrator,
-        bargein=runtime.bargein,
-        clients=runtime.clients,
-        resumed=resumed,
-        background_tasks=runtime.background_tasks,
-    )
+    # Track in-flight calls so the lifespan can drain them on SIGTERM (P).
+    websocket.app.state.active_calls += 1
+    try:
+        await handle_connection(
+            websocket,
+            session_id=session_id,
+            state=state,
+            settings=settings,
+            store=runtime.store,
+            orchestrator=runtime.orchestrator,
+            bargein=runtime.bargein,
+            clients=runtime.clients,
+            resumed=resumed,
+            background_tasks=runtime.background_tasks,
+        )
+    finally:
+        websocket.app.state.active_calls -= 1
 
 
 # Re-export the supported-language set for clients/tests.
