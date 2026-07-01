@@ -5,10 +5,12 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- The application creates tables from koel.db.models via metadata.create_all.
--- An IVFFlat index on the embedding column accelerates RAG retrieval once the
--- knowledge base is seeded (PRD §10 step 2). Create it after seeding so the
--- index lists reflect real data distribution:
+-- scripts/bootstrap_db.py then creates an HNSW index on the embedding column for
+-- sub-100ms cosine ANN retrieval at scale (pgvector >= 0.5; preferred over IVFFlat
+-- for recall and because it needs no post-seed rebuild):
 --
---   CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
---     ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
---     WITH (lists = 100);
+--   CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw
+--     ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+--
+-- (IVFFlat alternative for pgvector < 0.5, built AFTER seeding so lists reflect data:
+--   CREATE INDEX ... USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);)

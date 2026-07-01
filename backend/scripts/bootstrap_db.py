@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import asyncio
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, text
 
 from koel.crm.seed import SEED_CUSTOMERS
 from koel.db.models import Base, BotConfig, CrmCustomer, KnowledgeChunk, UseCase
 from koel.db.session import get_engine, session_scope
-from koel.nlp.rag import HashEmbedder
+from koel.nlp.config import get_nlp_settings
+from koel.nlp.rag import build_embedder
 
 DEMO_BOTS = [
     {
@@ -74,8 +75,15 @@ async def main() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        # HNSW index for sub-100ms cosine ANN at scale (idempotent; pgvector >= 0.5).
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw "
+                "ON knowledge_chunks USING hnsw (embedding vector_cosine_ops)"
+            )
+        )
 
-    embedder = HashEmbedder()
+    embedder = build_embedder(get_nlp_settings())
 
     async with session_scope() as db:
         # CRM customers
@@ -88,23 +96,26 @@ async def main() -> None:
             if await db.get(BotConfig, bot["id"]) is None:
                 db.add(BotConfig(**bot))
 
-        # Knowledge base (skip if already seeded)
-        existing = (
-            await db.execute(select(KnowledgeChunk).where(KnowledgeChunk.rag_index == "cc_hdfc"))
-        ).first()
-        if existing is None:
-            for chunk in KB_CC:
-                db.add(
-                    KnowledgeChunk(
-                        rag_index="cc_hdfc",
-                        use_case=UseCase.credit_card,
-                        language="hinglish",
-                        title=chunk["title"],
-                        content=chunk["content"],
-                        embedding=await embedder.embed(chunk["title"] + " " + chunk["content"]),
-                    )
+        # Knowledge base: refresh so embeddings always match the current embedder
+        # (switching hash → nvidia requires re-embedding). Chunks are "passages".
+        await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.rag_index == "cc_hdfc"))
+        for chunk in KB_CC:
+            db.add(
+                KnowledgeChunk(
+                    rag_index="cc_hdfc",
+                    use_case=UseCase.credit_card,
+                    language="hinglish",
+                    title=chunk["title"],
+                    content=chunk["content"],
+                    embedding=await embedder.embed(
+                        chunk["title"] + " " + chunk["content"], input_type="passage"
+                    ),
                 )
+            )
 
+    aclose = getattr(embedder, "aclose", None)
+    if aclose is not None:
+        await aclose()
     print("Bootstrap complete: tables created, CRM + bots + knowledge base seeded.")
 
 

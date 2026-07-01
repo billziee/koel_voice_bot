@@ -11,17 +11,18 @@ from koel.common.auth import ServicePrincipal
 from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
-from koel.nlp.rag import HashEmbedder, retrieve
+from koel.nlp.rag import build_embedder, retrieve
 from koel.nlp.schemas import NlpResponse, TurnContext
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     yield
-    # Release the Groq HTTP client's connection pool on shutdown.
-    aclose = getattr(_provider, "aclose", None)
-    if aclose is not None:
-        await aclose()
+    # Release provider + embedder HTTP client pools on shutdown.
+    for obj in (_provider, _embedder):
+        aclose = getattr(obj, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 app = create_app(
@@ -46,8 +47,9 @@ def _build_provider() -> NlpProvider:
     return StubNlpProvider()
 
 
+_settings = get_nlp_settings()
 _provider = _build_provider()
-_embedder = HashEmbedder()
+_embedder = build_embedder(_settings)
 router = APIRouter(prefix="/v1", tags=["nlp"])
 
 
@@ -59,7 +61,11 @@ async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
         with span("nlp.rag_retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
             try:
                 retrieved = await retrieve(
-                    ctx.customer_text, rag_index=ctx.rag_index, embedder=_embedder
+                    ctx.customer_text,
+                    rag_index=ctx.rag_index,
+                    embedder=_embedder,
+                    top_k=_settings.rag_top_k,
+                    score_threshold=_settings.rag_score_threshold,
                 )
             except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
                 retrieved = []
