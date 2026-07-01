@@ -27,6 +27,29 @@ from koel.common.telemetry import configure_telemetry
 
 CORRELATION_HEADER = "x-correlation-id"
 
+# Swagger/ReDoc load assets from a CDN, so a strict CSP would break them; skip CSP
+# on those paths only (the rest of the headers still apply everywhere).
+_DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+def _apply_security_headers(response: Response, path: str, settings: CommonSettings) -> None:
+    """OWASP baseline response headers (PRD §08 / web security rules)."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "microphone=(self), camera=(), geolocation=()"
+    )
+    if settings.is_production:  # HSTS only makes sense over HTTPS
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    if not path.startswith(_DOCS_PATHS):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+        )
+
 
 def create_app(
     *,
@@ -44,6 +67,15 @@ def create_app(
             "KOEL_JWT_SECRET must be set to a strong value in production "
             "(the default dev secret is insecure)."
         )
+    # In production, CORS must be an explicit allowlist — never '*' or empty
+    # (Bearer auth mitigates but wildcard origins still widen the attack surface).
+    if settings.is_production:
+        cors = settings.cors_allow_origins.strip()
+        if not cors or cors == "*":
+            raise RuntimeError(
+                "KOEL_CORS_ALLOW_ORIGINS must be an explicit comma-separated allowlist "
+                "in production (not '*' or empty)."
+            )
     configure_logging(level=settings.log_level, json_output=settings.log_json)
     configure_telemetry(service_name, settings)
     logger = get_logger(f"koel.{service_name}")
@@ -85,6 +117,7 @@ def create_app(
         finally:
             otel_context.detach(token)
         response.headers[CORRELATION_HEADER] = cid
+        _apply_security_headers(response, request.url.path, settings)
         return response
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
