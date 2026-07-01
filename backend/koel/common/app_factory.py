@@ -23,7 +23,7 @@ from koel.common.config import CommonSettings, get_common_settings
 from koel.common.errors import register_exception_handlers
 from koel.common.logging import configure_logging, get_logger, set_correlation_id
 from koel.common.schemas import HealthResponse, HealthStatus
-from koel.common.telemetry import configure_telemetry
+from koel.common.telemetry import configure_metrics, configure_telemetry
 
 CORRELATION_HEADER = "x-correlation-id"
 
@@ -78,6 +78,7 @@ def create_app(
             )
     configure_logging(level=settings.log_level, json_output=settings.log_json)
     configure_telemetry(service_name, settings)
+    configure_metrics(service_name, settings)
     logger = get_logger(f"koel.{service_name}")
 
     @asynccontextmanager

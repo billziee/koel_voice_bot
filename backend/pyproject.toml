@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",  # coverage gate in CI (R)
     "aiosqlite>=0.20",  # in-memory SQLAlchemy engine for integration tests
     "markdown>=3.5",  # docs/build_html.py renders HLD/LLD markdown → HTML
     "ruff>=0.4",
@@ -55,3 +56,14 @@ ignore = ["UP042", "B008"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Coverage gate (R) — run in CI as: pytest --cov (config below applies).
+# Not in default addopts so local `pytest` stays fast and pytest-cov-optional.
+[tool.coverage.run]
+source = ["koel"]
+omit = ["koel/*/main.py", "*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 75
+show_missing = true
+exclude_lines = ["pragma: no cover", "raise NotImplementedError", "if __name__"]

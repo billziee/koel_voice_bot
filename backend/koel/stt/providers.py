@@ -162,6 +162,22 @@ class GroqWhisperProvider(SttProvider):
         probs = [math.exp(s.get("avg_logprob", -0.5)) for s in segments]
         return max(0.0, min(1.0, sum(probs) / len(probs)))
 
+    @staticmethod
+    def _language_confidence(segments: list[dict]) -> float:
+        """Data-derived language-detection confidence (AC).
+
+        Whisper's verbose_json has no explicit language-probability field, so we
+        proxy it from transcription quality: mean exp(avg_logprob) discounted by
+        the mean no_speech_prob. High-quality, speech-dominant audio → high
+        confidence; noise/uncertain segments → low (which lets the orchestrator's
+        unsupported-language fallback trigger correctly instead of on a constant).
+        """
+        if not segments:
+            return 0.5
+        quality = sum(math.exp(s.get("avg_logprob", -0.7)) for s in segments) / len(segments)
+        speech = 1.0 - sum(s.get("no_speech_prob", 0.0) for s in segments) / len(segments)
+        return max(0.0, min(1.0, quality * speech))
+
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
         try:
             raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
@@ -196,6 +212,7 @@ class GroqWhisperProvider(SttProvider):
             return await self._fallback.transcribe(request)
 
         text = (data.get("text") or "").strip()
+        segments = data.get("segments", [])
         lang = _WHISPER_LANG.get(str(data.get("language", "")).lower(), Language.other)
         if request.language_hint and lang is Language.other:
             lang = request.language_hint
@@ -205,9 +222,9 @@ class GroqWhisperProvider(SttProvider):
             text=text,
             is_final=request.is_final,
             language_id=lang,
-            language_confidence=0.95,
+            language_confidence=self._language_confidence(segments),  # AC: data-derived
             speech_duration_ms=duration_ms or max(120, len(text) * 60),
-            word_confidence=self._confidence(data.get("segments", [])),
+            word_confidence=self._confidence(segments),
         )
 
     async def aclose(self) -> None:

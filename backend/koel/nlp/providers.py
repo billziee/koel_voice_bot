@@ -16,6 +16,7 @@ import httpx
 
 from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
+from koel.common.telemetry import record_nlp_usage
 from koel.common.text_guard import redact_pii, sanitize_crm, sanitize_untrusted, truncate_history
 from koel.nlp.schemas import Citation, Intent, NlpResponse, RetrievedChunk, TurnContext
 
@@ -363,6 +364,19 @@ class GroqNlpProvider(NlpProvider):
             grounded=grounded,
         )
 
+    # llama-3.3-70b-versatile blended $/token (Groq public pricing, ~$0.59/M in +
+    # $0.79/M out; blended flat rate is fine for a cost signal, not billing).
+    _USD_PER_TOKEN = 0.7 / 1_000_000
+
+    def _record_usage(self, usage: dict) -> None:
+        """Emit Groq token + estimated-cost metrics (Q). Best-effort; never raises."""
+        try:
+            tokens = int(usage.get("total_tokens", 0))
+            if tokens:
+                record_nlp_usage(tokens, tokens * self._USD_PER_TOKEN)
+        except (TypeError, ValueError):
+            pass
+
     @staticmethod
     def _is_retriable(exc: BaseException) -> bool:
         if isinstance(exc, httpx.TimeoutException):
@@ -383,19 +397,21 @@ class GroqNlpProvider(NlpProvider):
             ],
         }
 
-        async def _call() -> str:
+        async def _call() -> dict:
             resp = await self._client.post(self._url, json=payload, headers=self._headers)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            return resp.json()
 
         try:
-            content = await retry_async(
+            body = await retry_async(
                 _call,
                 attempts=3,
                 base_delay=0.2,
                 should_retry=self._is_retriable,
                 breaker=self._breaker,
             )
+            self._record_usage(body.get("usage") or {})
+            content = body["choices"][0]["message"]["content"]
             return self._parse(ctx, retrieved, content)
         except Exception:  # noqa: BLE001 — never drop a live turn; degrade to the stub
             logger.warning(

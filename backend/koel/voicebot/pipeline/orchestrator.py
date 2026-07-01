@@ -14,12 +14,18 @@ the WebSocket handler today and a telephony bridge later.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
 from koel.common.schemas import Language, Tone
-from koel.common.telemetry import current_trace_id, span
+from koel.common.telemetry import (
+    current_trace_id,
+    record_hop_latency,
+    record_turn_latency,
+    span,
+)
 from koel.common.text_guard import redact_pii
 from koel.nlp.schemas import Intent, NlpResponse, TurnContext
 from koel.stt.schemas import TranscriptResult
@@ -92,10 +98,11 @@ class Orchestrator:
                 index=turn.index,
             )
         )
-        with span("tts.synthesize", session_id=state.session_id, tone=tone.value):
+        with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
             # Capture the trace id for the §11 audit / §14 latency dashboards.
             if state.trace_id is None:
                 state.trace_id = current_trace_id()
+            t0 = time.monotonic()
             audio = await self._clients.synthesize(
                 SynthesizeRequest(
                     session_id=state.session_id,
@@ -109,6 +116,11 @@ class Orchestrator:
                     telephony=self._settings.telephony_mode,
                 )
             )
+            tts_ms = (time.monotonic() - t0) * 1000
+            record_hop_latency("tts", tts_ms)
+            tts_span.set_attribute("synthesize_latency_ms", round(tts_ms, 1))
+            tts_span.set_attribute("fallback_used", audio.fallback_used)
+            tts_span.set_attribute("sample_rate", audio.sample_rate)
         await send(
             ServerMessage.of(
                 ServerMessageType.audio_chunk,
@@ -165,6 +177,16 @@ class Orchestrator:
         self, state: SessionState, send: Sender, stt: TranscriptResult
     ) -> None:
         """Process one completed customer utterance through the pipeline."""
+        turn_start = time.monotonic()
+        try:
+            await self._handle_final_transcript(state, send, stt)
+        finally:
+            # End-to-end audio-in→audio-out turn latency vs the §14 <300ms budget (Q).
+            record_turn_latency((time.monotonic() - turn_start) * 1000)
+
+    async def _handle_final_transcript(
+        self, state: SessionState, send: Sender, stt: TranscriptResult
+    ) -> None:
         # Reset no-input bookkeeping — the customer spoke.
         state.no_input_strikes = 0
 
@@ -248,13 +270,16 @@ class Orchestrator:
             rag_score_threshold=state.rag_score_threshold,
         )
         with span("nlp.respond", session_id=state.session_id):
+            t0 = time.monotonic()
             nlp_task = asyncio.create_task(self._clients.respond(ctx))
             trigger_s = self._settings.filler_trigger_ms / 1000
             try:
-                return await asyncio.wait_for(asyncio.shield(nlp_task), timeout=trigger_s)
+                result = await asyncio.wait_for(asyncio.shield(nlp_task), timeout=trigger_s)
             except TimeoutError:
                 await self._inject_filler(state, send)
-                return await nlp_task
+                result = await nlp_task
+            record_hop_latency("nlp", (time.monotonic() - t0) * 1000)
+            return result
 
     async def _inject_filler(self, state: SessionState, send: Sender) -> None:
         clip = self._filler.next_clip(state.session_id, state.language)

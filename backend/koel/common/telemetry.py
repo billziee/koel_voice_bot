@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
@@ -29,6 +29,14 @@ from koel.common.config import CommonSettings
 
 _tracer: Tracer | None = None
 _provider_set = False
+_meter_provider_set = False
+
+# Metric instruments (created once per process in configure_metrics).
+_turn_latency = None  # audio-in → audio-out, ms
+_hop_latency = None  # per STT/NLP/TTS hop, ms
+_errors = None  # pipeline errors by hop
+_nlp_tokens = None  # Groq tokens consumed
+_nlp_cost = None  # Groq cost, USD
 
 
 def configure_telemetry(service_name: str, settings: CommonSettings) -> None:
@@ -67,6 +75,73 @@ def configure_telemetry(service_name: str, settings: CommonSettings) -> None:
     trace.set_tracer_provider(provider)
     _provider_set = True
     _tracer = trace.get_tracer(service_name)
+
+
+def configure_metrics(service_name: str, settings: CommonSettings) -> None:
+    """Wire the global meter provider + KOEL instruments once per process (Q).
+
+    Exports over OTLP when an endpoint is configured (→ collector → Prometheus/
+    Grafana); otherwise instruments still record to a no-op reader so call sites
+    never branch on whether metrics are enabled.
+    """
+    global _meter_provider_set
+    global _turn_latency, _hop_latency, _errors, _nlp_tokens, _nlp_cost
+
+    if settings.otel_enabled and not _meter_provider_set:
+        from opentelemetry.sdk.metrics import MeterProvider
+
+        resource = Resource.create(
+            {SERVICE_NAME: service_name, "deployment.environment": settings.environment}
+        )
+        readers = []
+        if settings.otel_exporter_otlp_endpoint:
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+            readers.append(
+                PeriodicExportingMetricReader(
+                    OTLPMetricExporter(
+                        endpoint=settings.otel_exporter_otlp_endpoint, insecure=True
+                    )
+                )
+            )
+        metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=readers))
+        _meter_provider_set = True
+
+    meter = metrics.get_meter(service_name)
+    _turn_latency = meter.create_histogram(
+        "koel.turn.latency", unit="ms", description="End-to-end audio-in→audio-out turn latency"
+    )
+    _hop_latency = meter.create_histogram(
+        "koel.hop.latency", unit="ms", description="Per-hop (stt/nlp/tts) latency"
+    )
+    _errors = meter.create_counter("koel.errors", description="Pipeline errors by hop")
+    _nlp_tokens = meter.create_counter("koel.nlp.tokens", description="Groq tokens consumed")
+    _nlp_cost = meter.create_counter(
+        "koel.nlp.cost_usd", unit="USD", description="Estimated Groq spend"
+    )
+
+
+def record_turn_latency(ms: float) -> None:
+    if _turn_latency is not None:
+        _turn_latency.record(ms)
+
+
+def record_hop_latency(hop: str, ms: float) -> None:
+    if _hop_latency is not None:
+        _hop_latency.record(ms, {"hop": hop})
+
+
+def record_error(hop: str) -> None:
+    if _errors is not None:
+        _errors.add(1, {"hop": hop})
+
+
+def record_nlp_usage(tokens: int, cost_usd: float) -> None:
+    if _nlp_tokens is not None:
+        _nlp_tokens.add(tokens)
+    if _nlp_cost is not None:
+        _nlp_cost.add(cost_usd)
 
 
 def get_tracer() -> Tracer:
