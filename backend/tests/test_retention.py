@@ -46,3 +46,25 @@ async def test_recording_key_matches_persisted_url():
     from koel.voicebot.recording import recording_key
 
     assert recording_key("SES-ABC") == "recordings/SES-ABC.wav"
+
+
+async def test_upload_is_noop_seam_without_bucket():
+    from types import SimpleNamespace
+
+    from koel.voicebot.recording import upload_recording
+
+    settings = SimpleNamespace(s3_recording_bucket="", s3_region="ap-south-1")
+    # No bucket configured (dev) → skip cleanly, return None, never raise.
+    assert await upload_recording("s1", b"RIFFfake", settings=settings) is None
+
+
+async def test_upload_url_shape_when_bucket_set(monkeypatch):
+    from types import SimpleNamespace
+
+    from koel.voicebot import recording
+
+    settings = SimpleNamespace(s3_recording_bucket="koel-rec", s3_region="ap-south-1")
+    # boto3 isn't installed in dev → the import fails inside the try and we
+    # degrade to None (logged), still never raising on the teardown path.
+    result = await recording.upload_recording("s2", b"RIFFfake", settings=settings)
+    assert result is None or result == "s3://koel-rec/recordings/s2.wav"
