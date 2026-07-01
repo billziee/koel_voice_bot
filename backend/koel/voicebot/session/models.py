@@ -60,6 +60,9 @@ class SessionState(BaseModel):
     rag_top_k: int | None = None
     rag_score_threshold: float | None = None
     default_tone: Tone = Tone.neutral
+    # Persona (G): carried from bot config into every SynthesizeRequest.
+    voice_gender: str = "female"
+    speaking_rate: float = 1.0
     ambient_profile: str = "callfloor"
     greeting_template: str = ""  # from bot config; rendered with CRM fields at greet
     # Per-bot backchannel overrides (PRD §05): {language: [words…]} merged on top

@@ -122,6 +122,22 @@ def wav_sample_rate(wav: bytes) -> int:
         return 0
 
 
+def to_ulaw_8k(wav: bytes) -> bytes:
+    """Transcode a PCM WAV to raw 8 kHz mono G.711 µ-law (PCMU) — the telephony
+    seam (F). PSTN/Twilio Media Streams carry raw µ-law, not WAV, so this returns
+    bare codec bytes. Default-off; only invoked when telephony mode is enabled.
+    """
+    import audioop  # stdlib (py311); localised so the deprecation stays contained
+
+    pcm, sr, channels, _bits = _read_wav(wav)
+    raw = pcm.tobytes()
+    if channels and channels > 1:
+        raw = audioop.tomono(raw, 2, 0.5, 0.5)
+    if sr and sr != 8000:
+        raw, _ = audioop.ratecv(raw, 2, 1, sr, 8000, None)
+    return audioop.lin2ulaw(raw, 2)
+
+
 def mix_into_wav(wav: bytes, profile: str | None, gain: float) -> bytes:
     """Mix the profile's ambient bed under a mono 16-bit PCM WAV. No-op on
     silent/unknown profiles, non-mono, or unparseable input — never raises."""

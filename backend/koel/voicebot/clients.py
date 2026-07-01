@@ -6,6 +6,7 @@ id so OTel traces stitch FE → VB_Svc → AI svc into one trace (PRD §08).
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import httpx
@@ -17,7 +18,7 @@ from koel.common.logging import get_correlation_id
 from koel.crm.schemas import CustomerRecord
 from koel.nlp.schemas import NlpResponse, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
-from koel.tts.schemas import SynthesisResult, SynthesizeRequest
+from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
 
 _SERVICE_PRINCIPAL = "voicebot_svc"
 
@@ -70,6 +71,25 @@ class ServiceClients:
         )
         resp.raise_for_status()
         return SynthesisResult.model_validate(resp.json())
+
+    async def stream_synthesis(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        """Consume TTS_svc /v1/stream (NDJSON chunks) so a turn is cancellable (D).
+
+        The orchestrator can stop iterating on TTS_KILL to abort mid-utterance;
+        the whole-clip ``synthesize`` path stays the default for engines (Orpheus/
+        Magpie) that return a complete clip rather than a token stream.
+        """
+        request = request.model_copy(update={"stream": True})
+        async with self._client.stream(
+            "POST",
+            f"{self._settings.tts_svc_url}/v1/stream",
+            json=request.model_dump(mode="json"),
+            headers=self._headers(),
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    yield SynthesisChunk.model_validate_json(line)
 
     # --- CRM ---
     async def get_customer(self, customer_id: str) -> CustomerRecord:

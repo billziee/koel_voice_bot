@@ -14,8 +14,9 @@ from abc import ABC, abstractmethod
 
 import httpx
 
+from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
-from koel.common.text_guard import sanitize_crm, sanitize_untrusted, truncate_history
+from koel.common.text_guard import redact_pii, sanitize_crm, sanitize_untrusted, truncate_history
 from koel.nlp.schemas import Citation, Intent, NlpResponse, RetrievedChunk, TurnContext
 
 logger = logging.getLogger(__name__)
@@ -257,6 +258,8 @@ class GroqNlpProvider(NlpProvider):
         }
         self._client = httpx.AsyncClient(timeout=timeout_s)
         self._fallback = StubNlpProvider()
+        # Stop hammering Groq when it's down; degrade to the stub fast (E).
+        self._breaker = CircuitBreaker(failure_threshold=5, reset_timeout_s=30.0, name="groq_nlp")
 
     # Per-language script directive. Hindi/Hinglish must come back in Devanagari
     # so the neural TTS (NVIDIA Magpie hi-IN) pronounces it natively — romanized
@@ -279,7 +282,10 @@ class GroqNlpProvider(NlpProvider):
             f"LANGUAGE: {ctx.language.value}",
             f"SCRIPT: {cls._SCRIPT_DIRECTIVE.get(ctx.language.value, cls._SCRIPT_DIRECTIVE['hinglish'])}",
         ]
-        crm = sanitize_crm(ctx.crm_context)
+        # N: mask account/card/phone-length digits before the prompt egresses to
+        # the (US-hosted) Groq API. Masking these does not change intent/tone, so
+        # grounding + classification are unaffected.
+        crm = {k: redact_pii(v) for k, v in sanitize_crm(ctx.crm_context).items()}
         if crm:
             crm_str = ", ".join(f"{k}={v}" for k, v in crm.items())
             parts.append(f"CUSTOMER (CRM): {crm_str}")
@@ -296,7 +302,7 @@ class GroqNlpProvider(NlpProvider):
                 f"{t.get('speaker', '?').upper()}: {t.get('text', '')}" for t in history
             )
             parts.append(f"CONVERSATION SO FAR:\n{convo}")
-        parts.append(f"CUSTOMER (this turn): {sanitize_untrusted(ctx.customer_text)}")
+        parts.append(f"CUSTOMER (this turn): {redact_pii(sanitize_untrusted(ctx.customer_text))}")
         parts.append("Respond with the JSON object now.")
         return "\n\n".join(parts)
 
@@ -357,6 +363,14 @@ class GroqNlpProvider(NlpProvider):
             grounded=grounded,
         )
 
+    @staticmethod
+    def _is_retriable(exc: BaseException) -> bool:
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in {429, 500, 502, 503, 504}
+        return False
+
     async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
         payload = {
             "model": self._model,
@@ -368,10 +382,20 @@ class GroqNlpProvider(NlpProvider):
                 {"role": "user", "content": self._build_user_prompt(ctx, retrieved)},
             ],
         }
-        try:
+
+        async def _call() -> str:
             resp = await self._client.post(self._url, json=payload, headers=self._headers)
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+            return resp.json()["choices"][0]["message"]["content"]
+
+        try:
+            content = await retry_async(
+                _call,
+                attempts=3,
+                base_delay=0.2,
+                should_retry=self._is_retriable,
+                breaker=self._breaker,
+            )
             return self._parse(ctx, retrieved, content)
         except Exception:  # noqa: BLE001 — never drop a live turn; degrade to the stub
             logger.warning(

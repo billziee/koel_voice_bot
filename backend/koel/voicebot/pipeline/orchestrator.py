@@ -102,9 +102,11 @@ class Orchestrator:
                     text=text,
                     language=state.language,
                     tone=tone,
-                    speaking_rate=1.0,
+                    voice_gender=state.voice_gender,
+                    speaking_rate=state.speaking_rate,
                     ambient=ambient,
                     ambient_profile=state.ambient_profile if ambient else None,
+                    telephony=self._settings.telephony_mode,
                 )
             )
         await send(

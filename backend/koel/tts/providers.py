@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from koel.tts.mixer import mix_into_wav, wav_sample_rate
+from koel.tts.mixer import mix_into_wav, to_ulaw_8k, wav_sample_rate
 from koel.tts.schemas import (
     CANONICAL_SAMPLE_RATE,
     TONE_PROSODY,
@@ -165,6 +165,13 @@ class GroqOrpheusProvider(TtsProvider):
         self._fallback = StubOrpheusProvider()
         self._warned = False  # log the terms/credential failure once, not per turn
 
+    # Orpheus voices by gender (G). Per-bot voice_gender picks the persona; the
+    # configured default is the fallback when gender is unset/unknown.
+    _VOICE_BY_GENDER = {"female": "autumn", "male": "austin"}
+
+    def _voice_for(self, request: SynthesizeRequest) -> str:
+        return self._VOICE_BY_GENDER.get((request.voice_gender or "").lower(), self._voice)
+
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
         prosody = resolve_prosody(request)
         try:
@@ -174,7 +181,7 @@ class GroqOrpheusProvider(TtsProvider):
                 json={
                     "model": self._model,
                     "input": request.text,
-                    "voice": self._voice,
+                    "voice": self._voice_for(request),
                     "response_format": self._format,
                 },
             )
@@ -302,14 +309,42 @@ class RoutingTtsProvider(TtsProvider):
         self._hindi = hindi
         self._langs = hindi_languages
 
-    def _pick(self, request: SynthesizeRequest) -> TtsProvider:
-        return self._hindi if request.language.value in self._langs else self._default
+    def _pick(self, request: SynthesizeRequest) -> tuple[TtsProvider, TtsProvider]:
+        """Return (primary, fallback) for the request's language."""
+        if request.language.value in self._langs:
+            return self._hindi, self._default
+        return self._default, self._hindi
 
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
-        return await self._pick(request).synthesize(request)
+        primary, fallback = self._pick(request)
+        try:
+            result = await primary.synthesize(request)
+        except Exception:  # noqa: BLE001 — cascade to the other engine, never drop a turn
+            logger.warning(
+                "tts_primary_failed_cascading_to_fallback session_id=%s language=%s",
+                request.session_id, request.language.value, exc_info=True,
+            )
+            result = await fallback.synthesize(request)
+            result.fallback_used = True
+        return self._maybe_telephony(request, result)
+
+    @staticmethod
+    def _maybe_telephony(request: SynthesizeRequest, result: SynthesisResult) -> SynthesisResult:
+        """Transcode post-mix audio to 8 kHz µ-law for a PSTN leg (F). No-op by default."""
+        if not request.telephony:
+            return result
+        try:
+            ulaw = to_ulaw_8k(base64.b64decode(result.audio_b64))
+            result.audio_b64 = base64.b64encode(ulaw).decode()
+            result.audio_format = "ulaw"
+            result.sample_rate = 8000
+        except Exception:  # noqa: BLE001 — never drop a turn on a transcode failure
+            logger.warning("ulaw_transcode_failed session_id=%s", request.session_id, exc_info=True)
+        return result
 
     async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
-        async for chunk in self._pick(request).stream(request):
+        primary, _ = self._pick(request)
+        async for chunk in primary.stream(request):
             yield chunk
 
     async def aclose(self) -> None:

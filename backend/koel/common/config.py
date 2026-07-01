@@ -44,7 +44,9 @@ class CommonSettings(BaseSettings):
     # --- Auth (PRD §08: JWT on REST + WebSocket) ---
     jwt_secret: str = "dev-only-insecure-secret-change-me"
     jwt_algorithm: str = "HS256"
-    jwt_access_ttl_seconds: int = 3600
+    # Short access TTL (M): the dashboard silently refreshes via /v1/auth/refresh,
+    # so a leaked token has a small blast radius.
+    jwt_access_ttl_seconds: int = 900
     # Short-lived token minted for the WebSocket upgrade specifically.
     jwt_ws_ttl_seconds: int = 120
 

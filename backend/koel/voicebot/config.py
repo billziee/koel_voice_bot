@@ -44,6 +44,10 @@ class VoiceBotSettings(CommonSettings):
     calling_hours_start: int = 9  # inclusive, local hour (24h)
     calling_hours_end: int = 21  # exclusive, local hour (24h)
 
+    # Telephony seam (F): when true, synthesized audio is transcoded to 8 kHz
+    # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
+    telephony_mode: bool = False
+
 
 @lru_cache
 def get_voicebot_settings() -> VoiceBotSettings:

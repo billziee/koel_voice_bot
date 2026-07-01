@@ -6,6 +6,7 @@ filler-audio cache at startup so latency masking is ready on the first slow turn
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
@@ -26,26 +27,42 @@ logger = get_logger("koel.voicebot")
 settings = get_voicebot_settings()
 
 
+# Per-phrase warmup timeout: a slow provider must not block boot. 9 sequential
+# calls × a 30s cold-start could stall startup ~270s — so we bound + parallelise.
+_WARMUP_PHRASE_TIMEOUT_S = 5.0
+
+
 async def _warm_filler_cache(runtime) -> None:
-    """Pre-render filler clips per language via TTS_svc (PRD §05 Latency Masking)."""
-    for language, phrases in FILLER_PHRASES.items():
-        clips: list[str] = []
-        for phrase in phrases:
-            try:
-                result = await runtime.clients.synthesize(
+    """Pre-render filler clips per language via TTS_svc (PRD §05 Latency Masking).
+
+    Phrases warm concurrently with a per-phrase timeout (E): a slow/cold provider
+    skips that clip instead of serialising the whole boot behind it.
+    """
+
+    async def _one(phrase, language):  # noqa: ANN001
+        try:
+            result = await asyncio.wait_for(
+                runtime.clients.synthesize(
                     SynthesizeRequest(
                         session_id="filler-warmup",
                         text=phrase,
                         language=language,
                         tone=filler_tone_for("credit_card"),
                     )
-                )
-                clips.append(result.audio_b64)
-            except Exception:  # noqa: BLE001 — TTS may be down at boot; warm lazily later
-                logger.warning("filler_warm_failed language=%s", language.value)
-                break
+                ),
+                timeout=_WARMUP_PHRASE_TIMEOUT_S,
+            )
+            return result.audio_b64
+        except (Exception, TimeoutError):  # noqa: BLE001 — warm lazily later on failure
+            return None
+
+    for language, phrases in FILLER_PHRASES.items():
+        results = await asyncio.gather(*(_one(p, language) for p in phrases))
+        clips = [c for c in results if c]
         if clips:
             runtime.filler.load(language, clips)
+        else:
+            logger.warning("filler_warm_failed language=%s", language.value)
 
 
 @asynccontextmanager

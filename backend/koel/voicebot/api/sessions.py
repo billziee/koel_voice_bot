@@ -13,11 +13,12 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from koel.common.auth import CurrentUser, issue_token
 from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account, mask_name
+from koel.common.ratelimit import rate_limit
 from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
@@ -26,6 +27,7 @@ from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
+_session_limit = rate_limit(max_requests=20, window_s=60)  # M: cap session spam per IP
 
 # DPDP Act §11 data minimisation: load only the CRM attributes each use case
 # actually needs into the session. Use cases not listed here load all attributes.
@@ -49,8 +51,8 @@ def _minimise_attributes(use_case: str, attributes: dict) -> dict:
 
 
 class StartSessionRequest(BaseModel):
-    bot_id: str
-    customer_id: str | None = None
+    bot_id: str = Field(max_length=64)
+    customer_id: str | None = Field(default=None, max_length=64)
 
 
 class StartSessionResponse(BaseModel):
@@ -62,7 +64,12 @@ class StartSessionResponse(BaseModel):
     use_case: str
 
 
-@router.post("", response_model=StartSessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=StartSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_session_limit)],
+)
 async def start_session(
     payload: StartSessionRequest,
     user: CurrentUser,
@@ -132,6 +139,8 @@ async def start_session(
         rag_top_k=bot.rag_top_k,
         rag_score_threshold=bot.rag_score_threshold,
         default_tone=default_tone,
+        voice_gender=bot.voice_gender,
+        speaking_rate=bot.speaking_rate,
         ambient_profile=bot.ambient_profile,
         greeting_template=bot.greeting_template or "",
         crm_context=crm_context,

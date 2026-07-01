@@ -18,6 +18,7 @@ import time
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 
+from koel.common.auth import WS_SUBPROTOCOL
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
 from koel.common.telemetry import span
@@ -92,7 +93,11 @@ class CallSession:
             self._speech_until = time.monotonic() + duration_ms / 1000
 
     async def run(self) -> None:
-        await self._ws.accept()
+        # Echo our subprotocol when the client negotiated one (token-in-subprotocol
+        # transport, M); a browser that offered it requires the echo to connect.
+        offered = [p.strip() for p in self._ws.headers.get("sec-websocket-protocol", "").split(",")]
+        subprotocol = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
+        await self._ws.accept(subprotocol=subprotocol)
         if self._resumed:
             # PRD §05: emit a RECONNECTED span so resume latency is observable.
             with span(

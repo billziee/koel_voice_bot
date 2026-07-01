@@ -215,8 +215,11 @@ export class LiveCall {
   }
 
   connect(): void {
-    const url = `${WS_BASE}/ws/calls/${this.sessionId}?token=${encodeURIComponent(this.wsToken)}`;
-    const ws = new WebSocket(url);
+    // Send the WS JWT via the Sec-WebSocket-Protocol subprotocol, not the URL, so
+    // it never lands in server access logs / browser history (M). The server
+    // echoes 'koel.v1' to complete the handshake.
+    const url = `${WS_BASE}/ws/calls/${this.sessionId}`;
+    const ws = new WebSocket(url, ['koel.v1', `koel.token.${this.wsToken}`]);
     this.ws = ws;
     ws.onopen = () => this.handlers.onOpen?.();
     ws.onclose = (e) => this.handlers.onSocketClose?.(e.wasClean);
