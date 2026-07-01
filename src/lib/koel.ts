@@ -107,6 +107,63 @@ export async function createBot(token: string, payload: NewBotPayload): Promise<
   return jsonOrThrow(res);
 }
 
+// ---- Analytics (AE) --------------------------------------------------------
+
+export interface BotStats {
+  bot_id: string;
+  total_calls: number;
+  converted: number;
+  escalated: number;
+  conversion_rate: number; // 0..1
+  escalation_rate: number; // 0..1
+  avg_duration_ms: number;
+  outcomes: Record<string, number>;
+}
+
+export async function getBotStats(token: string, botId: string): Promise<BotStats> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/bots/${encodeURIComponent(botId)}/stats`, {
+      headers: authHeaders(token),
+    }),
+  );
+}
+
+export async function getAllStats(token: string): Promise<BotStats[]> {
+  return jsonOrThrow(await fetch(`${KOEL_API}/v1/stats`, { headers: authHeaders(token) }));
+}
+
+// ---- Knowledge base admin (X) ---------------------------------------------
+
+export interface KnowledgeIndex {
+  rag_index: string;
+  chunk_count: number;
+}
+
+export async function getKnowledgeIndexes(token: string): Promise<KnowledgeIndex[]> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/knowledge-indexes`, { headers: authHeaders(token) }),
+  );
+}
+
+export interface NewKnowledgeChunk {
+  rag_index: string;
+  use_case: string;
+  language?: string;
+  title: string;
+  content: string;
+  chunk?: boolean;
+}
+
+export async function createKnowledgeChunk(token: string, payload: NewKnowledgeChunk): Promise<unknown> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/knowledge-chunks`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
 export async function startSession(
   token: string,
   botId: string,

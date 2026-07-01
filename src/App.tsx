@@ -4,11 +4,16 @@ import {
   getBots as apiGetBots,
   startSession as apiStartSession,
   createBot,
+  getKnowledgeIndexes,
+  createKnowledgeChunk,
+  getAllStats,
   USE_CASE_CUSTOMER,
   LiveCall,
   KoelApiError,
   type BackendBot,
   type NewBotPayload,
+  type KnowledgeIndex,
+  type BotStats,
 } from './lib/koel';
 import { MicCapture, micSupported } from './lib/audio';
 import {
@@ -469,6 +474,21 @@ function backendBotToBot(b: BackendBot): Bot {
   };
 }
 
+// Fold real call-log aggregates (AE /v1/stats) into a bot's displayed metrics.
+function mergeStats(bot: Bot, stats: BotStats | undefined): Bot {
+  if (!stats || stats.total_calls === 0) return bot;
+  const conv = stats.conversion_rate * 100;
+  const totalSec = Math.round(stats.avg_duration_ms / 1000);
+  return {
+    ...bot,
+    calls: stats.total_calls,
+    conversionNum: conv,
+    conversion: `${conv.toFixed(1)}%`,
+    avgDuration: `${Math.floor(totalSec / 60)}m ${String(totalSec % 60).padStart(2, '0')}s`,
+    escalationRate: `${(stats.escalation_rate * 100).toFixed(1)}%`,
+  };
+}
+
 export default function KoelApp() {
   const [authed, setAuthed] = useState(false);
   // Live backend integration: token + flag. When live, bots/calls hit VB_Svc.
@@ -494,13 +514,13 @@ export default function KoelApp() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3000);
   }, []);
 
-  // Item 6/29: tick lastActive in real time and nudge stats
+  // Refresh the relative "last active" label in real time. Call counts come from
+  // real backend aggregates (AE), not a random nudge, so they're left untouched.
   useEffect(() => {
     const iv = window.setInterval(() => {
       setBots(prev => prev.map(b => ({
         ...b,
         lastActive: formatRelativeTime(b.lastActiveTs),
-        calls: b.status === 'Active' ? b.calls + Math.floor(Math.random() * 3) : b.calls,
       })));
     }, 15000);
     return () => window.clearInterval(iv);
@@ -568,8 +588,16 @@ export default function KoelApp() {
       try {
         const backendBots = await apiGetBots(opts.token);
         if (backendBots.length) {
-          setBots(backendBots.map(backendBotToBot));
-          showToast('Connected to live VB_Svc — bots loaded from the backend.');
+          // Merge real call-log aggregates (AE) into the loaded bots.
+          let stats: BotStats[] = [];
+          try {
+            stats = await getAllStats(opts.token);
+          } catch {
+            /* stats are best-effort; bots still render with zeroed metrics */
+          }
+          const byId = new Map(stats.map(s => [s.bot_id, s]));
+          setBots(backendBots.map(b => mergeStats(backendBotToBot(b), byId.get(b.id))));
+          showToast('Connected to live VB_Svc — bots + analytics loaded from the backend.');
         }
       } catch {
         showToast('Logged in, but failed to load live bots — showing demo bots.');
@@ -727,7 +755,7 @@ export default function KoelApp() {
           )}
           {currentView === 'history' && <HistoryView calls={completedCalls} onExported={() => showToast('CSV exported for QA workflows.')} theme={theme} darkMode={darkMode} />}
           {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} />}
-          {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} />}
+          {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} token={token} onToast={showToast} />}
         </main>
       </div>
 
@@ -3313,31 +3341,78 @@ function KV({ k, v, theme, mono }: { k: string; v: string; theme: ReturnType<typ
 // ============================================================================
 // Screen 6 — Knowledge Base
 // ============================================================================
-function KnowledgeBaseView({ theme }: { theme: ReturnType<typeof getTheme> }) {
+function KnowledgeBaseView({ theme, token, onToast }: { theme: ReturnType<typeof getTheme>; token: string | null; onToast: (m: string) => void }) {
   const [search, setSearch] = useState('');
+  const [indexes, setIndexes] = useState<KnowledgeIndex[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ rag_index: '', use_case: 'credit_card', title: '', content: '' });
+  const [saving, setSaving] = useState(false);
 
-  const kbItems = [
-    { id: 'kb_hdfc_regalia_v3', name: 'HDFC Regalia Benefits', docs: 24, lastSync: '2h ago', status: 'active' as const, size: '2.4 MB' },
-    { id: 'kb_hdfc_millennia_v1', name: 'HDFC Millennia Benefits', docs: 18, lastSync: '6h ago', status: 'active' as const, size: '1.8 MB' },
-    { id: 'kb_icici_plat_v2', name: 'ICICI Platinum Benefits', docs: 31, lastSync: '1d ago', status: 'active' as const, size: '3.1 MB' },
-    { id: 'kb_collections_scripts', name: 'Collections Script Bank', docs: 42, lastSync: '3d ago', status: 'active' as const, size: '5.2 MB' },
-    { id: 'kb_insurance_riders', name: 'Life Insurance Riders', docs: 15, lastSync: '5d ago', status: 'stale' as const, size: '1.2 MB' },
-    { id: 'kb_compliance_rbi', name: 'RBI Compliance Handbook', docs: 8, lastSync: '12h ago', status: 'active' as const, size: '0.9 MB' },
-  ];
+  const refresh = useCallback(async () => {
+    if (!token) { setLoading(false); return; }
+    setLoading(true);
+    try {
+      setIndexes(await getKnowledgeIndexes(token));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof KoelApiError ? e.message : 'Could not load knowledge indexes.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
-  const filtered = kbItems.filter(kb => kb.name.toLowerCase().includes(search.toLowerCase()) || kb.id.toLowerCase().includes(search.toLowerCase()));
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const submit = async () => {
+    if (!token || !form.rag_index.trim() || !form.title.trim() || !form.content.trim()) return;
+    setSaving(true);
+    try {
+      await createKnowledgeChunk(token, { ...form, chunk: form.content.length > 1200 });
+      onToast(`Knowledge added to “${form.rag_index}” and embedded for retrieval.`);
+      setForm({ rag_index: '', use_case: 'credit_card', title: '', content: '' });
+      setShowForm(false);
+      await refresh();
+    } catch (e) {
+      onToast(e instanceof KoelApiError ? e.message : 'Failed to add knowledge.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const filtered = indexes.filter(kb => kb.rag_index.toLowerCase().includes(search.toLowerCase()));
+  const totalChunks = indexes.reduce((s, k) => s + k.chunk_count, 0);
 
   return (
     <div className="animate-in" style={{ fontFamily: '"DM Sans", sans-serif' }}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight" style={{ color: theme.ink }}>Knowledge base</h1>
-          <p className="text-[13px] mt-0.5" style={{ color: theme.faint }}>{kbItems.length} indexes · {kbItems.reduce((s, k) => s + k.docs, 0)} documents</p>
+          <p className="text-[13px] mt-0.5" style={{ color: theme.faint }}>{indexes.length} indexes · {totalChunks} chunks</p>
         </div>
-        <button className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
-          <Plus size={14} /> New index
+        <button onClick={() => setShowForm(v => !v)} className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
+          <Plus size={14} /> {showForm ? 'Close' : 'New chunk'}
         </button>
       </div>
+
+      {showForm && (
+        <div className="rounded-lg border p-4 mb-4 grid gap-3" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
+          <div className="grid grid-cols-2 gap-3">
+            <input value={form.rag_index} onChange={e => setForm({ ...form, rag_index: e.target.value })} placeholder="RAG index (e.g. cc_hdfc)" className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+            <select value={form.use_case} onChange={e => setForm({ ...form, use_case: e.target.value })} className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }}>
+              {['credit_card', 'collections', 'personal_loan', 'insurance', 'custom'].map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Title (e.g. Objection: annual fee)" className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+          <textarea value={form.content} onChange={e => setForm({ ...form, content: e.target.value })} placeholder="Knowledge content — this is embedded and used to ground responses." rows={3} className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2 resize-y" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+          <div className="flex justify-end">
+            <button onClick={() => void submit()} disabled={saving} className="text-[13px] font-bold px-4 py-2 rounded-md text-white disabled:opacity-50" style={{ backgroundColor: theme.primary }}>
+              {saving ? 'Embedding…' : 'Add & embed'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="mb-4">
         <div className="relative">
@@ -3351,32 +3426,22 @@ function KnowledgeBaseView({ theme }: { theme: ReturnType<typeof getTheme> }) {
           <thead>
             <tr style={{ backgroundColor: theme.inset }}>
               <th className="text-left px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Index ID</th>
-              <th className="text-left px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Name</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Documents</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Size</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Last sync</th>
-              <th className="text-center px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Status</th>
+              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Chunks</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map(kb => (
-              <tr key={kb.id} className="border-t cursor-pointer hover:opacity-80" style={{ borderColor: theme.ruleSubtle }}>
-                <td className="px-4 py-3 font-mono text-[12px]" style={{ color: theme.primary }}>{kb.id}</td>
-                <td className="px-4 py-3 font-medium" style={{ color: theme.ink }}>{kb.name}</td>
-                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.ink }}>{kb.docs}</td>
-                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.inkMuted }}>{kb.size}</td>
-                <td className="px-4 py-3 text-right" style={{ color: theme.faint }}>{kb.lastSync}</td>
-                <td className="px-4 py-3 text-center">
-                  <span className="px-2 py-0.5 rounded text-[11px] font-medium" style={{ backgroundColor: kb.status === 'active' ? theme.greenLight : theme.warningLight, color: kb.status === 'active' ? theme.green : theme.warning }}>
-                    {kb.status === 'active' ? 'Active' : 'Stale'}
-                  </span>
-                </td>
+              <tr key={kb.rag_index} className="border-t" style={{ borderColor: theme.ruleSubtle }}>
+                <td className="px-4 py-3 font-mono text-[12px]" style={{ color: theme.primary }}>{kb.rag_index}</td>
+                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.ink }}>{kb.chunk_count}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        {filtered.length === 0 && (
-          <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>No indexes match your search.</div>
+        {loading && <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>Loading indexes…</div>}
+        {!loading && error && <div className="p-8 text-center text-[13px]" style={{ color: theme.warning }}>{error}</div>}
+        {!loading && !error && filtered.length === 0 && (
+          <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>No indexes yet — add a knowledge chunk to create one.</div>
         )}
       </div>
     </div>
