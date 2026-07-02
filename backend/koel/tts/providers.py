@@ -14,8 +14,7 @@ import struct
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
-import httpx
-
+from koel.common.http import make_async_client
 from koel.tts.mixer import mix_into_wav, to_ulaw_8k, wav_sample_rate
 from koel.tts.schemas import (
     CANONICAL_SAMPLE_RATE,
@@ -161,7 +160,7 @@ class GroqOrpheusProvider(TtsProvider):
         self._format = audio_format
         self._url = f"{base_url.rstrip('/')}/audio/speech"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = make_async_client(timeout_s=timeout_s)
         self._fallback = StubOrpheusProvider()
         self._warned = False  # log the terms/credential failure once, not per turn
 

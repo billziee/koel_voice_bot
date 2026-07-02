@@ -74,7 +74,9 @@ export class MicCapture {
   constructor(options: MicCaptureOptions) {
     this.opts = {
       thresholdRms: 0.025,
-      silenceMs: 800,
+      // Trailing silence before we call end-of-utterance. Every ms here is added
+      // latency before STT even starts, so keep it tight (was 800ms).
+      silenceMs: 500,
       minSpeechMs: 300,
       maxIdleMs: 8000,
       onLevel: () => {},

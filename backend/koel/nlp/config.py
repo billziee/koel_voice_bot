@@ -22,10 +22,16 @@ class NlpSettings(CommonSettings):
     # --- Groq (https://console.groq.com) ---
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
+    # Language-routed models (latency): English uses the fast 8b-instant; Hindi/
+    # Hinglish keep the stronger 70b because 8b is weaker at code-mixed JSON +
+    # grounding. `groq_model` is the default/quality model used when unrouted.
     groq_model: str = "llama-3.3-70b-versatile"
+    groq_model_quality: str = "llama-3.3-70b-versatile"  # hi / hinglish
+    groq_model_fast: str = "llama-3.1-8b-instant"  # en
     # Low temperature: keep turns grounded and on-script (PRD §12 anti-hallucination).
     groq_temperature: float = 0.3
-    groq_max_tokens: int = 512
+    # Spoken turns are 1-3 sentences; a tight cap ends generation sooner (latency).
+    groq_max_tokens: int = 160
     groq_timeout_s: float = 8.0
 
     # --- RAG embeddings (Groq has NO embedding model) ---
@@ -38,7 +44,8 @@ class NlpSettings(CommonSettings):
     nvidia_embed_model: str = "nvidia/nv-embedqa-e5-v5"  # 1024-d, matches EMBEDDING_DIM
     nvidia_embed_timeout_s: float = 20.0
     # Retrieval tuning (per-bot overrides land with the Alembic migration).
-    rag_top_k: int = 3
+    # top_k=2 keeps the grounded prompt short (fewer input tokens → faster TTFT).
+    rag_top_k: int = 2
     rag_score_threshold: float = 0.0  # drop chunks below this cosine score; tune ~0.3 for nvidia
 
     @property

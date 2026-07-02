@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 
+from koel.common.http import make_async_client
 from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
 from koel.common.telemetry import record_nlp_usage
@@ -248,8 +249,14 @@ class GroqNlpProvider(NlpProvider):
         temperature: float = 0.3,
         max_tokens: int = 512,
         timeout_s: float = 8.0,
+        model_fast: str | None = None,
+        model_quality: str | None = None,
     ) -> None:
         self._model = model
+        # Language-routed models (latency): en → fast (8b), hi/hinglish → quality
+        # (70b). Fall back to the single `model` when the split isn't configured.
+        self._model_fast = model_fast or model
+        self._model_quality = model_quality or model
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._url = f"{base_url.rstrip('/')}/chat/completions"
@@ -257,7 +264,7 @@ class GroqNlpProvider(NlpProvider):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = make_async_client(timeout_s=timeout_s)
         self._fallback = StubNlpProvider()
         # Stop hammering Groq when it's down; degrade to the stub fast (E).
         self._breaker = CircuitBreaker(failure_threshold=5, reset_timeout_s=30.0, name="groq_nlp")
@@ -385,9 +392,13 @@ class GroqNlpProvider(NlpProvider):
             return exc.response.status_code in {429, 500, 502, 503, 504}
         return False
 
+    def _model_for(self, ctx: TurnContext) -> str:
+        """English → fast 8b; Hindi/Hinglish → quality 70b (code-mixed is harder)."""
+        return self._model_fast if ctx.language.value == "en" else self._model_quality
+
     async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
         payload = {
-            "model": self._model,
+            "model": self._model_for(ctx),
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
             "response_format": {"type": "json_object"},

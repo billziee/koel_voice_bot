@@ -9,11 +9,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 
-import httpx
 from opentelemetry.propagate import inject
 
 from koel.common.auth import issue_token
 from koel.common.config import CommonSettings
+from koel.common.http import make_async_client
 from koel.common.logging import get_correlation_id
 from koel.crm.schemas import CustomerRecord
 from koel.nlp.schemas import NlpResponse, TurnContext
@@ -28,7 +28,7 @@ class ServiceClients:
 
     def __init__(self, settings: CommonSettings, *, timeout_s: float = 10.0) -> None:
         self._settings = settings
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = make_async_client(timeout_s=timeout_s)
 
     def _headers(self) -> dict[str, str]:
         # Mint a fresh access token per fan-out; VB_Svc authenticates to peers.

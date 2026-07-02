@@ -39,6 +39,8 @@ def _build_provider() -> NlpProvider:
         return GroqNlpProvider(
             api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
             model=settings.groq_model,
+            model_fast=settings.groq_model_fast,
+            model_quality=settings.groq_model_quality,
             base_url=settings.groq_base_url,
             temperature=settings.groq_temperature,
             max_tokens=settings.groq_max_tokens,

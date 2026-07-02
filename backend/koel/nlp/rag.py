@@ -13,9 +13,9 @@ import logging
 import math
 from abc import ABC, abstractmethod
 
-import httpx
 from sqlalchemy import select
 
+from koel.common.http import make_async_client
 from koel.db.models import EMBEDDING_DIM, KnowledgeChunk
 from koel.db.session import session_scope
 from koel.nlp.schemas import RetrievedChunk
@@ -62,7 +62,7 @@ class NvidiaEmbedder(Embedder):
         self._model = model
         self._url = f"{base_url.rstrip('/')}/embeddings"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = make_async_client(timeout_s=timeout_s)
         self._fallback = HashEmbedder()
         self._warned = False
 
