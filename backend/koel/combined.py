@@ -15,6 +15,10 @@ Run: uvicorn koel.combined:app --host 0.0.0.0 --port $PORT
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import subprocess
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
@@ -25,11 +29,42 @@ from koel.stt.main import app as stt_app
 from koel.tts.main import app as tts_app
 from koel.voicebot.main import app as voicebot_app
 
+logger = logging.getLogger("koel.combined")
+
 _SUBAPPS = (voicebot_app, stt_app, nlp_app, tts_app, crm_app)
+
+
+async def _ensure_schema() -> None:
+    """Apply migrations + seed on boot when the schema is missing/empty.
+
+    Render free tier runs no pre-deploy/one-off jobs, so the app self-migrates.
+    Idempotent: skips seeding when bots already exist (no KB re-embed per boot).
+    """
+    from sqlalchemy import func, select
+
+    from koel.db.models import BotConfig
+    from koel.db.session import session_scope
+
+    need = True
+    try:
+        async with session_scope() as db:
+            count = (await db.execute(select(func.count()).select_from(BotConfig))).scalar_one()
+            need = count == 0
+    except Exception:  # noqa: BLE001 — tables don't exist yet → bootstrap
+        need = True
+    if not need:
+        return
+    logger.info("schema missing/empty → running migrations + seed")
+    # `python -m` puts CWD (the WORKDIR that holds scripts/) on sys.path; the
+    # bootstrap script runs alembic upgrade head then seeds. Run off the loop.
+    await asyncio.to_thread(
+        subprocess.run, [sys.executable, "-m", "scripts.bootstrap_db"], check=True
+    )
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    await _ensure_schema()
     # Run every mounted sub-app's own startup/shutdown (build runtimes, embedder,
     # providers, filler warmup) — Starlette won't do this for mounts automatically.
     async with AsyncExitStack() as stack:
