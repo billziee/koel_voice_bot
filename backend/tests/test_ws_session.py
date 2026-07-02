@@ -203,7 +203,12 @@ async def test_no_input_service_failure_fails_call_not_crash(test_db):
     async def boom(*a, **k):
         raise RuntimeError("tts down")
 
+    async def boom_stream(*a, **k):  # streaming path (stream_tts default on)
+        raise RuntimeError("tts down")
+        yield  # pragma: no cover — makes this an async generator
+
     clients.synthesize = boom  # type: ignore[method-assign]
+    clients.stream_synthesis = boom_stream  # type: ignore[method-assign]
     call = _session(ws, _state("ws_noinput_fail"), clients)
 
     await call._safe_no_input()  # noqa: SLF001 — must swallow → _fail_call, not raise

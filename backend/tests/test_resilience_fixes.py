@@ -86,6 +86,10 @@ class _FakeClients:
     async def synthesize(self, request):  # noqa: ANN001
         return await StubOrpheusProvider().synthesize(request)
 
+    async def stream_synthesis(self, request):  # noqa: ANN001 — streaming TTS path
+        async for chunk in StubOrpheusProvider()._stream_by_sentence(request):
+            yield chunk
+
     async def flag_customer(self, customer_id, flag, reason=None):  # noqa: ANN001
         self.flags.append((customer_id, flag))
 

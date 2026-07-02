@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -86,12 +87,43 @@ def _silent_pcm(duration_ms: int) -> bytes:
     return b"\x00\x00" * samples  # 16-bit silence
 
 
+# Sentence boundary incl. the Devanagari danda — matches nlp/chunking's splitter.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?।])\s+")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split a reply into sentences for per-sentence streaming (latency)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    return [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()] or [text]
+
+
 class TtsProvider(ABC):
     @abstractmethod
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult: ...
 
     @abstractmethod
     def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]: ...
+
+    async def _stream_by_sentence(
+        self, request: SynthesizeRequest
+    ) -> AsyncIterator[SynthesisChunk]:
+        """Synthesize each sentence and yield it as it's ready, so the caller can
+        play the first sentence before the whole reply exists (Tier 2). Each chunk
+        is a complete WAV — the browser decodes/plays them gaplessly."""
+        sentences = split_sentences(request.text)
+        for i, sentence in enumerate(sentences):
+            result = await self.synthesize(request.model_copy(update={"text": sentence}))
+            yield SynthesisChunk(
+                session_id=request.session_id,
+                seq=i,
+                audio_b64=result.audio_b64,
+                is_final=(i == len(sentences) - 1),
+                duration_ms=result.duration_ms,
+                sample_rate=result.sample_rate,
+                audio_format=result.audio_format,
+            )
 
 
 class StubOrpheusProvider(TtsProvider):
@@ -212,7 +244,12 @@ class GroqOrpheusProvider(TtsProvider):
         )
 
     async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
-        # Orpheus /audio/speech returns a whole clip; emit it as one final chunk.
+        # Orpheus /audio/speech returns a whole clip per call, so stream by
+        # SENTENCE: first sentence plays while later ones synthesize (Tier 2).
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
+
+    async def _stream_whole_clip(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
         result = await self.synthesize(request)
         yield SynthesisChunk(
             session_id=request.session_id, seq=0, audio_b64=result.audio_b64, is_final=True
@@ -295,10 +332,10 @@ class NvidiaMagpieTtsProvider(TtsProvider):
         )
 
     async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
-        result = await self.synthesize(request)
-        yield SynthesisChunk(
-            session_id=request.session_id, seq=0, audio_b64=result.audio_b64, is_final=True
-        )
+        # Sentence-stream (Tier 2). A future enhancement is Riva synthesize_online
+        # for true sub-sentence streaming; per-sentence already plays first-sentence-fast.
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
 
 
 class RoutingTtsProvider(TtsProvider):

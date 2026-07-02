@@ -53,6 +53,7 @@ class SynthesisChunk(BaseModel):
     seq: int
     audio_b64: str
     is_final: bool = False
+    duration_ms: int = 0  # playback length of this chunk (drives the no-input timer)
     sample_rate: int = CANONICAL_SAMPLE_RATE
     channels: int = 1
     audio_format: str = "wav"

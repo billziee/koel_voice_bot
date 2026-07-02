@@ -48,6 +48,10 @@ class VoiceBotSettings(CommonSettings):
     # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
     telephony_mode: bool = False
 
+    # Sentence-streaming TTS (latency): stream one audio chunk per sentence so the
+    # bot starts speaking on the first sentence, not the whole clip. Reversible.
+    stream_tts: bool = True
+
 
 @lru_cache
 def get_voicebot_settings() -> VoiceBotSettings:

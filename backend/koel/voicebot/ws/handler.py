@@ -22,7 +22,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from koel.common.auth import WS_SUBPROTOCOL
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
-from koel.common.telemetry import span
+from koel.common.telemetry import record_first_audio_latency, span
 from koel.stt.schemas import TranscribeRequest
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
@@ -81,6 +81,7 @@ class CallSession:
         self._speech_until = 0.0  # monotonic time the bot's current audio finishes playing
         self._send_lock = asyncio.Lock()
         self._audio_buffer: list[bytes] = []  # bot WAV frames for the call recording (K)
+        self._turn_in_at: float | None = None  # when the customer's final audio arrived (first-audio metric)
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -92,12 +93,20 @@ class CallSession:
         # (a final audio_chunk) or a confirmed interrupt fires. The transition
         # to the `listening` UI state does NOT clear it (PRD §05).
         if message.type == ServerMessageType.audio_chunk:
+            # First bot audio after the customer's final utterance = true
+            # audio-in→audio-out first-audio latency vs the §14 budget (Tier 5).
+            if self._turn_in_at is not None:
+                record_first_audio_latency((time.monotonic() - self._turn_in_at) * 1000)
+                self._turn_in_at = None
             self._bot_speaking = True
             # The client plays this audio for duration_ms; the no-input timer
             # must not start counting until playback finishes (PRD §05) — else
             # a 7s greeting would trip the 5s silence timer mid-sentence.
             duration_ms = message.data.get("duration_ms", 0) or 0
-            self._speech_until = time.monotonic() + duration_ms / 1000
+            # Accumulate across streamed chunks: if audio is still queued to play,
+            # extend from that end, not from now — so the no-input timer waits for
+            # ALL queued sentences to finish, not just the last chunk (Tier 2).
+            self._speech_until = max(self._speech_until, time.monotonic()) + duration_ms / 1000
             # Buffer bot WAV audio for the call recording (K), capped to bound memory.
             is_wav = message.data.get("audio_format", "wav") == "wav"
             if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
@@ -242,6 +251,7 @@ class CallSession:
             return
         # The customer is taking their turn — any prior bot audio is done.
         self._bot_speaking = False
+        self._turn_in_at = time.monotonic()  # audio-in mark for the first-audio metric
         await self._orch.handle_final_transcript(self._state, self.send, stt)
         if self._state.status == CallStatus.ended:
             self._closed = True

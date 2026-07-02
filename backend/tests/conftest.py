@@ -103,6 +103,10 @@ class FakeClients:
     async def synthesize(self, request):  # noqa: ANN001
         return await StubOrpheusProvider().synthesize(request)
 
+    async def stream_synthesis(self, request):  # noqa: ANN001 — sentence-streaming stand-in
+        async for chunk in StubOrpheusProvider()._stream_by_sentence(request):
+            yield chunk
+
     async def respond(self, ctx):  # noqa: ANN001 — overridden per-test when needed
         raise NotImplementedError
 

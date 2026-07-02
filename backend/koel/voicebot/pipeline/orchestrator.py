@@ -98,39 +98,59 @@ class Orchestrator:
                 index=turn.index,
             )
         )
+        req = SynthesizeRequest(
+            session_id=state.session_id,
+            text=text,
+            language=state.language,
+            tone=tone,
+            voice_gender=state.voice_gender,
+            speaking_rate=state.speaking_rate,
+            ambient=ambient,
+            ambient_profile=state.ambient_profile if ambient else None,
+            telephony=self._settings.telephony_mode,
+        )
         with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
             # Capture the trace id for the §11 audit / §14 latency dashboards.
             if state.trace_id is None:
                 state.trace_id = current_trace_id()
             t0 = time.monotonic()
-            audio = await self._clients.synthesize(
-                SynthesizeRequest(
-                    session_id=state.session_id,
-                    text=text,
-                    language=state.language,
-                    tone=tone,
-                    voice_gender=state.voice_gender,
-                    speaking_rate=state.speaking_rate,
-                    ambient=ambient,
-                    ambient_profile=state.ambient_profile if ambient else None,
-                    telephony=self._settings.telephony_mode,
+            if self._settings.stream_tts:
+                # Sentence-streaming (Tier 2): play the first sentence as soon as
+                # it's synthesized instead of waiting for the whole clip. Each chunk
+                # is a complete WAV the browser decodes + plays gaplessly.
+                first_ms: float | None = None
+                async for chunk in self._clients.stream_synthesis(req):
+                    if first_ms is None:
+                        first_ms = (time.monotonic() - t0) * 1000
+                        record_hop_latency("tts_first_audio", first_ms)
+                    await send(
+                        ServerMessage.of(
+                            ServerMessageType.audio_chunk,
+                            audio_b64=chunk.audio_b64,
+                            duration_ms=chunk.duration_ms,
+                            index=turn.index,
+                            seq=chunk.seq,
+                            sample_rate=chunk.sample_rate,
+                            audio_format=chunk.audio_format,
+                        )
+                    )
+                tts_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
+            else:
+                audio = await self._clients.synthesize(req)
+                await send(
+                    ServerMessage.of(
+                        ServerMessageType.audio_chunk,
+                        audio_b64=audio.audio_b64,
+                        duration_ms=audio.duration_ms,
+                        index=turn.index,
+                        sample_rate=audio.sample_rate,
+                        audio_format=audio.audio_format,
+                    )
                 )
-            )
+                tts_span.set_attribute("fallback_used", audio.fallback_used)
             tts_ms = (time.monotonic() - t0) * 1000
             record_hop_latency("tts", tts_ms)
             tts_span.set_attribute("synthesize_latency_ms", round(tts_ms, 1))
-            tts_span.set_attribute("fallback_used", audio.fallback_used)
-            tts_span.set_attribute("sample_rate", audio.sample_rate)
-        await send(
-            ServerMessage.of(
-                ServerMessageType.audio_chunk,
-                audio_b64=audio.audio_b64,
-                duration_ms=audio.duration_ms,
-                index=turn.index,
-                sample_rate=audio.sample_rate,
-                audio_format=audio.audio_format,
-            )
-        )
         return turn
 
     async def greet(self, state: SessionState, send: Sender) -> None:
