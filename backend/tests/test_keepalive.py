@@ -47,7 +47,7 @@ async def test_keepalive_pings_health_then_cancels_cleanly(monkeypatch):
         return SimpleNamespace(status_code=200)
 
     _patch_client(monkeypatch, on_get)
-    task = asyncio.create_task(combined._keepalive_loop("https://x.onrender.com/", 0))  # noqa: SLF001
+    task = asyncio.create_task(combined._keepalive_loop("https://x.onrender.com/", 0.02))  # noqa: SLF001
 
     await asyncio.wait_for(seen.wait(), timeout=2)
     task.cancel()
@@ -70,7 +70,7 @@ async def test_keepalive_survives_a_failed_ping(monkeypatch):
         return SimpleNamespace(status_code=200)
 
     _patch_client(monkeypatch, on_get)
-    task = asyncio.create_task(combined._keepalive_loop("https://x/", 0))  # noqa: SLF001
+    task = asyncio.create_task(combined._keepalive_loop("https://x/", 0.02))  # noqa: SLF001
 
     # If the loop died on the first error it would never reach the second ping.
     await asyncio.wait_for(reached_second.wait(), timeout=2)
@@ -81,8 +81,37 @@ async def test_keepalive_survives_a_failed_ping(monkeypatch):
     assert calls >= 2
 
 
+async def test_keepalive_nonpositive_interval_does_not_busy_spin(monkeypatch):
+    # A 0/negative interval must NOT become a no-delay tight loop; it's coerced to
+    # a long fallback delay, so no ping fires in a short window.
+    calls: list[str] = []
+
+    async def on_get(url: str):
+        calls.append(url)
+        return SimpleNamespace(status_code=200)
+
+    _patch_client(monkeypatch, on_get)
+    task = asyncio.create_task(combined._keepalive_loop("https://x/", 0))  # noqa: SLF001
+    await asyncio.sleep(0.1)  # an unguarded loop would spin thousands of times here
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == []  # coerced to the ~5-min fallback → nothing pinged yet
+
+
 def test_keepalive_disabled_by_default():
     # No KOEL_KEEPALIVE_URL ⇒ no self-ping (never runs locally / in CI).
     from koel.common.config import CommonSettings
 
     assert CommonSettings().keepalive_url is None
+
+
+def test_keepalive_interval_validator_coerces_nonpositive():
+    # A non-positive KOEL_KEEPALIVE_INTERVAL_SECONDS falls back to the default
+    # rather than crashing the app or enabling a busy loop.
+    from koel.common.config import CommonSettings
+
+    assert CommonSettings(keepalive_interval_seconds=0).keepalive_interval_seconds == 300
+    assert CommonSettings(keepalive_interval_seconds=-30).keepalive_interval_seconds == 300
+    assert CommonSettings(keepalive_interval_seconds=120).keepalive_interval_seconds == 120

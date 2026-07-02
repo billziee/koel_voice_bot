@@ -72,11 +72,15 @@ at it) before deploying, or you'll ship the pre-optimization build.
 
 Two independent keep-alives (use either or both):
 
-1. **In-app self-ping** — set `KOEL_KEEPALIVE_URL` to the backend's own public URL
-   (e.g. `https://koel-backend-oj5p.onrender.com`). The combined app then pings
-   `<url>/health` every `KOEL_KEEPALIVE_INTERVAL_SECONDS` (default 600s), which is
-   inbound traffic that resets the idle timer. Keeps a **running** instance warm;
-   can't wake one that already spun down.
+1. **In-app self-ping** — runs **only** under the single-process
+   `koel.combined:app` entrypoint (what the free-tier box runs — the live backend's
+   start command is `uvicorn koel.combined:app`). Set `KOEL_KEEPALIVE_URL` to the
+   backend's own public URL (e.g. `https://koel-backend-oj5p.onrender.com`) and it
+   pings `<url>/health` every `KOEL_KEEPALIVE_INTERVAL_SECONDS` (default 300s) —
+   inbound traffic that resets the idle timer, with a fast retry after a failed
+   ping so one blip can't open a >15-min gap. Keeps a **running** instance warm;
+   can't wake one already spun down (the cron does). The multi-service `render.yaml`
+   path runs `koel.voicebot.main:app` on `starter` (no spin-down), so it skips this.
 2. **CI cron** — `.github/workflows/keepalive.yml` pings `/health` every 10 min and
    **also wakes a cold instance**. Scheduled workflows run only from the **default
    branch**, so this must be on `main` to tick; set repo variable `KEEPALIVE_URL`

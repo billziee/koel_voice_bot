@@ -34,12 +34,17 @@ logger = logging.getLogger("koel.combined")
 
 _SUBAPPS = (voicebot_app, stt_app, nlp_app, tts_app, crm_app)
 
-# A single ping shouldn't outlive a cold-start wake (~50s); cap it so a slow tick
-# can't stack onto the next interval.
-_KEEPALIVE_TIMEOUT_S = 45.0
+# We ping our OWN url while the process is up, so it responds fast — no need to
+# wait out a cold-start; a tight bound keeps a stuck request from stacking.
+_KEEPALIVE_TIMEOUT_S = 30.0
+# After a FAILED ping, retry soon rather than after a full interval, so one blip
+# can't open a gap wider than the ~15-min idle cutoff and let the host spin down.
+_KEEPALIVE_RETRY_S = 30.0
+# Fallback if a caller passes a non-positive interval (would be a busy loop).
+_DEFAULT_KEEPALIVE_INTERVAL_S = 300.0
 
 
-async def _keepalive_loop(url: str, interval_s: int) -> None:
+async def _keepalive_loop(url: str, interval_s: float) -> None:
     """Ping our own public ``/health`` on an interval so an idle-spin-down host
     (e.g. Render free tier) stays warm between demos.
 
@@ -50,16 +55,20 @@ async def _keepalive_loop(url: str, interval_s: int) -> None:
     from koel.common.http import make_async_client
 
     ping = url.rstrip("/") + "/health"
+    interval_s = interval_s if interval_s > 0 else _DEFAULT_KEEPALIVE_INTERVAL_S
+    delay = interval_s
     async with make_async_client(timeout_s=_KEEPALIVE_TIMEOUT_S) as client:
         while True:
-            await asyncio.sleep(interval_s)  # sleep first: we boot warm
+            await asyncio.sleep(delay)  # sleep first: we boot warm
             try:
                 resp = await client.get(ping)
                 logger.debug("keepalive %s → %s", ping, resp.status_code)
+                delay = interval_s
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — a failed ping must not kill the loop
-                logger.warning("keepalive ping failed: %s", exc)
+                logger.warning("keepalive ping failed (retry in %ss): %s", _KEEPALIVE_RETRY_S, exc)
+                delay = min(_KEEPALIVE_RETRY_S, interval_s)
 
 
 async def _ensure_schema() -> None:

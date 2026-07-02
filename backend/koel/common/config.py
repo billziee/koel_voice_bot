@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 5 min: short enough that even one FAILED ping (loop waits ~one more interval
+# before the next attempt) still lands two successful pings inside the ~15-min
+# idle cutoff, but long enough not to hammer /health.
+_DEFAULT_KEEPALIVE_INTERVAL_S = 300
 
 
 class CommonSettings(BaseSettings):
@@ -85,7 +91,15 @@ class CommonSettings(BaseSettings):
     # Unset ⇒ no task, so it never runs locally or in CI. This only KEEPS a running
     # instance warm; it can't wake one already spun down — the CI cron does that.
     keepalive_url: str | None = None
-    keepalive_interval_seconds: int = 600  # 10 min, comfortably under the 15-min cutoff
+    keepalive_interval_seconds: int = _DEFAULT_KEEPALIVE_INTERVAL_S
+
+    @field_validator("keepalive_interval_seconds")
+    @classmethod
+    def _sane_keepalive_interval(cls, v: int) -> int:
+        # A non-positive interval would turn the ping loop into a no-delay busy
+        # loop (asyncio.sleep(0) never yields real time). Coerce to the default
+        # rather than crash the whole app on a keep-alive misconfig.
+        return v if v > 0 else _DEFAULT_KEEPALIVE_INTERVAL_S
 
     @property
     def is_production(self) -> bool:
