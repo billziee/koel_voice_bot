@@ -51,21 +51,40 @@ async def _run_session(base: str, ws_base: str, token: str, bot_id: str,
         return
     url = f"{ws_base}/ws/calls/{sess['session_id']}"
     subprotocols = ["koel.v1", f"koel.token.{sess['ws_token']}"]
+    import base64 as _b64
+
+    async def drain_until_listening(ws) -> None:  # noqa: ANN001
+        # The server greets on connect (call_state → transcript → audio_chunk …).
+        # Wait until it's done (call_state=listening) before timing customer turns.
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+            if frame.get("type") == "ping":
+                await ws.send(json.dumps({"type": "pong"}))
+            elif frame.get("type") == "call_state" and frame.get("data", {}).get("status") == "listening":
+                return
+
     try:
         async with websockets.connect(url, subprotocols=subprotocols) as ws:
+            await drain_until_listening(ws)
             for i in range(turns):
-                import base64 as _b64
-                payload = _b64.b64encode(f"TEXT:haan batao {i}".encode()).decode()
+                payload = _b64.b64encode(f"TEXT:haan mujhe offer ke baare mein batao {i}".encode()).decode()
                 t0 = time.monotonic()
-                await ws.send(json.dumps({"type": "audio", "data": {"audio_b64": payload, "is_final": True}}))
-                # Await the first audio_chunk (bot turn) as the round-trip signal.
+                # ClientMessage: type=audio_chunk with top-level fields (protocol.py).
+                await ws.send(json.dumps(
+                    {"type": "audio_chunk", "audio_b64": payload, "is_final": True, "audio_format": "wav"}
+                ))
+                # First bot audio_chunk after our turn = first-audio latency.
                 while True:
-                    frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                    if frame.get("type") == "audio_chunk":
+                    frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+                    t = frame.get("type")
+                    if t == "audio_chunk":
                         latencies.append((time.monotonic() - t0) * 1000)
                         break
-                    if frame.get("type") == "ping":
+                    if t == "ping":
                         await ws.send(json.dumps({"type": "pong"}))
+                    elif t in ("call_ended", "error"):
+                        errors.append(1)
+                        return
     except Exception:
         errors.append(1)
 
