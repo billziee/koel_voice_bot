@@ -18,12 +18,18 @@ Distributed traces (spans) carry `synthesize_latency_ms`, `fallback_used`, and
 `sample_rate` on `tts.synthesize`, and stitch FE → VB_Svc → AI over W3C
 `traceparent`.
 
+> **Honest floor:** with users in India and inference in the US, ~250 ms of
+> trans-Pacific RTT is unavoidable, so a literal 300 ms *full turn* is physically
+> impossible. The SLO is split: **perceived** first-audio < 300 ms (met by
+> sentence-streaming TTS + filler), and a realistic **true** full-turn target.
+
 ## SLOs and alerts
 
 | SLO (PRD §14) | Target | Metric / query | Alert |
 |---|---|---|---|
-| Turn latency P95 | < 300 ms | `histogram_quantile(0.95, koel_turn_latency)` | Page if P95 > 300 ms for 5 min |
-| Per-hop P95 | STT/TTS < 100 ms, NLP < 200 ms | `koel_hop_latency{hop=…}` P95 | Warn on sustained breach |
+| **Perceived** first-audio P95 | < 300 ms (filler + sentence-streaming) | `histogram_quantile(0.95, koel_first_audio_latency)` | Page if > 300 ms for 5 min |
+| **True** full-turn P95 | ~0.8–1.3 s US-colocated (physical floor ≈ ocean RTT + STT+LLM+TTS) | `histogram_quantile(0.95, koel_turn_latency)` | Warn on regression |
+| Per-hop P95 | STT/TTS < 100 ms (US-local), NLP < 200 ms (8b), tts_first_audio tracked | `koel_hop_latency{hop=…}` P95 | Warn on sustained breach |
 | Error rate | < 1% | `rate(koel_errors) / rate(turns)` | Page if > 1% for 5 min |
 | Barge-in false-interrupt | < 5% | app log ratio (interrupted turns / total) | Warn |
 | Tone-tag coverage | 100% | `TranscriptTurn.tone` non-null ratio | Warn if < 100% |
