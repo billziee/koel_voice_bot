@@ -77,6 +77,16 @@ class CommonSettings(BaseSettings):
     tts_svc_url: str = "http://localhost:8103"
     crm_svc_url: str = "http://localhost:8104"
 
+    # --- Keep-alive self-ping (free-tier hosts spin down when idle) ---
+    # A free-tier host (e.g. Render) spins the instance down after ~15 min with no
+    # INBOUND traffic (~50s cold start on the next request). Set this to the app's
+    # own PUBLIC url and the single-process combined app pings <url>/health on an
+    # interval, generating that inbound traffic so it stays warm between demos.
+    # Unset ⇒ no task, so it never runs locally or in CI. This only KEEPS a running
+    # instance warm; it can't wake one already spun down — the CI cron does that.
+    keepalive_url: str | None = None
+    keepalive_interval_seconds: int = 600  # 10 min, comfortably under the 15-min cutoff
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"

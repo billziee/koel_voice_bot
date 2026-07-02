@@ -68,6 +68,25 @@ at it) before deploying, or you'll ship the pre-optimization build.
 - **512 MB RAM** is tight for the numpy ambient mixer + 5 uvicorn processes.
 - WebSockets work on Render, but mind the idle timeout on long calls.
 
+### Keeping it warm between demos
+
+Two independent keep-alives (use either or both):
+
+1. **In-app self-ping** — set `KOEL_KEEPALIVE_URL` to the backend's own public URL
+   (e.g. `https://koel-backend-oj5p.onrender.com`). The combined app then pings
+   `<url>/health` every `KOEL_KEEPALIVE_INTERVAL_SECONDS` (default 600s), which is
+   inbound traffic that resets the idle timer. Keeps a **running** instance warm;
+   can't wake one that already spun down.
+2. **CI cron** — `.github/workflows/keepalive.yml` pings `/health` every 10 min and
+   **also wakes a cold instance**. Scheduled workflows run only from the **default
+   branch**, so this must be on `main` to tick; set repo variable `KEEPALIVE_URL`
+   to override the target, or use the workflow's manual "Run" button before a demo.
+
+> **Cost:** always-warm ≈ always-running ≈ **~730 of the 750 free instance-hours/mo**
+> — fine for one demo service, but it can exhaust the monthly free allowance near
+> month-end. To conserve, narrow the cron to demo hours (commented line in the
+> workflow) and leave `KOEL_KEEPALIVE_URL` unset.
+
 ## 5. Verify after deploy
 
 - Backend: `GET /health/ready` returns JSON `{"status":"ok","dependencies":{"postgres":true,"redis":true}}` (not HTML).
