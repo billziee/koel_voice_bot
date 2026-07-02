@@ -28,6 +28,10 @@ class NlpSettings(CommonSettings):
     groq_model: str = "llama-3.3-70b-versatile"
     groq_model_quality: str = "llama-3.3-70b-versatile"  # hi / hinglish
     groq_model_fast: str = "llama-3.1-8b-instant"  # en
+    # Script for Hinglish replies: "devanagari" (for NVIDIA Magpie hi-IN, which
+    # needs Devanagari) or "latin" (romanized — for Orpheus/English-only TTS setups
+    # that can't pronounce Devanagari). Set "latin" if Magpie isn't available.
+    hinglish_script: str = "devanagari"
     # Low temperature: keep turns grounded and on-script (PRD §12 anti-hallucination).
     groq_temperature: float = 0.3
     # Spoken turns are 1-3 sentences; a tight cap ends generation sooner (latency).

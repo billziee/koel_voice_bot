@@ -251,8 +251,14 @@ class GroqNlpProvider(NlpProvider):
         timeout_s: float = 8.0,
         model_fast: str | None = None,
         model_quality: str | None = None,
+        hinglish_script: str = "devanagari",
     ) -> None:
         self._model = model
+        # Hinglish reply script: Devanagari (Magpie hi-IN) or Latin (Orpheus/English
+        # TTS, which can't voice Devanagari). Falls back to the class default.
+        self._script_directive = dict(self._SCRIPT_DIRECTIVE)
+        if hinglish_script.lower() == "latin":
+            self._script_directive["hinglish"] = self._HINGLISH_LATIN_DIRECTIVE
         # Language-routed models (latency): en → fast (8b), hi/hinglish → quality
         # (70b). Fall back to the single `model` when the split isn't configured.
         self._model_fast = model_fast or model
@@ -283,12 +289,18 @@ class GroqNlpProvider(NlpProvider):
         "en": "Respond in natural English.",
     }
 
-    @classmethod
-    def _build_user_prompt(cls, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> str:
+    # Romanized-Hinglish directive for Orpheus/English-only TTS (no Devanagari).
+    _HINGLISH_LATIN_DIRECTIVE = (
+        "Respond the way an Indian bank agent TEXTS: natural Hindi written in ROMAN/"
+        "Latin letters (romanized Hinglish), with English banking terms kept as-is "
+        "(HDFC, credit card, offer, EMI, lounge access). Do NOT use Devanagari script."
+    )
+
+    def _build_user_prompt(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> str:
         parts: list[str] = [
             f"USE CASE: {ctx.use_case}",
             f"LANGUAGE: {ctx.language.value}",
-            f"SCRIPT: {cls._SCRIPT_DIRECTIVE.get(ctx.language.value, cls._SCRIPT_DIRECTIVE['hinglish'])}",
+            f"SCRIPT: {self._script_directive.get(ctx.language.value, self._script_directive['hinglish'])}",
         ]
         # N: mask account/card/phone-length digits before the prompt egresses to
         # the (US-hosted) Groq API. Masking these does not change intent/tone, so

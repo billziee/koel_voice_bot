@@ -51,7 +51,8 @@ async def test_unsupported_language_escalates(test_db):
 
     ws = FakeWebSocket([json.dumps({"type": "audio_chunk", "audio_b64": "x", "is_final": True})])
     state = _state("ws_unsupported")
-    call = _session(ws, state, _Clients())
+    # Opt into the (now default-off) STT-language escalation to exercise it.
+    call = _session(ws, state, _Clients(), escalate_on_unsupported_language=True)
     await call.run()
     # Escalated to a human on the unsupported-language branch.
     assert state.escalated is True or state.status in (CallStatus.escalating, CallStatus.ended)

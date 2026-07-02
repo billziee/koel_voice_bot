@@ -229,12 +229,20 @@ class Orchestrator:
         )
 
         # --- Graceful language fallback (PRD §06) ---
-        if self._is_unsupported_language(stt):
+        # Off by default: STT language detection on code-mixed audio falsely flags
+        # supported speech as "foreign" and ends the call after one turn.
+        if self._settings.escalate_on_unsupported_language and self._is_unsupported_language(stt):
             await self._escalate_unsupported_language(state, send)
             return
 
-        # Mid-call language switch (PRD §06), but only to a supported language.
-        if stt.language_id and stt.language_id in (Language.en, Language.hi, Language.hinglish):
+        # Mid-call language switch (PRD §06) — OFF by default so the bot's
+        # configured language stays authoritative (an English bot must not flip to
+        # Hinglish because Whisper guessed the caller's accent that way).
+        if (
+            self._settings.adapt_language_to_caller
+            and stt.language_id
+            and stt.language_id in (Language.en, Language.hi, Language.hinglish)
+        ):
             state.language = stt.language_id
 
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.processing))

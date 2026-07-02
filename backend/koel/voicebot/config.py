@@ -44,6 +44,14 @@ class VoiceBotSettings(CommonSettings):
     calling_hours_start: int = 9  # inclusive, local hour (24h)
     calling_hours_end: int = 21  # exclusive, local hour (24h)
 
+    # Language handling. STT language detection on code-mixed Indian phone audio is
+    # unreliable, so by default the BOT's configured language is authoritative:
+    #  - don't switch the response language from per-utterance STT detection, and
+    #  - don't escalate a call as "unsupported language" on an STT guess (it was
+    #    ending calls after one turn). Enable these only with a trusted STT.
+    adapt_language_to_caller: bool = False
+    escalate_on_unsupported_language: bool = False
+
     # Telephony seam (F): when true, synthesized audio is transcoded to 8 kHz
     # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
     telephony_mode: bool = False

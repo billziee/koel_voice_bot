@@ -41,6 +41,7 @@ def _build_provider() -> NlpProvider:
             model=settings.groq_model,
             model_fast=settings.groq_model_fast,
             model_quality=settings.groq_model_quality,
+            hinglish_script=settings.hinglish_script,
             base_url=settings.groq_base_url,
             temperature=settings.groq_temperature,
             max_tokens=settings.groq_max_tokens,
