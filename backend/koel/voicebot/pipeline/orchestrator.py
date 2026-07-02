@@ -14,12 +14,20 @@ the WebSocket handler today and a telephony bridge later.
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
 from koel.common.schemas import Language, Tone
-from koel.common.telemetry import current_trace_id, span
+from koel.common.telemetry import (
+    current_trace_id,
+    record_hop_latency,
+    record_turn_latency,
+    span,
+)
+from koel.common.text_guard import redact_pii
 from koel.nlp.schemas import Intent, NlpResponse, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
@@ -32,6 +40,27 @@ from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 logger = get_logger("koel.voicebot.orchestrator")
 
 Sender = Callable[[ServerMessage], Awaitable[None]]
+
+# Explicit "switch language" request in the caller's words (reliable, unlike STT
+# language guessing). A request cue + a language word → lock that language.
+_LANG_REQUEST_CUE = re.compile(
+    r"(continue|speak|switch|talk|reply|answer|prefer|in\b|karo|karein|bol|baat|mein|me\b)", re.I
+)
+_LANG_WORDS: list[tuple[Language, re.Pattern]] = [
+    (Language.en, re.compile(r"\b(english|angre[zj]i)\b", re.I)),
+    (Language.hi, re.compile(r"(\bhindi\b|हिंदी|हिन्दी)", re.I)),
+]
+
+
+def _requested_language(text: str) -> Language | None:
+    """Detect an explicit caller request to switch language (e.g. 'continue in
+    English', 'Hindi mein baat karo'). Returns None if it isn't clearly a request."""
+    if not text or not _LANG_REQUEST_CUE.search(text):
+        return None
+    for lang, pat in _LANG_WORDS:
+        if pat.search(text):
+            return lang
+    return None
 
 # Graceful unsupported-language message (PRD §06 Graceful Language Fallback).
 _FALLBACK_TEXT = (
@@ -67,6 +96,9 @@ class Orchestrator:
         ``ambient`` mixes the call-floor bed under the speech (PRD §06); callers
         set it False to mute the bed during an escalation handoff.
         """
+        # Never speak/persist a raw account/card/phone number (PRD §11/§14). Names
+        # and short figures (fees, rewards) are preserved — see redact_pii.
+        text = redact_pii(text)
         turn = Turn(
             index=state.next_turn_index(),
             speaker="bot",
@@ -88,29 +120,59 @@ class Orchestrator:
                 index=turn.index,
             )
         )
-        with span("tts.synthesize", session_id=state.session_id, tone=tone.value):
+        req = SynthesizeRequest(
+            session_id=state.session_id,
+            text=text,
+            language=state.language,
+            tone=tone,
+            voice_gender=state.voice_gender,
+            speaking_rate=state.speaking_rate,
+            ambient=ambient,
+            ambient_profile=state.ambient_profile if ambient else None,
+            telephony=self._settings.telephony_mode,
+        )
+        with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
             # Capture the trace id for the §11 audit / §14 latency dashboards.
             if state.trace_id is None:
                 state.trace_id = current_trace_id()
-            audio = await self._clients.synthesize(
-                SynthesizeRequest(
-                    session_id=state.session_id,
-                    text=text,
-                    language=state.language,
-                    tone=tone,
-                    speaking_rate=1.0,
-                    ambient=ambient,
-                    ambient_profile=state.ambient_profile if ambient else None,
+            t0 = time.monotonic()
+            if self._settings.stream_tts:
+                # Sentence-streaming (Tier 2): play the first sentence as soon as
+                # it's synthesized instead of waiting for the whole clip. Each chunk
+                # is a complete WAV the browser decodes + plays gaplessly.
+                first_ms: float | None = None
+                async for chunk in self._clients.stream_synthesis(req):
+                    if first_ms is None:
+                        first_ms = (time.monotonic() - t0) * 1000
+                        record_hop_latency("tts_first_audio", first_ms)
+                    await send(
+                        ServerMessage.of(
+                            ServerMessageType.audio_chunk,
+                            audio_b64=chunk.audio_b64,
+                            duration_ms=chunk.duration_ms,
+                            index=turn.index,
+                            seq=chunk.seq,
+                            sample_rate=chunk.sample_rate,
+                            audio_format=chunk.audio_format,
+                        )
+                    )
+                tts_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
+            else:
+                audio = await self._clients.synthesize(req)
+                await send(
+                    ServerMessage.of(
+                        ServerMessageType.audio_chunk,
+                        audio_b64=audio.audio_b64,
+                        duration_ms=audio.duration_ms,
+                        index=turn.index,
+                        sample_rate=audio.sample_rate,
+                        audio_format=audio.audio_format,
+                    )
                 )
-            )
-        await send(
-            ServerMessage.of(
-                ServerMessageType.audio_chunk,
-                audio_b64=audio.audio_b64,
-                duration_ms=audio.duration_ms,
-                index=turn.index,
-            )
-        )
+                tts_span.set_attribute("fallback_used", audio.fallback_used)
+            tts_ms = (time.monotonic() - t0) * 1000
+            record_hop_latency("tts", tts_ms)
+            tts_span.set_attribute("synthesize_latency_ms", round(tts_ms, 1))
         return turn
 
     async def greet(self, state: SessionState, send: Sender) -> None:
@@ -157,6 +219,16 @@ class Orchestrator:
         self, state: SessionState, send: Sender, stt: TranscriptResult
     ) -> None:
         """Process one completed customer utterance through the pipeline."""
+        turn_start = time.monotonic()
+        try:
+            await self._handle_final_transcript(state, send, stt)
+        finally:
+            # End-to-end audio-in→audio-out turn latency vs the §14 <300ms budget (Q).
+            record_turn_latency((time.monotonic() - turn_start) * 1000)
+
+    async def _handle_final_transcript(
+        self, state: SessionState, send: Sender, stt: TranscriptResult
+    ) -> None:
         # Reset no-input bookkeeping — the customer spoke.
         state.no_input_strikes = 0
 
@@ -179,12 +251,25 @@ class Orchestrator:
         )
 
         # --- Graceful language fallback (PRD §06) ---
-        if self._is_unsupported_language(stt):
+        # Off by default: STT language detection on code-mixed audio falsely flags
+        # supported speech as "foreign" and ends the call after one turn.
+        if self._settings.escalate_on_unsupported_language and self._is_unsupported_language(stt):
             await self._escalate_unsupported_language(state, send)
             return
 
-        # Mid-call language switch (PRD §06), but only to a supported language.
-        if stt.language_id and stt.language_id in (Language.en, Language.hi, Language.hinglish):
+        # Language control. An EXPLICIT caller request ("continue in English") is a
+        # reliable signal — honour it and make it stick for the rest of the call.
+        # Otherwise the bot's configured language stays authoritative; STT-detected
+        # language only switches when adapt_language_to_caller is on (it's an
+        # unreliable guess on code-mixed audio, off by default).
+        requested = _requested_language(stt.text)
+        if requested is not None:
+            state.language = requested
+        elif (
+            self._settings.adapt_language_to_caller
+            and stt.language_id
+            and stt.language_id in (Language.en, Language.hi, Language.hinglish)
+        ):
             state.language = stt.language_id
 
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.processing))
@@ -198,7 +283,7 @@ class Orchestrator:
             # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
             # speak one acknowledgement, and END the call now. Do not continue
             # the script or wait on a separate end_call signal.
-            await self._clients.flag_customer(state.customer_id or "", "opt_out", "customer opt-out")
+            await self._flag_best_effort(state.customer_id, "opt_out", "customer opt-out")
             await self._send_bot_turn(
                 state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
             )
@@ -206,7 +291,7 @@ class Orchestrator:
             return
         if nlp.intent == Intent.busy:
             # Deferral → schedule a callback rather than treat it as a loss.
-            await self._clients.flag_customer(state.customer_id or "", "callback", "customer busy")
+            await self._flag_best_effort(state.customer_id, "callback", "customer busy")
         await self._send_bot_turn(
             state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
         )
@@ -224,11 +309,25 @@ class Orchestrator:
         state.status = CallStatus.listening
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.listening))
 
+    async def _flag_best_effort(self, customer_id: str | None, flag: str, reason: str) -> None:
+        """Flag the CRM without letting a CRM outage abort the turn (PRD §12).
+
+        Critical for opt_out: the caller must still hear the acknowledgement and
+        have the call end even if the CRM write fails — we do not re-contact them.
+        """
+        if not customer_id:
+            return
+        try:
+            await self._clients.flag_customer(customer_id, flag, reason)
+        except Exception:  # noqa: BLE001 — best-effort; the turn proceeds regardless
+            logger.warning("crm_flag_failed flag=%s customer=%s", flag, customer_id, exc_info=True)
+
     async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
         """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
         ctx = TurnContext(
             session_id=state.session_id,
             bot_id=state.bot_id,
+            org_id=state.org_id,
             use_case=state.use_case,
             language=state.language,
             customer_text=state.transcript[-1].text,
@@ -236,15 +335,20 @@ class Orchestrator:
             crm_context=state.crm_context,
             rag_enabled=state.rag_enabled,
             rag_index=state.rag_index,
+            rag_top_k=state.rag_top_k,
+            rag_score_threshold=state.rag_score_threshold,
         )
         with span("nlp.respond", session_id=state.session_id):
+            t0 = time.monotonic()
             nlp_task = asyncio.create_task(self._clients.respond(ctx))
             trigger_s = self._settings.filler_trigger_ms / 1000
             try:
-                return await asyncio.wait_for(asyncio.shield(nlp_task), timeout=trigger_s)
+                result = await asyncio.wait_for(asyncio.shield(nlp_task), timeout=trigger_s)
             except TimeoutError:
                 await self._inject_filler(state, send)
-                return await nlp_task
+                result = await nlp_task
+            record_hop_latency("nlp", (time.monotonic() - t0) * 1000)
+            return result
 
     async def _inject_filler(self, state: SessionState, send: Sender) -> None:
         clip = self._filler.next_clip(state.session_id, state.language)
@@ -275,10 +379,9 @@ class Orchestrator:
         await self._send_bot_turn(
             state, send, text=_FALLBACK_TEXT, tone=Tone.empathetic, ambient=False
         )
-        if state.customer_id:
-            await self._clients.flag_customer(
-                state.customer_id, "unsupported_language", "language outside EN/HI/Hinglish"
-            )
+        await self._flag_best_effort(
+            state.customer_id, "unsupported_language", "language outside EN/HI/Hinglish"
+        )
         state.outcome = "unsupported_language"
         await self._escalate(state, send, reason="unsupported_language")
 

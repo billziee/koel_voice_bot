@@ -107,6 +107,75 @@ export async function createBot(token: string, payload: NewBotPayload): Promise<
   return jsonOrThrow(res);
 }
 
+// Partial in-place edit (S/AF) — server persists + writes an audit row.
+export type BotConfigPatch = Partial<Omit<NewBotPayload, 'use_case'>> & { active?: boolean };
+
+export async function patchBot(token: string, botId: string, patch: BotConfigPatch): Promise<BackendBot> {
+  const res = await fetch(`${KOEL_API}/v1/bots/${encodeURIComponent(botId)}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  });
+  return jsonOrThrow(res);
+}
+
+// ---- Analytics (AE) --------------------------------------------------------
+
+export interface BotStats {
+  bot_id: string;
+  total_calls: number;
+  converted: number;
+  escalated: number;
+  conversion_rate: number; // 0..1
+  escalation_rate: number; // 0..1
+  avg_duration_ms: number;
+  outcomes: Record<string, number>;
+}
+
+export async function getBotStats(token: string, botId: string): Promise<BotStats> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/bots/${encodeURIComponent(botId)}/stats`, {
+      headers: authHeaders(token),
+    }),
+  );
+}
+
+export async function getAllStats(token: string): Promise<BotStats[]> {
+  return jsonOrThrow(await fetch(`${KOEL_API}/v1/stats`, { headers: authHeaders(token) }));
+}
+
+// ---- Knowledge base admin (X) ---------------------------------------------
+
+export interface KnowledgeIndex {
+  rag_index: string;
+  chunk_count: number;
+}
+
+export async function getKnowledgeIndexes(token: string): Promise<KnowledgeIndex[]> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/knowledge-indexes`, { headers: authHeaders(token) }),
+  );
+}
+
+export interface NewKnowledgeChunk {
+  rag_index: string;
+  use_case: string;
+  language?: string;
+  title: string;
+  content: string;
+  chunk?: boolean;
+}
+
+export async function createKnowledgeChunk(token: string, payload: NewKnowledgeChunk): Promise<unknown> {
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/knowledge-chunks`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
 export async function startSession(
   token: string,
   botId: string,
@@ -158,8 +227,11 @@ export class LiveCall {
   }
 
   connect(): void {
-    const url = `${WS_BASE}/ws/calls/${this.sessionId}?token=${encodeURIComponent(this.wsToken)}`;
-    const ws = new WebSocket(url);
+    // Send the WS JWT via the Sec-WebSocket-Protocol subprotocol, not the URL, so
+    // it never lands in server access logs / browser history (M). The server
+    // echoes 'koel.v1' to complete the handshake.
+    const url = `${WS_BASE}/ws/calls/${this.sessionId}`;
+    const ws = new WebSocket(url, ['koel.v1', `koel.token.${this.wsToken}`]);
     this.ws = ws;
     ws.onopen = () => this.handlers.onOpen?.();
     ws.onclose = (e) => this.handlers.onSocketClose?.(e.wasClean);
@@ -221,12 +293,23 @@ export class LiveCall {
     this.send({ type: 'audio_chunk', audio_b64, is_final: true, sample_rate: sampleRate });
   }
 
+  /** Send a captured microphone utterance (base64 webm/mp4/ogg) to real STT (Whisper). */
+  sendAudioChunk(audioB64: string, format = 'webm'): void {
+    this.send({ type: 'audio_chunk', audio_b64: audioB64, is_final: true, audio_format: format });
+  }
+
   /** Gate-1 barge-in candidate fired while the bot is speaking. */
   bargeIn(partialText: string, speechDurationMs: number, language = 'hinglish'): void {
     this.send({
       type: 'barge_in_candidate',
       data: { partial_text: partialText, speech_duration_ms: speechDurationMs, language },
     });
+  }
+
+  /** Tell the server the audio queue drained — the bot has truly stopped
+   *  speaking, so the no-input timer should start from now (not the estimate). */
+  playbackDone(): void {
+    this.send({ type: 'playback_done' });
   }
 
   endCall(): void {

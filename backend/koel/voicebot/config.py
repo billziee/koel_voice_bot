@@ -23,8 +23,12 @@ class VoiceBotSettings(CommonSettings):
     filler_trigger_ms: int = 300  # inject filler if NLP first token exceeds this
 
     # Silence / timeout rules (PRD §05 table).
-    no_input_reprompt_ms: int = 5000  # re-prompt after 5s silence
-    no_input_close_ms: int = 5000  # close after a further 5s
+    # Silence AFTER the bot's audio finishes before a re-prompt/close. 5s felt
+    # impatient on real calls (fired while the caller was still thinking), so the
+    # window is more forgiving; the clock only starts once playback truly ends
+    # (client playback_done) — see ws/handler.
+    no_input_reprompt_ms: int = 8000  # re-prompt after 8s of real silence
+    no_input_close_ms: int = 8000  # close after a further 8s
 
     # WebSocket lifecycle (PRD §05 / §08).
     session_grace_ttl_seconds: int = 15  # Redis grace on disconnect
@@ -43,6 +47,22 @@ class VoiceBotSettings(CommonSettings):
     enforce_calling_hours: bool = False
     calling_hours_start: int = 9  # inclusive, local hour (24h)
     calling_hours_end: int = 21  # exclusive, local hour (24h)
+
+    # Language handling. STT language detection on code-mixed Indian phone audio is
+    # unreliable, so by default the BOT's configured language is authoritative:
+    #  - don't switch the response language from per-utterance STT detection, and
+    #  - don't escalate a call as "unsupported language" on an STT guess (it was
+    #    ending calls after one turn). Enable these only with a trusted STT.
+    adapt_language_to_caller: bool = False
+    escalate_on_unsupported_language: bool = False
+
+    # Telephony seam (F): when true, synthesized audio is transcoded to 8 kHz
+    # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
+    telephony_mode: bool = False
+
+    # Sentence-streaming TTS (latency): stream one audio chunk per sentence so the
+    # bot starts speaking on the first sentence, not the whole clip. Reversible.
+    stream_tts: bool = True
 
 
 @lru_cache

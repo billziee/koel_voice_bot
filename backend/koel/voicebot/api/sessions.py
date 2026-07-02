@@ -13,11 +13,12 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from koel.common.auth import CurrentUser, issue_token
 from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account, mask_name
+from koel.common.ratelimit import rate_limit
 from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
@@ -26,6 +27,7 @@ from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
+_session_limit = rate_limit(max_requests=20, window_s=60)  # M: cap session spam per IP
 
 # DPDP Act §11 data minimisation: load only the CRM attributes each use case
 # actually needs into the session. Use cases not listed here load all attributes.
@@ -49,8 +51,8 @@ def _minimise_attributes(use_case: str, attributes: dict) -> dict:
 
 
 class StartSessionRequest(BaseModel):
-    bot_id: str
-    customer_id: str | None = None
+    bot_id: str = Field(max_length=64)
+    customer_id: str | None = Field(default=None, max_length=64)
 
 
 class StartSessionResponse(BaseModel):
@@ -62,7 +64,12 @@ class StartSessionResponse(BaseModel):
     use_case: str
 
 
-@router.post("", response_model=StartSessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=StartSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_session_limit)],
+)
 async def start_session(
     payload: StartSessionRequest,
     user: CurrentUser,
@@ -81,7 +88,9 @@ async def start_session(
 
     async with session_scope() as db:
         bot: BotConfig | None = await db.get(BotConfig, payload.bot_id)
-    if bot is None or not bot.active:
+    # Tenant isolation (AF): a scoped operator cannot start a session on another
+    # org's bot (would hijack its config/RAG). 404 so the bot's existence isn't leaked.
+    if bot is None or not bot.active or (user.org_id is not None and bot.org_id != user.org_id):
         raise ApiError(
             status_code=status.HTTP_404_NOT_FOUND,
             code="bot_not_found",
@@ -125,16 +134,22 @@ async def start_session(
         owner_sub=user.sub,
         customer_id=payload.customer_id,
         use_case=bot.use_case.value,
+        org_id=bot.org_id,
         language=language,
         rag_enabled=bot.rag_enabled,
         rag_index=bot.rag_index,
+        rag_top_k=bot.rag_top_k,
+        rag_score_threshold=bot.rag_score_threshold,
         default_tone=default_tone,
+        voice_gender=bot.voice_gender,
+        speaking_rate=bot.speaking_rate,
         ambient_profile=bot.ambient_profile,
         greeting_template=bot.greeting_template or "",
         crm_context=crm_context,
         backchannels=backchannels if isinstance(backchannels, dict) else {},
-        # Intended recording object for the §11/§14 audit trail (30-day S3).
-        recording_url=f"s3://koel-recordings/{session_id}.wav",
+        # recording_url is populated on call end with the REAL S3 object (or left
+        # NULL when recording is disabled) — never a phantom URL (audit finding).
+        recording_url=None,
     )
     await runtime.store.save(state)
 
@@ -154,7 +169,7 @@ async def start_session(
 
     return StartSessionResponse(
         session_id=session_id,
-        ws_token=issue_token(user.sub, kind="ws", role=user.role),
+        ws_token=issue_token(user.sub, kind="ws", role=user.role, org_id=user.org_id),
         ws_url=f"/ws/calls/{session_id}",
         crm_context=crm_context,
         language=language.value,

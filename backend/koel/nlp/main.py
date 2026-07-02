@@ -11,17 +11,18 @@ from koel.common.auth import ServicePrincipal
 from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
-from koel.nlp.rag import HashEmbedder, retrieve
+from koel.nlp.rag import build_embedder, retrieve
 from koel.nlp.schemas import NlpResponse, TurnContext
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     yield
-    # Release the Groq HTTP client's connection pool on shutdown.
-    aclose = getattr(_provider, "aclose", None)
-    if aclose is not None:
-        await aclose()
+    # Release provider + embedder HTTP client pools on shutdown.
+    for obj in (_provider, _embedder):
+        aclose = getattr(obj, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 app = create_app(
@@ -38,6 +39,9 @@ def _build_provider() -> NlpProvider:
         return GroqNlpProvider(
             api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
             model=settings.groq_model,
+            model_fast=settings.groq_model_fast,
+            model_quality=settings.groq_model_quality,
+            hinglish_script=settings.hinglish_script,
             base_url=settings.groq_base_url,
             temperature=settings.groq_temperature,
             max_tokens=settings.groq_max_tokens,
@@ -46,8 +50,9 @@ def _build_provider() -> NlpProvider:
     return StubNlpProvider()
 
 
+_settings = get_nlp_settings()
 _provider = _build_provider()
-_embedder = HashEmbedder()
+_embedder = build_embedder(_settings)
 router = APIRouter(prefix="/v1", tags=["nlp"])
 
 
@@ -58,8 +63,20 @@ async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
     if ctx.rag_enabled and ctx.rag_index:
         with span("nlp.rag_retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
             try:
+                # Per-bot overrides (W) win over the service defaults when set.
+                top_k = ctx.rag_top_k if ctx.rag_top_k is not None else _settings.rag_top_k
+                threshold = (
+                    ctx.rag_score_threshold
+                    if ctx.rag_score_threshold is not None
+                    else _settings.rag_score_threshold
+                )
                 retrieved = await retrieve(
-                    ctx.customer_text, rag_index=ctx.rag_index, embedder=_embedder
+                    ctx.customer_text,
+                    rag_index=ctx.rag_index,
+                    embedder=_embedder,
+                    top_k=top_k,
+                    score_threshold=threshold,
+                    org_id=ctx.org_id,
                 )
             except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
                 retrieved = []

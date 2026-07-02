@@ -47,13 +47,15 @@ class CallDetail(CallSummary):
 
 @router.get("", response_model=list[CallSummary])
 async def list_calls(
-    _: CurrentUser,
+    user: CurrentUser,
     bot_id: str | None = Query(default=None),
     outcome: str | None = Query(default=None),
     language: str | None = Query(default=None),
     limit: int = Query(default=50, le=200),
 ) -> list[CallSummary]:
     stmt = select(CallLog).order_by(CallLog.started_at.desc()).limit(limit)
+    if user.org_id is not None:  # tenant isolation (AF)
+        stmt = stmt.where(CallLog.org_id == user.org_id)
     if bot_id:
         stmt = stmt.where(CallLog.bot_id == bot_id)
     if language:
@@ -81,10 +83,12 @@ async def list_calls(
 
 
 @router.get("/{call_id}", response_model=CallDetail)
-async def get_call(call_id: str, _: CurrentUser) -> CallDetail:
+async def get_call(call_id: str, user: CurrentUser) -> CallDetail:
     async with session_scope() as db:
         call = await db.get(CallLog, call_id)
-        if call is None:
+        # Tenant isolation (AF): a scoped operator cannot read another org's call
+        # transcript — 404 (not 403) so we don't leak that the call exists.
+        if call is None or (user.org_id is not None and call.org_id != user.org_id):
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="call_not_found",

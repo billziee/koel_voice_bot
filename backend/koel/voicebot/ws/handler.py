@@ -13,20 +13,24 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 
+from koel.common.auth import WS_SUBPROTOCOL
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
-from koel.common.telemetry import span
+from koel.common.telemetry import record_first_audio_latency, span
 from koel.stt.schemas import TranscribeRequest
+from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.persistence import persist_call
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
+from koel.voicebot.recording import upload_recording
 from koel.voicebot.session.models import CallStatus, SessionState
 from koel.voicebot.session.store import RedisSessionStore
 from koel.voicebot.ws.protocol import (
@@ -37,6 +41,12 @@ from koel.voicebot.ws.protocol import (
 )
 
 logger = get_logger("koel.voicebot.ws")
+
+# Cap the recording buffer so a very long call can't exhaust memory (~a few MB).
+_MAX_RECORDING_FRAMES = 500
+# Per-chunk cushion (s) added to the playback estimate to absorb browser decode /
+# gapless-scheduling lag, so the no-input timer never starts mid-playback.
+_CHUNK_PLAYBACK_MARGIN_S = 0.2
 
 
 class CallSession:
@@ -71,7 +81,10 @@ class CallSession:
         self._disconnect_started = False  # idempotent grace handling
         self._last_pong = time.monotonic()  # heartbeat liveness clock
         self._last_input_at = time.monotonic()  # last *real* client input (no-input timer)
+        self._speech_until = 0.0  # monotonic time the bot's current audio finishes playing
         self._send_lock = asyncio.Lock()
+        self._audio_buffer: list[bytes] = []  # bot WAV frames for the call recording (K)
+        self._turn_in_at: float | None = None  # when the customer's final audio arrived (first-audio metric)
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -83,10 +96,37 @@ class CallSession:
         # (a final audio_chunk) or a confirmed interrupt fires. The transition
         # to the `listening` UI state does NOT clear it (PRD §05).
         if message.type == ServerMessageType.audio_chunk:
+            # First bot audio after the customer's final utterance = true
+            # audio-in→audio-out first-audio latency vs the §14 budget (Tier 5).
+            if self._turn_in_at is not None:
+                record_first_audio_latency((time.monotonic() - self._turn_in_at) * 1000)
+                self._turn_in_at = None
             self._bot_speaking = True
+            # The client plays this audio for duration_ms; the no-input timer
+            # must not start counting until playback finishes (PRD §05) — else
+            # a 7s greeting would trip the 5s silence timer mid-sentence.
+            duration_ms = message.data.get("duration_ms", 0) or 0
+            # Accumulate across streamed chunks: if audio is still queued to play,
+            # extend from that end, not from now — so the no-input timer waits for
+            # ALL queued sentences to finish, not just the last chunk (Tier 2). Real
+            # audio gets a small cushion for browser decode/scheduling lag (keeping
+            # this an OVER-estimate); the precise end comes from client playback_done.
+            extra = duration_ms / 1000 + _CHUNK_PLAYBACK_MARGIN_S if duration_ms > 0 else 0.0
+            self._speech_until = max(self._speech_until, time.monotonic()) + extra
+            # Buffer bot WAV audio for the call recording (K), capped to bound memory.
+            is_wav = message.data.get("audio_format", "wav") == "wav"
+            if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+                try:
+                    self._audio_buffer.append(base64.b64decode(message.data.get("audio_b64", "")))
+                except (ValueError, base64.binascii.Error):
+                    pass
 
     async def run(self) -> None:
-        await self._ws.accept()
+        # Echo our subprotocol when the client negotiated one (token-in-subprotocol
+        # transport, M); a browser that offered it requires the echo to connect.
+        offered = [p.strip() for p in self._ws.headers.get("sec-websocket-protocol", "").split(",")]
+        subprotocol = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
+        await self._ws.accept(subprotocol=subprotocol)
         if self._resumed:
             # PRD §05: emit a RECONNECTED span so resume latency is observable.
             with span(
@@ -121,21 +161,24 @@ class CallSession:
     async def _receive_loop(self) -> None:
         while not self._closed:
             # No-input timer (PRD §05): 5s → re-prompt, a further 5s → close.
-            # Measured from the last *real* client input so heartbeat pongs do
-            # NOT keep resetting it (otherwise the timeout could never fire).
+            # The window is measured from whichever happened later — the last
+            # real client input or the moment the bot's audio finished playing —
+            # so the timer only starts once the bot has stopped speaking, and
+            # heartbeat pongs never reset it.
             window_ms = (
                 self._settings.no_input_reprompt_ms
                 if self._state.no_input_strikes == 0
                 else self._settings.no_input_close_ms
             )
-            remaining = (self._last_input_at + window_ms / 1000) - time.monotonic()
+            baseline = max(self._last_input_at, self._speech_until)
+            remaining = (baseline + window_ms / 1000) - time.monotonic()
             if remaining <= 0:
-                await self._handle_no_input()
+                await self._safe_no_input()
                 continue
             try:
                 raw = await asyncio.wait_for(self._ws.receive_text(), timeout=remaining)
             except TimeoutError:
-                await self._handle_no_input()
+                await self._safe_no_input()
                 continue
 
             try:
@@ -146,9 +189,10 @@ class CallSession:
                 )
                 continue
 
-            # Heartbeat pongs are not input — only real client frames reset the
-            # no-input clock (PRD §05).
-            if msg.type != ClientMessageType.pong:
+            # Only real customer input resets the no-input clock — not heartbeat
+            # pongs, and not playback_done (that's the bot's audio finishing, which
+            # is exactly when the no-input window should START).
+            if msg.type not in (ClientMessageType.pong, ClientMessageType.playback_done):
                 self._last_input_at = time.monotonic()
 
             # A failure in any AI-service call (httpx) or unexpected error must
@@ -189,6 +233,13 @@ class CallSession:
         if msg.type == ClientMessageType.pong:
             self._last_pong = time.monotonic()  # heartbeat liveness
             return
+        if msg.type == ClientMessageType.playback_done:
+            # The client's audio queue drained → the bot has truly finished
+            # speaking. Start the no-input clock from NOW (precise), overriding the
+            # send-time estimate so a re-prompt never fires mid-playback.
+            self._speech_until = time.monotonic()
+            self._bot_speaking = False
+            return
         if msg.type == ClientMessageType.end_call:
             await self._orch.end_call(self._state, self.send, outcome="declined")
             self._closed = True
@@ -206,6 +257,7 @@ class CallSession:
                 audio_b64=msg.audio_b64 or "",
                 sample_rate=msg.sample_rate,
                 is_final=msg.is_final,
+                audio_format=msg.audio_format,
             )
         )
         if not stt.is_final:
@@ -213,6 +265,7 @@ class CallSession:
             return
         # The customer is taking their turn — any prior bot audio is done.
         self._bot_speaking = False
+        self._turn_in_at = time.monotonic()  # audio-in mark for the first-audio metric
         await self._orch.handle_final_transcript(self._state, self.send, stt)
         if self._state.status == CallStatus.ended:
             self._closed = True
@@ -251,6 +304,16 @@ class CallSession:
             )
         # else: backchannel / too short → keep talking (no message needed)
 
+    async def _safe_no_input(self) -> None:
+        """Run the no-input handler; a TTS/CRM failure here must not crash the
+        socket and silently drop the call (same never-drop posture as _dispatch)."""
+        try:
+            await self._handle_no_input()
+        except WebSocketDisconnect:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self._fail_call("no_input_failed", "A service error interrupted the turn.", exc)
+
     async def _handle_no_input(self) -> None:
         if self._state.status in (CallStatus.ended, CallStatus.escalating):
             return
@@ -268,8 +331,9 @@ class CallSession:
         )
         if outcome.action == NoInputAction.reprompt:
             self._state.no_input_strikes += 1
-            # Restart the clock: the customer now has a fresh close window.
-            self._last_input_at = time.monotonic()
+            # Sending the re-prompt sets _speech_until to when its audio ends, so
+            # the close window starts only after the customer has heard it — not
+            # at the same instant as the first window.
             await self._orch._send_bot_turn(  # noqa: SLF001 — internal helper reuse
                 self._state, self.send, text=outcome.text, tone=self._state.default_tone
             )
@@ -365,6 +429,7 @@ class CallSession:
         if self._finalized:
             return
         self._finalized = True
+        await self._upload_recording()
         call_id = await persist_call(self._state)
         if call_id is not None:
             # Only flush Redis once the call is safely in PostgreSQL; otherwise
@@ -372,6 +437,15 @@ class CallSession:
             await self._store.delete(self._state.session_id)
         else:
             self._finalized = False  # allow a later attempt to persist
+
+    async def _upload_recording(self) -> None:
+        """Mux the buffered bot audio and upload it (K), then point recording_url at
+        the real object — or NULL it out when recording is disabled, so we never
+        persist a URL that resolves to nothing (audit finding)."""
+        wav = concat_wavs(self._audio_buffer) if self._audio_buffer else b""
+        url = await upload_recording(self._state.session_id, wav) if wav else None
+        # Persist only a URL that actually has bytes behind it (or None).
+        self._state.recording_url = url
 
     async def _persist_state(self) -> None:
         await self._store.save(self._state)

@@ -17,7 +17,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from koel.common.auth import issue_token
 from koel.crm.schemas import CustomerRecord
-from koel.db.models import BotConfig, CallLog, CrmCustomer, TranscriptTurn, UseCase
+from koel.db.models import (
+    BotConfig,
+    BotConfigAudit,
+    CallLog,
+    CrmCustomer,
+    InteractionLogRow,
+    TranscriptTurn,
+    UseCase,
+)
 from koel.tts.providers import StubOrpheusProvider
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline.bargein import BargeInClassifier
@@ -30,6 +38,8 @@ _SQLITE_TABLES = [
     BotConfig.__table__,
     CallLog.__table__,
     TranscriptTurn.__table__,
+    InteractionLogRow.__table__,
+    BotConfigAudit.__table__,
 ]
 
 
@@ -92,6 +102,10 @@ class FakeClients:
 
     async def synthesize(self, request):  # noqa: ANN001
         return await StubOrpheusProvider().synthesize(request)
+
+    async def stream_synthesis(self, request):  # noqa: ANN001 — sentence-streaming stand-in
+        async for chunk in StubOrpheusProvider()._stream_by_sentence(request):
+            yield chunk
 
     async def respond(self, ctx):  # noqa: ANN001 — overridden per-test when needed
         raise NotImplementedError

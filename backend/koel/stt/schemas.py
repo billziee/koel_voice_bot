@@ -15,6 +15,9 @@ class TranscribeRequest(BaseModel):
     sample_rate: int = 16000
     is_final: bool = False
     language_hint: Language | None = None
+    # Container format of the audio (wav/webm/m4a/mp3/ogg/flac). Whisper infers
+    # the codec from the filename extension, so this must match the bytes.
+    audio_format: str = "wav"
 
 
 class TranscriptResult(BaseModel):

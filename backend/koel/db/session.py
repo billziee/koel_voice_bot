@@ -19,11 +19,20 @@ from koel.common.config import get_common_settings
 @lru_cache
 def get_engine() -> AsyncEngine:
     settings = get_common_settings()
-    return create_async_engine(
-        settings.database_url,
-        echo=settings.debug and settings.log_level == "DEBUG",
-        pool_pre_ping=True,
-    )
+    kwargs: dict = {
+        "echo": settings.debug and settings.log_level == "DEBUG",
+        "pool_pre_ping": True,  # reap connections killed by the DB/idle proxies
+    }
+    # Real connection pooling for Postgres only. SQLite's async pool (tests)
+    # rejects these kwargs, so we apply them by dialect.
+    if settings.database_url.startswith("postgresql"):
+        kwargs.update(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_recycle=settings.db_pool_recycle_s,
+            pool_timeout=settings.db_pool_timeout_s,
+        )
+    return create_async_engine(settings.database_url, **kwargs)
 
 
 @lru_cache

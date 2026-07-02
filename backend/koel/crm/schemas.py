@@ -26,6 +26,8 @@ class InteractionLog(BaseModel):
     session_id: str
     event: str  # e.g. "call_started", "promise_to_pay", "opt_out", "escalated"
     detail: dict = Field(default_factory=dict)
+    # Set by the orchestrator so a retried write is deduped, not double-logged (AD).
+    idempotency_key: str | None = Field(default=None, max_length=80)
 
 
 class FlagRequest(BaseModel):
@@ -34,3 +36,4 @@ class FlagRequest(BaseModel):
     customer_id: str
     flag: str  # "retry", "opt_out", "callback", "unsupported_language"
     reason: str | None = None
+    idempotency_key: str | None = Field(default=None, max_length=80)

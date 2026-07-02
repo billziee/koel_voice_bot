@@ -60,3 +60,26 @@ async def test_first_objection_still_handles_normally():
     assert r.intent == Intent.objection
     assert r.end_call is False
     assert "Interested hain" in r.response_text
+
+
+async def test_first_objection_cites_the_grounding_chunk():
+    # Z: when the reply leans on a KB chunk, it must carry a citation to it.
+    r = await PROVIDER.generate(_ctx("mere paas already do cards hain"), PRODUCT)
+    assert r.grounded is True
+    assert [c.title for c in r.citations] == ["Regalia"]
+
+
+async def test_smalltalk_is_emitted_and_redirects():
+    # AA: smalltalk is in the enum — the stub must actually produce it.
+    r = await PROVIDER.generate(_ctx("Namaste, aap kaise ho?"), PRODUCT)
+    assert r.intent == Intent.smalltalk
+    assert r.end_call is False
+    assert "offer" in r.response_text.lower()  # steers back to purpose
+
+
+async def test_ungrounded_response_without_citation_stays_grounded_when_no_fact():
+    # A pure acknowledgement asserts no product fact → grounded, no citation needed.
+    r = await PROVIDER.generate(_ctx("nahi chahiye"), PRODUCT)
+    assert r.intent == Intent.not_interested
+    assert r.citations == []
+    assert r.grounded is True

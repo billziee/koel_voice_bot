@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 5 min: short enough that even one FAILED ping (loop waits ~one more interval
+# before the next attempt) still lands two successful pings inside the ~15-min
+# idle cutoff, but long enough not to hammer /health.
+_DEFAULT_KEEPALIVE_INTERVAL_S = 300
 
 
 class CommonSettings(BaseSettings):
@@ -44,7 +50,9 @@ class CommonSettings(BaseSettings):
     # --- Auth (PRD §08: JWT on REST + WebSocket) ---
     jwt_secret: str = "dev-only-insecure-secret-change-me"
     jwt_algorithm: str = "HS256"
-    jwt_access_ttl_seconds: int = 3600
+    # Short access TTL (M): the dashboard silently refreshes via /v1/auth/refresh,
+    # so a leaked token has a small blast radius.
+    jwt_access_ttl_seconds: int = 900
     # Short-lived token minted for the WebSocket upgrade specifically.
     jwt_ws_ttl_seconds: int = 120
 
@@ -57,12 +65,41 @@ class CommonSettings(BaseSettings):
 
     # --- PostgreSQL + pgvector ---
     database_url: str = "postgresql+asyncpg://koel:koel@localhost:5432/koel"
+    # Connection pool (Postgres only; PRD §14 stability under load). Sized for a
+    # per-service uvicorn worker — tune with worker count against RDS max_connections.
+    db_pool_size: int = 10
+    db_max_overflow: int = 5
+    db_pool_recycle_s: int = 1800  # recycle before RDS/proxy idle timeout
+    db_pool_timeout_s: int = 30
+
+    # --- Call recording + retention (K, PRD §11 audit / 30-day retention) ---
+    s3_recording_bucket: str = ""  # empty = recording disabled (dev); set in prod
+    s3_region: str = "ap-south-1"
+    recording_retention_days: int = 30
 
     # --- Inter-service base URLs (the orchestrator fans out to these) ---
     stt_svc_url: str = "http://localhost:8101"
     nlp_svc_url: str = "http://localhost:8102"
     tts_svc_url: str = "http://localhost:8103"
     crm_svc_url: str = "http://localhost:8104"
+
+    # --- Keep-alive self-ping (free-tier hosts spin down when idle) ---
+    # A free-tier host (e.g. Render) spins the instance down after ~15 min with no
+    # INBOUND traffic (~50s cold start on the next request). Set this to the app's
+    # own PUBLIC url and the single-process combined app pings <url>/health on an
+    # interval, generating that inbound traffic so it stays warm between demos.
+    # Unset ⇒ no task, so it never runs locally or in CI. This only KEEPS a running
+    # instance warm; it can't wake one already spun down — the CI cron does that.
+    keepalive_url: str | None = None
+    keepalive_interval_seconds: int = _DEFAULT_KEEPALIVE_INTERVAL_S
+
+    @field_validator("keepalive_interval_seconds")
+    @classmethod
+    def _sane_keepalive_interval(cls, v: int) -> int:
+        # A non-positive interval would turn the ping loop into a no-delay busy
+        # loop (asyncio.sleep(0) never yields real time). Coerce to the default
+        # rather than crash the whole app on a keep-alive misconfig.
+        return v if v > 0 else _DEFAULT_KEEPALIVE_INTERVAL_S
 
     @property
     def is_production(self) -> bool:

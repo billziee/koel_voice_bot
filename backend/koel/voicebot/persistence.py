@@ -18,9 +18,14 @@ logger = get_logger("koel.voicebot.persistence")
 
 def _coerce_outcome(value: str) -> CallOutcome:
     try:
-        return CallOutcome(value)
+        outcome = CallOutcome(value)
     except ValueError:
-        return CallOutcome.in_progress
+        outcome = CallOutcome.in_progress
+    # A persisted call has, by definition, ended — never leave it "in_progress"
+    # or it pollutes the AE conversion/aggregation denominators.
+    if outcome is CallOutcome.in_progress:
+        return CallOutcome.customer_unresponsive
+    return outcome
 
 
 async def persist_call(state: SessionState) -> str | None:
@@ -33,6 +38,7 @@ async def persist_call(state: SessionState) -> str | None:
             call = CallLog(
                 session_id=state.session_id,
                 bot_id=state.bot_id,
+                org_id=state.org_id,  # tenant scope for AF filtering
                 customer_id=state.customer_id,
                 language=state.language.value,
                 outcome=_coerce_outcome(state.outcome),

@@ -1,14 +1,13 @@
--- KOEL — PostgreSQL bootstrap (PRD §10 action item: Database Schema Design)
--- Run once against a fresh database before the SQLAlchemy models create tables.
--- The pgvector extension must exist before KnowledgeChunk.embedding is created.
-
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- The application creates tables from koel.db.models via metadata.create_all.
--- An IVFFlat index on the embedding column accelerates RAG retrieval once the
--- knowledge base is seeded (PRD §10 step 2). Create it after seeding so the
--- index lists reflect real data distribution:
+-- KOEL — PostgreSQL schema (PRD §10 "Database Schema Design")
 --
---   CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
---     ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
---     WITH (lists = 100);
+-- NOTE: schema is now owned by Alembic (migrations/), not this file. Run:
+--     alembic upgrade head        # creates the vector extension, all tables,
+--                                 # and the HNSW index (see the initial migration)
+-- or `python -m scripts.bootstrap_db`, which runs the migration then seeds demo data.
+--
+-- This file is retained only as human-readable reference for the pgvector setup:
+--   CREATE EXTENSION IF NOT EXISTS vector;
+--   CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_hnsw
+--     ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+-- (IVFFlat alternative for pgvector < 0.5, built AFTER seeding so lists reflect data:
+--   CREATE INDEX ... USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);)

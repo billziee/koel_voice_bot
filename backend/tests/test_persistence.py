@@ -57,4 +57,6 @@ async def test_persist_call_coerces_unknown_outcome(test_db):
     assert call_id is not None
     async with test_db() as db:
         call = (await db.execute(select(CallLog).where(CallLog.session_id == "sess_2"))).scalar_one()
-    assert call.outcome == CallOutcome.in_progress  # graceful coercion fallback
+    # An unknown outcome on an ended call coerces to customer_unresponsive — a
+    # persisted call is never left "in_progress" (would skew AE aggregates).
+    assert call.outcome == CallOutcome.customer_unresponsive

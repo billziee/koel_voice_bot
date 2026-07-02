@@ -51,23 +51,25 @@ def test_real_interrupt_still_fires_with_overrides():
 
 
 async def test_ambient_audio_is_mixed_when_enabled():
+    from koel.tts.mixer import _read_wav  # noqa: PLC0415
+
     prov = StubOrpheusProvider()
-    silent = await prov.synthesize(
-        SynthesizeRequest(session_id="s", text="Namaste ji kaise hain aap", tone=Tone.cheerful)
-    )
+    text = "Namaste ji kaise hain aap"
+    silent = await prov.synthesize(SynthesizeRequest(session_id="s", text=text, tone=Tone.cheerful))
     ambient = await prov.synthesize(
         SynthesizeRequest(
-            session_id="s",
-            text="Namaste ji kaise hain aap",
-            tone=Tone.cheerful,
-            ambient=True,
-            ambient_profile="callfloor",
+            session_id="s", text=text, tone=Tone.cheerful, ambient=True, ambient_profile="callfloor"
         )
     )
-    # Same duration, but the ambient bed is audible (non-zero) vs. pure silence.
+    # Both are now WAV with a declared canonical rate; same duration.
     assert ambient.duration_ms == silent.duration_ms
-    assert set(base64.b64decode(silent.audio_b64)) == {0}
-    assert set(base64.b64decode(ambient.audio_b64)) != {0}
+    assert silent.sample_rate == 24000 and silent.audio_format == "wav"
+    assert base64.b64decode(silent.audio_b64)[:4] == b"RIFF"
+    # The silent clip's PCM data is all zeros; the ambient clip carries the bed.
+    silent_pcm, _, _, _ = _read_wav(base64.b64decode(silent.audio_b64))
+    ambient_pcm, _, _, _ = _read_wav(base64.b64decode(ambient.audio_b64))
+    assert int(silent_pcm.astype("int64").__abs__().sum()) == 0
+    assert int(ambient_pcm.astype("int64").__abs__().sum()) > 0
 
 
 # --- Immediate opt-out (PRD §11 TRAI) ---------------------------------------
@@ -83,6 +85,10 @@ class _FakeClients:
 
     async def synthesize(self, request):  # noqa: ANN001
         return await StubOrpheusProvider().synthesize(request)
+
+    async def stream_synthesis(self, request):  # noqa: ANN001 — streaming TTS path
+        async for chunk in StubOrpheusProvider()._stream_by_sentence(request):
+            yield chunk
 
     async def flag_customer(self, customer_id, flag, reason=None):  # noqa: ANN001
         self.flags.append((customer_id, flag))

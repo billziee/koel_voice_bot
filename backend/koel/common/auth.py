@@ -33,6 +33,7 @@ class TokenClaims(BaseModel):
     sub: str  # user id / demo username
     kind: TokenKind
     role: str = "operator"
+    org_id: str | None = None  # tenant scope (AF); None = single-tenant pilot
     exp: int
     iat: int
     jti: str
@@ -47,6 +48,7 @@ def issue_token(
     *,
     kind: TokenKind,
     role: str = "operator",
+    org_id: str | None = None,
     settings: CommonSettings | None = None,
 ) -> str:
     settings = settings or get_common_settings()
@@ -56,6 +58,7 @@ def issue_token(
         "sub": subject,
         "kind": kind,
         "role": role,
+        "org_id": org_id,
         "iat": issued,
         "exp": issued + ttl,
         "jti": uuid.uuid4().hex,
@@ -128,18 +131,34 @@ ServicePrincipal = Annotated[TokenClaims, Depends(require_service_principal)]
 
 # --- WebSocket guard ---------------------------------------------------------
 
+WS_TOKEN_SUBPROTOCOL_PREFIX = "koel.token."
+WS_SUBPROTOCOL = "koel.v1"
+
+
+def websocket_token(websocket: WebSocket) -> str | None:
+    """Extract the WS JWT, preferring transports that keep it out of the URL (M).
+
+    Order: Sec-WebSocket-Protocol (``koel.token.<jwt>``) → Authorization: Bearer
+    → ``?token=`` query param (deprecated — leaks into access logs; kept only for
+    backward compatibility).
+    """
+    protocols = websocket.headers.get("sec-websocket-protocol", "")
+    for proto in (p.strip() for p in protocols.split(",")):
+        if proto.startswith(WS_TOKEN_SUBPROTOCOL_PREFIX):
+            return proto[len(WS_TOKEN_SUBPROTOCOL_PREFIX):]
+    header = websocket.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:]
+    return websocket.query_params.get("token")
+
+
 async def authenticate_websocket(websocket: WebSocket) -> TokenClaims | None:
     """Validate the JWT on the upgrade. Closes the socket with 1008 + does NOT accept on failure.
 
     Returns the claims on success, or ``None`` after closing on failure so the
-    caller can simply ``return``. The token is read from the ``token`` query
-    param (browsers can't set headers on the WS handshake) or a Bearer header.
+    caller can simply ``return``.
     """
-    token = websocket.query_params.get("token")
-    if not token:
-        header = websocket.headers.get("authorization", "")
-        if header.lower().startswith("bearer "):
-            token = header[7:]
+    token = websocket_token(websocket)
     if not token:
         # Policy violation close code; mirrors the REST 401 (PRD §08).
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="missing token")

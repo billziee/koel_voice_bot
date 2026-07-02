@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry import context as otel_context
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -23,9 +23,32 @@ from koel.common.config import CommonSettings, get_common_settings
 from koel.common.errors import register_exception_handlers
 from koel.common.logging import configure_logging, get_logger, set_correlation_id
 from koel.common.schemas import HealthResponse, HealthStatus
-from koel.common.telemetry import configure_telemetry
+from koel.common.telemetry import configure_metrics, configure_telemetry
 
 CORRELATION_HEADER = "x-correlation-id"
+
+# Swagger/ReDoc load assets from a CDN, so a strict CSP would break them; skip CSP
+# on those paths only (the rest of the headers still apply everywhere).
+_DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+def _apply_security_headers(response: Response, path: str, settings: CommonSettings) -> None:
+    """OWASP baseline response headers (PRD §08 / web security rules)."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "microphone=(self), camera=(), geolocation=()"
+    )
+    if settings.is_production:  # HSTS only makes sense over HTTPS
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    if not path.startswith(_DOCS_PATHS):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+        )
 
 
 def create_app(
@@ -35,6 +58,7 @@ def create_app(
     description: str = "",
     settings: CommonSettings | None = None,
     lifespan: Callable[[FastAPI], object] | None = None,
+    readiness_check: Callable[[], object] | None = None,
 ) -> FastAPI:
     settings = settings or get_common_settings()
     # Fail fast: never run in production with the insecure default JWT secret
@@ -44,8 +68,18 @@ def create_app(
             "KOEL_JWT_SECRET must be set to a strong value in production "
             "(the default dev secret is insecure)."
         )
+    # In production, CORS must be an explicit allowlist — never '*' or empty
+    # (Bearer auth mitigates but wildcard origins still widen the attack surface).
+    if settings.is_production:
+        cors = settings.cors_allow_origins.strip()
+        if not cors or cors == "*":
+            raise RuntimeError(
+                "KOEL_CORS_ALLOW_ORIGINS must be an explicit comma-separated allowlist "
+                "in production (not '*' or empty)."
+            )
     configure_logging(level=settings.log_level, json_output=settings.log_json)
     configure_telemetry(service_name, settings)
+    configure_metrics(service_name, settings)
     logger = get_logger(f"koel.{service_name}")
 
     @asynccontextmanager
@@ -85,16 +119,41 @@ def create_app(
         finally:
             otel_context.detach(token)
         response.headers[CORRELATION_HEADER] = cid
+        _apply_security_headers(response, request.url.path, settings)
         return response
 
-    @app.get("/health", response_model=HealthResponse, tags=["meta"])
-    async def health() -> HealthResponse:
+    def _health(health_status: HealthStatus, deps: dict[str, bool] | None = None) -> HealthResponse:
         return HealthResponse(
             service=service_name,
-            status=HealthStatus.ok,
+            status=health_status,
             version=__version__,
             environment=settings.environment,
+            dependencies=deps or {},
         )
+
+    @app.get("/health", response_model=HealthResponse, tags=["meta"])
+    @app.get("/health/live", response_model=HealthResponse, tags=["meta"])
+    async def health_live() -> HealthResponse:
+        """Liveness (P): the process is up. Never touches dependencies — a slow DB
+        must not cause the orchestrator to restart the pod."""
+        return _health(HealthStatus.ok)
+
+    @app.get("/health/ready", response_model=HealthResponse, tags=["meta"])
+    async def health_ready(response: Response) -> HealthResponse:
+        """Readiness (P): dependencies (DB/Redis/peers) reachable. 503 when not,
+        so the load balancer stops routing to an unready replica."""
+        if readiness_check is None:
+            return _health(HealthStatus.ok)
+        try:
+            deps = await readiness_check()  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 — any probe failure ⇒ not ready
+            logger.warning("readiness_check_failed", exc_info=True)
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return _health(HealthStatus.down, {})
+        if not all(deps.values()):
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return _health(HealthStatus.degraded, deps)
+        return _health(HealthStatus.ok, deps)
 
     # Trace inbound HTTP automatically; excludes /health to keep traces signal-rich.
     if settings.otel_enabled and settings.otel_instrument_fastapi:

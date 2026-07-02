@@ -1,0 +1,39 @@
+name: Keepalive
+
+# Free-tier hosts (Render) spin the backend down after ~15 min idle, so the next
+# request pays a ~50s cold start. This pings /health on a schedule to keep it warm
+# between demos. Unlike the in-app self-ping (koel/combined.py), this runs even
+# when the instance has already spun down — so it also WAKES a cold instance.
+#
+# Caveats:
+#  * Scheduled workflows run ONLY from the default branch — this file must be on
+#    `main` to tick. GitHub cron is also best-effort and often late under load;
+#    10 min leaves margin under the 15-min cutoff even when a tick slips.
+#  * Keeping the instance always-warm burns free-tier instance-hours (~750/mo ≈
+#    one always-on service). To conserve, narrow to demo hours — see the commented
+#    business-hours cron below — or rely on `workflow_dispatch` before each demo.
+#  * GitHub disables scheduled workflows after 60 days with no repo commits.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"          # every 10 minutes (UTC)
+    # - cron: "*/10 1-16 * * 1-5"   # business hours only (~06:30–21:30 IST, Mon–Fri)
+  workflow_dispatch:                # manual "warm it up before a demo" button
+
+# A slow tick must never pile onto the next; keep only the newest run.
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    name: Keepalive (ping backend /health)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend
+        run: |
+          URL="${{ vars.KEEPALIVE_URL || 'https://koel-backend-oj5p.onrender.com' }}"
+          echo "Pinging ${URL}/health"
+          # --max-time 60 lets a cold instance finish its ~50s wake within the ping;
+          # -f fails the run on any HTTP error so a broken deploy shows up red.
+          curl -fsS --max-time 60 --retry 3 --retry-delay 5 --retry-all-errors "${URL}/health"

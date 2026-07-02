@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
@@ -15,7 +16,7 @@ from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account
 from koel.common.telemetry import span
 from koel.crm.schemas import CustomerRecord, FlagRequest, InteractionLog
-from koel.db.models import CrmCustomer
+from koel.db.models import CrmCustomer, InteractionLogRow
 from koel.db.session import session_scope
 
 logger = get_logger("koel.crm_svc")
@@ -63,13 +64,39 @@ async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
 
 @router.post("/{customer_id}/interactions", status_code=status.HTTP_201_CREATED)
 async def log_interaction(customer_id: str, payload: InteractionLog, _: ServicePrincipal) -> dict:
-    # MVP: interaction logs are recorded on the call log in PostgreSQL by VB_Svc;
-    # here we surface the contract + emit a business-event log line (PRD §08).
+    """Persist a CRM interaction (AD). Idempotent: a retry with the same key writes once."""
+    async with session_scope() as db:
+        # Fast path: if this key was already recorded, return it unchanged.
+        if payload.idempotency_key:
+            existing = (
+                await db.execute(
+                    select(InteractionLogRow).where(
+                        InteractionLogRow.idempotency_key == payload.idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return {"status": "duplicate", "id": existing.id, "event": existing.event}
+        row = InteractionLogRow(
+            customer_id=customer_id,
+            session_id=payload.session_id,
+            event=payload.event,
+            detail=payload.detail or {},
+            idempotency_key=payload.idempotency_key,
+        )
+        db.add(row)
+        try:
+            await db.flush()
+        except IntegrityError:
+            # Concurrent retry beat us to the unique key — treat as a dedup, not an error.
+            await db.rollback()
+            return {"status": "duplicate", "event": payload.event}
+        row_id = row.id
     logger.info(
         "crm_interaction",
         extra={"extra_fields": {"customer_id": mask_account(customer_id), "event": payload.event}},
     )
-    return {"status": "logged", "customer_id": customer_id, "event": payload.event}
+    return {"status": "logged", "id": row_id, "customer_id": customer_id, "event": payload.event}
 
 
 @router.post("/{customer_id}/flags", status_code=status.HTTP_201_CREATED)

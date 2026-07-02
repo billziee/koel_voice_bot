@@ -38,6 +38,14 @@ class SynthesizeRequest(BaseModel):
     ambient: bool = False
     ambient_profile: str | None = None
     ambient_gain: float = 0.06  # relative loudness of the bed under speech
+    # Telephony seam (F): when true, post-mix audio is transcoded to 8 kHz µ-law
+    # (PCMU) for a PSTN leg. Default off — browser calls stay 24 kHz WAV.
+    telephony: bool = False
+
+
+# Canonical output: 24 kHz mono 16-bit PCM-in-WAV. Providers resample/declare to
+# this so the client decoder, ambient mixer, and barge-in buffering are deterministic.
+CANONICAL_SAMPLE_RATE = 24000
 
 
 class SynthesisChunk(BaseModel):
@@ -45,6 +53,10 @@ class SynthesisChunk(BaseModel):
     seq: int
     audio_b64: str
     is_final: bool = False
+    duration_ms: int = 0  # playback length of this chunk (drives the no-input timer)
+    sample_rate: int = CANONICAL_SAMPLE_RATE
+    channels: int = 1
+    audio_format: str = "wav"
 
 
 class SynthesisResult(BaseModel):
@@ -54,3 +66,9 @@ class SynthesisResult(BaseModel):
     audio_b64: str
     duration_ms: int
     prosody: Prosody
+    # Declared output format so the client never has to guess the rate (PRD §06).
+    sample_rate: int = CANONICAL_SAMPLE_RATE
+    channels: int = 1
+    audio_format: str = "wav"
+    # True when the routed provider failed and a fallback produced this audio (E).
+    fallback_used: bool = False

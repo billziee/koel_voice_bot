@@ -7,11 +7,18 @@ provider streams from an Orpheus SageMaker endpoint with the same chunk shape.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
+import re
+import struct
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
+from koel.common.http import make_async_client
+from koel.tts.mixer import mix_into_wav, to_ulaw_8k, wav_sample_rate
 from koel.tts.schemas import (
+    CANONICAL_SAMPLE_RATE,
     TONE_PROSODY,
     Prosody,
     SynthesisChunk,
@@ -19,7 +26,49 @@ from koel.tts.schemas import (
     SynthesizeRequest,
 )
 
-_SAMPLE_RATE = 16000
+logger = logging.getLogger(__name__)
+
+
+def _wav_duration_ms(wav: bytes) -> int:
+    """Duration of a PCM WAV from its header (data size / byte rate).
+
+    Robust to chunk ordering (e.g. a LIST chunk before data) and to streaming
+    writers like Orpheus that stamp a placeholder data size of 0xFFFFFFFF — in
+    that case (or any size overrunning the buffer) the real byte count is taken
+    from the remaining file length.
+    """
+    try:
+        if wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+            return 0
+        byte_rate = 0
+        i = 12
+        while i + 8 <= len(wav):
+            cid = wav[i : i + 4]
+            size = struct.unpack_from("<I", wav, i + 4)[0]
+            body = i + 8
+            if cid == b"fmt ":
+                byte_rate = struct.unpack_from("<I", wav, body + 8)[0]  # bytes/sec
+            elif cid == b"data":
+                if size == 0xFFFFFFFF or body + size > len(wav):
+                    size = len(wav) - body  # placeholder / streamed → actual bytes
+                return int(size / byte_rate * 1000) if byte_rate else 0
+            i = body + size + (size & 1)
+    except (struct.error, IndexError, ZeroDivisionError):
+        return 0
+    return 0
+
+
+def _pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, sampwidth: int = 2) -> bytes:
+    """Wrap raw little-endian PCM in a WAV header (for providers that return PCM)."""
+    byte_rate = sample_rate * channels * sampwidth
+    return (
+        b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+        + b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate,
+                                channels * sampwidth, sampwidth * 8)
+        + b"data" + struct.pack("<I", len(pcm)) + pcm
+    )
+
+_SAMPLE_RATE = CANONICAL_SAMPLE_RATE  # 24 kHz mono, canonical output rate
 # ~60ms of speech per character is a rough but stable estimate for pacing.
 _MS_PER_CHAR = 60
 
@@ -38,26 +87,16 @@ def _silent_pcm(duration_ms: int) -> bytes:
     return b"\x00\x00" * samples  # 16-bit silence
 
 
-def _ambient_pcm(duration_ms: int, gain: float) -> bytes:
-    """Low-level comfort-noise bed (PRD §06 Ambient Audio Layer).
+# Sentence boundary incl. the Devanagari danda — matches nlp/chunking's splitter.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?।])\s+")
 
-    Deterministic LCG noise so the bytes are reproducible (no RNG state) and the
-    line carries call-floor texture instead of dead digital silence. In the stub
-    the speech itself is silent, so this bed *is* the audible mix; the real
-    Orpheus provider would sum this under the synthesized voice.
-    """
-    samples = int(_SAMPLE_RATE * duration_ms / 1000)
-    amp = max(0, int(3000 * gain))  # peak amplitude of the bed
-    if amp == 0:
-        return _silent_pcm(duration_ms)
-    out = bytearray()
-    seed = 0x2545F4914F6CDD1D & 0x7FFFFFFF
-    span_ = 2 * amp + 1
-    for _ in range(samples):
-        seed = (1103515245 * seed + 12345) & 0x7FFFFFFF
-        val = (seed % span_) - amp
-        out += int(val).to_bytes(2, "little", signed=True)
-    return bytes(out)
+
+def split_sentences(text: str) -> list[str]:
+    """Split a reply into sentences for per-sentence streaming (latency)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    return [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()] or [text]
 
 
 class TtsProvider(ABC):
@@ -66,6 +105,25 @@ class TtsProvider(ABC):
 
     @abstractmethod
     def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]: ...
+
+    async def _stream_by_sentence(
+        self, request: SynthesizeRequest
+    ) -> AsyncIterator[SynthesisChunk]:
+        """Synthesize each sentence and yield it as it's ready, so the caller can
+        play the first sentence before the whole reply exists (Tier 2). Each chunk
+        is a complete WAV — the browser decodes/plays them gaplessly."""
+        sentences = split_sentences(request.text)
+        for i, sentence in enumerate(sentences):
+            result = await self.synthesize(request.model_copy(update={"text": sentence}))
+            yield SynthesisChunk(
+                session_id=request.session_id,
+                seq=i,
+                audio_b64=result.audio_b64,
+                is_final=(i == len(sentences) - 1),
+                duration_ms=result.duration_ms,
+                sample_rate=result.sample_rate,
+                audio_format=result.audio_format,
+            )
 
 
 class StubOrpheusProvider(TtsProvider):
@@ -77,15 +135,17 @@ class StubOrpheusProvider(TtsProvider):
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
         prosody = resolve_prosody(request)
         duration = self._duration_ms(request.text, prosody)
+        # Silent speech wrapped as WAV; the real ambient bed is mixed under it so
+        # the stub carries authentic call-floor texture (not flat noise/silence).
+        wav = _pcm_to_wav(_silent_pcm(duration), _SAMPLE_RATE)
         if request.ambient and request.ambient_profile:
-            pcm = _ambient_pcm(duration, request.ambient_gain)
-        else:
-            pcm = _silent_pcm(duration)
+            wav = mix_into_wav(wav, request.ambient_profile, request.ambient_gain)
         return SynthesisResult(
             session_id=request.session_id,
-            audio_b64=base64.b64encode(pcm).decode(),
+            audio_b64=base64.b64encode(wav).decode(),
             duration_ms=duration,
             prosody=prosody,
+            sample_rate=_SAMPLE_RATE,
         )
 
     async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
@@ -105,6 +165,231 @@ class StubOrpheusProvider(TtsProvider):
                 is_final=emitted >= total,
             )
             seq += 1
+
+
+class GroqOrpheusProvider(TtsProvider):
+    """Live neural TTS via Groq Orpheus (OpenAI-compatible ``/audio/speech``).
+
+    Returns real WAV audio; ``duration_ms`` is parsed from the header so the
+    no-input timer waits for actual playback. Requires one-time org-admin terms
+    acceptance in the Groq console — until then (and on any error) it degrades to
+    the stub so a live call never drops. The tone tag is preserved on the result
+    for the schema; Orpheus voice selection is config-driven.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        voice: str,
+        base_url: str = "https://api.groq.com/openai/v1",
+        audio_format: str = "wav",
+        timeout_s: float = 30.0,
+    ) -> None:
+        self._model = model
+        self._voice = voice
+        self._format = audio_format
+        self._url = f"{base_url.rstrip('/')}/audio/speech"
+        self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        self._client = make_async_client(timeout_s=timeout_s)
+        self._fallback = StubOrpheusProvider()
+        self._warned = False  # log the terms/credential failure once, not per turn
+
+    # Orpheus voices by gender (G). Per-bot voice_gender picks the persona; the
+    # configured default is the fallback when gender is unset/unknown.
+    _VOICE_BY_GENDER = {"female": "autumn", "male": "austin"}
+
+    def _voice_for(self, request: SynthesizeRequest) -> str:
+        return self._VOICE_BY_GENDER.get((request.voice_gender or "").lower(), self._voice)
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            resp = await self._client.post(
+                self._url,
+                headers=self._headers,
+                json={
+                    "model": self._model,
+                    "input": request.text,
+                    "voice": self._voice_for(request),
+                    "response_format": self._format,
+                },
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            if not audio or not resp.headers.get("content-type", "").startswith("audio"):
+                raise ValueError("Orpheus returned no audio")
+        except Exception:  # noqa: BLE001 — terms gate / network → degrade to stub
+            if not self._warned:
+                self._warned = True
+                logger.warning(
+                    "groq_orpheus_failed; falling back to stub (accept Orpheus terms in the "
+                    "Groq console to enable real TTS). Suppressing further warnings.",
+                    exc_info=True,
+                )
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True  # surface the degrade on the orchestrator span (E)
+            return result
+
+        duration = _wav_duration_ms(audio) or self._fallback._duration_ms(request.text, prosody)  # noqa: SLF001
+        if request.ambient and request.ambient_profile:
+            audio = mix_into_wav(audio, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(audio).decode(),
+            duration_ms=duration,
+            prosody=prosody,
+            sample_rate=wav_sample_rate(audio) or CANONICAL_SAMPLE_RATE,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # Orpheus /audio/speech returns a whole clip per call, so stream by
+        # SENTENCE: first sentence plays while later ones synthesize (Tier 2).
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
+
+    async def _stream_whole_clip(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        result = await self.synthesize(request)
+        yield SynthesisChunk(
+            session_id=request.session_id, seq=0, audio_b64=result.audio_b64, is_final=True
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+class NvidiaMagpieTtsProvider(TtsProvider):
+    """Hindi/multilingual neural TTS via NVIDIA Magpie (NVCF Riva gRPC).
+
+    Orpheus is English-only in practice; Magpie speaks hi-IN natively. Synthesis
+    is a blocking gRPC call run in a worker thread; raw PCM is wrapped to WAV and
+    the duration is exact. Any failure degrades to the supplied fallback provider.
+    """
+
+    _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-US"}
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        function_id: str,
+        uri: str,
+        voice: str,
+        sample_rate: int,
+        timeout_s: float,
+        fallback: TtsProvider,
+    ) -> None:
+        import riva.client  # lazy: only needed when NVIDIA TTS is enabled
+        from riva.client.proto.riva_audio_pb2 import AudioEncoding
+
+        self._encoding = AudioEncoding.LINEAR_PCM
+        self._auth = riva.client.Auth(
+            uri=uri,
+            use_ssl=True,
+            metadata_args=[
+                ["function-id", function_id],
+                ["authorization", f"Bearer {api_key}"],
+            ],
+        )
+        self._svc = riva.client.SpeechSynthesisService(self._auth)
+        self._voice = voice
+        self._sr = sample_rate
+        self._timeout = timeout_s
+        self._fallback = fallback
+        self._warned = False
+
+    def _blocking_synth(self, text: str, language_code: str):
+        return self._svc.synthesize(
+            text, self._voice, language_code, sample_rate_hz=self._sr, encoding=self._encoding
+        )
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            lang_code = self._LANG_CODE.get(request.language.value, "hi-IN")
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(self._blocking_synth, request.text, lang_code),
+                timeout=self._timeout,
+            )
+            pcm = resp.audio
+            if not pcm:
+                raise ValueError("Magpie returned no audio")
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning("nvidia_magpie_failed; falling back", exc_info=True)
+            return await self._fallback.synthesize(request)
+        wav = _pcm_to_wav(pcm, self._sr)
+        if request.ambient and request.ambient_profile:
+            wav = mix_into_wav(wav, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(wav).decode(),
+            duration_ms=int(len(pcm) / 2 / self._sr * 1000),
+            prosody=prosody,
+            sample_rate=self._sr,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # Sentence-stream (Tier 2). A future enhancement is Riva synthesize_online
+        # for true sub-sentence streaming; per-sentence already plays first-sentence-fast.
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
+
+
+class RoutingTtsProvider(TtsProvider):
+    """Routes synthesis by call language: Hindi/Hinglish → ``hindi`` provider
+    (NVIDIA Magpie), everything else → ``default`` (Groq Orpheus / stub)."""
+
+    def __init__(self, *, default: TtsProvider, hindi: TtsProvider, hindi_languages: set[str]) -> None:
+        self._default = default
+        self._hindi = hindi
+        self._langs = hindi_languages
+
+    def _pick(self, request: SynthesizeRequest) -> tuple[TtsProvider, TtsProvider]:
+        """Return (primary, fallback) for the request's language."""
+        if request.language.value in self._langs:
+            return self._hindi, self._default
+        return self._default, self._hindi
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        primary, fallback = self._pick(request)
+        try:
+            result = await primary.synthesize(request)
+        except Exception:  # noqa: BLE001 — cascade to the other engine, never drop a turn
+            logger.warning(
+                "tts_primary_failed_cascading_to_fallback session_id=%s language=%s",
+                request.session_id, request.language.value, exc_info=True,
+            )
+            result = await fallback.synthesize(request)
+            result.fallback_used = True
+        return self._maybe_telephony(request, result)
+
+    @staticmethod
+    def _maybe_telephony(request: SynthesizeRequest, result: SynthesisResult) -> SynthesisResult:
+        """Transcode post-mix audio to 8 kHz µ-law for a PSTN leg (F). No-op by default."""
+        if not request.telephony:
+            return result
+        try:
+            ulaw = to_ulaw_8k(base64.b64decode(result.audio_b64))
+            result.audio_b64 = base64.b64encode(ulaw).decode()
+            result.audio_format = "ulaw"
+            result.sample_rate = 8000
+        except Exception:  # noqa: BLE001 — never drop a turn on a transcode failure
+            logger.warning("ulaw_transcode_failed session_id=%s", request.session_id, exc_info=True)
+        return result
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        primary, _ = self._pick(request)
+        async for chunk in primary.stream(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        for p in (self._default, self._hindi):
+            aclose = getattr(p, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
 
 class OrpheusSageMakerProvider(TtsProvider):  # pragma: no cover - production stub

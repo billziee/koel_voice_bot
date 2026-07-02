@@ -4,12 +4,19 @@ import {
   getBots as apiGetBots,
   startSession as apiStartSession,
   createBot,
+  patchBot,
+  getKnowledgeIndexes,
+  createKnowledgeChunk,
+  getAllStats,
   USE_CASE_CUSTOMER,
   LiveCall,
   KoelApiError,
   type BackendBot,
   type NewBotPayload,
+  type KnowledgeIndex,
+  type BotStats,
 } from './lib/koel';
+import { MicCapture, micSupported } from './lib/audio';
 import {
   Play, Square, Mic, Settings, Clock, PhoneCall, Plus,
   BarChart2, User, Database, Activity, ShieldAlert, Zap,
@@ -468,6 +475,21 @@ function backendBotToBot(b: BackendBot): Bot {
   };
 }
 
+// Fold real call-log aggregates (AE /v1/stats) into a bot's displayed metrics.
+function mergeStats(bot: Bot, stats: BotStats | undefined): Bot {
+  if (!stats || stats.total_calls === 0) return bot;
+  const conv = stats.conversion_rate * 100;
+  const totalSec = Math.round(stats.avg_duration_ms / 1000);
+  return {
+    ...bot,
+    calls: stats.total_calls,
+    conversionNum: conv,
+    conversion: `${conv.toFixed(1)}%`,
+    avgDuration: `${Math.floor(totalSec / 60)}m ${String(totalSec % 60).padStart(2, '0')}s`,
+    escalationRate: `${(stats.escalation_rate * 100).toFixed(1)}%`,
+  };
+}
+
 export default function KoelApp() {
   const [authed, setAuthed] = useState(false);
   // Live backend integration: token + flag. When live, bots/calls hit VB_Svc.
@@ -493,13 +515,13 @@ export default function KoelApp() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3000);
   }, []);
 
-  // Item 6/29: tick lastActive in real time and nudge stats
+  // Refresh the relative "last active" label in real time. Call counts come from
+  // real backend aggregates (AE), not a random nudge, so they're left untouched.
   useEffect(() => {
     const iv = window.setInterval(() => {
       setBots(prev => prev.map(b => ({
         ...b,
         lastActive: formatRelativeTime(b.lastActiveTs),
-        calls: b.status === 'Active' ? b.calls + Math.floor(Math.random() * 3) : b.calls,
       })));
     }, 15000);
     return () => window.clearInterval(iv);
@@ -553,10 +575,25 @@ export default function KoelApp() {
         escalationRate: '0%', lastActive: 'just now', lastActiveTs: Date.now(),
       }]);
       setBotConfigs(prev => ({ ...prev, [newId]: config }));
+    } else if (live && token) {
+      // Existing bot → persist the edit to VB_Svc (PATCH) so it survives reload
+      // and is audited server-side (S/AF). Falls back to local-only on failure.
+      const backendId = bots.find(b => b.id === botId)?.backendId;
+      if (backendId) {
+        try {
+          const { use_case: _uc, ...patch } = configToNewBot(config);
+          await patchBot(token, backendId, patch);
+          showToast('Configuration saved to VB_Svc — effective on next session start.');
+          setCurrentView('dashboard');
+          return;
+        } catch {
+          showToast('Could not save to backend — kept locally only.');
+        }
+      }
     }
     showToast('Configuration saved — takes effect on next session start.');
     setCurrentView('dashboard');
-  }, [showToast, live, token]);
+  }, [showToast, live, token, bots]);
 
   const handleLogin = useCallback(async (opts: { live: boolean; token: string | null }) => {
     setLive(opts.live);
@@ -567,8 +604,16 @@ export default function KoelApp() {
       try {
         const backendBots = await apiGetBots(opts.token);
         if (backendBots.length) {
-          setBots(backendBots.map(backendBotToBot));
-          showToast('Connected to live VB_Svc — bots loaded from the backend.');
+          // Merge real call-log aggregates (AE) into the loaded bots.
+          let stats: BotStats[] = [];
+          try {
+            stats = await getAllStats(opts.token);
+          } catch {
+            /* stats are best-effort; bots still render with zeroed metrics */
+          }
+          const byId = new Map(stats.map(s => [s.bot_id, s]));
+          setBots(backendBots.map(b => mergeStats(backendBotToBot(b), byId.get(b.id))));
+          showToast('Connected to live VB_Svc — bots + analytics loaded from the backend.');
         }
       } catch {
         showToast('Logged in, but failed to load live bots — showing demo bots.');
@@ -726,7 +771,7 @@ export default function KoelApp() {
           )}
           {currentView === 'history' && <HistoryView calls={completedCalls} onExported={() => showToast('CSV exported for QA workflows.')} theme={theme} darkMode={darkMode} />}
           {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} />}
-          {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} />}
+          {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} token={token} onToast={showToast} />}
         </main>
       </div>
 
@@ -1098,59 +1143,120 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
   useEffect(() => { durationRef.current = duration; }, [duration]);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const oscillatorRef = useRef<OscillatorNode | null>(null);
-  // Real AnalyserNode tapped off the audio graph so the waveform reflects
-  // actual amplitude/spectrum data, not Math.random() (PRD §09 Screen 3).
+  // Real AnalyserNode in the playback graph so the waveform reflects the actual
+  // bot audio (voice + server-mixed call-floor bed), not a synthetic oscillator.
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const audioQueueRef = useRef<AudioBuffer[]>([]);
+  const audioPlayingRef = useRef(false);
+  const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
 
-  // Item 52: Ambient audio loop
-  useEffect(() => {
-    if (!soundEnabled || callState === 'escalating' || callState === 'idle' || callState === 'ended') {
-      if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
-        audioCtxRef.current.suspend();
-      }
+  // Lazily build the playback graph: source -> analyser -> masterGain -> output.
+  // masterGain is the mute switch; the analyser always sees audio so the
+  // visualizer stays amplitude-reactive even when muted.
+  const ensureAudioGraph = (): AudioContext | null => {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    const Ctor = window.AudioContext || (window as any).webkitAudioContext;
+    if (!Ctor) return null;
+    const ctx: AudioContext = new Ctor();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 64;
+    const gain = ctx.createGain();
+    gain.gain.value = soundEnabled ? 1 : 0;
+    analyser.connect(gain);
+    gain.connect(ctx.destination);
+    audioCtxRef.current = ctx;
+    analyserRef.current = analyser;
+    masterGainRef.current = gain;
+    return ctx;
+  };
+
+  const playNextAudio = () => {
+    const ctx = audioCtxRef.current;
+    const analyser = analyserRef.current;
+    const buf = audioQueueRef.current.shift();
+    if (!buf || !ctx || !analyser) {
+      // Queue drained after playing → tell the server the bot truly finished so
+      // the no-input timer starts now, not from the send-time estimate.
+      if (audioPlayingRef.current) liveCallRef.current?.playbackDone();
+      audioPlayingRef.current = false;
       return;
     }
-    
-    if (soundEnabled) {
-      if (!audioCtxRef.current) {
-        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioContext) {
-          const ctx = new AudioContext();
-          audioCtxRef.current = ctx;
-          
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          const filter = ctx.createBiquadFilter();
-          
-          osc.type = 'triangle';
-          osc.frequency.value = 140; // low frequency murmur
-          
-          filter.type = 'lowpass';
-          filter.frequency.value = 400;
+    audioPlayingRef.current = true;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(analyser);
+    src.onended = () => { if (audioSrcRef.current === src) audioSrcRef.current = null; playNextAudio(); };
+    audioSrcRef.current = src;
+    src.start();
+  };
 
-          gain.gain.value = 0.05; // Very subtle
+  // Decode a base64 WAV chunk from the backend and enqueue it for gapless playback.
+  const enqueueAudio = async (audio_b64?: string) => {
+    if (!audio_b64) return;
+    const ctx = ensureAudioGraph();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
+    try {
+      const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
+      const buffer = await ctx.decodeAudioData(bytes.buffer);
+      audioQueueRef.current.push(buffer);
+      if (!audioPlayingRef.current) playNextAudio();
+    } catch { /* undecodable chunk — skip rather than break the call */ }
+  };
 
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 64;
-
-          osc.connect(filter);
-          filter.connect(gain);
-          gain.connect(ctx.destination);
-          // Tap the post-gain signal into the analyser the visualizer reads.
-          gain.connect(analyser);
-          analyserRef.current = analyser;
-
-          osc.start();
-          oscillatorRef.current = osc;
-        }
-      }
-      
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
-      }
+  // Stop playback immediately (barge-in TTS_KILL, or call end) and drop the queue.
+  const flushPlayback = () => {
+    audioQueueRef.current = [];
+    if (audioSrcRef.current) {
+      try { audioSrcRef.current.onended = null; audioSrcRef.current.stop(); } catch { /* already stopped */ }
+      audioSrcRef.current = null;
     }
+    audioPlayingRef.current = false;
+  };
+
+  // Keep the mute switch in sync; release playback when the call is not active.
+  useEffect(() => {
+    if (masterGainRef.current) masterGainRef.current.gain.value = soundEnabled ? 1 : 0;
+    if (callState === 'idle' || callState === 'ended') flushPlayback();
   }, [soundEnabled, callState]);
+
+  // --- real microphone capture (live mode) ---
+  const [micOn, setMicOn] = useState(false);
+  const micRef = useRef<MicCapture | null>(null);
+
+  const stopMic = () => {
+    micRef.current?.stop();
+    micRef.current = null;
+    setMicOn(false);
+  };
+
+  const toggleMic = async () => {
+    if (micOn) { stopMic(); return; }
+    if (!liveCall) { logEvent('Microphone is only available in live mode (real VB_Svc).', 'warn'); return; }
+    try {
+      const cap = new MicCapture({
+        onUtterance: (b64, fmt) => {
+          logEvent(`Mic utterance captured (${fmt}) → streaming to STT`, 'info');
+          liveCallRef.current?.sendAudioChunk(b64, fmt);
+        },
+        onError: (err) => logEvent(`Mic error: ${err instanceof Error ? err.message : String(err)}`, 'warn'),
+      });
+      await cap.start();
+      micRef.current = cap;
+      setMicOn(true);
+      logEvent('Microphone armed — speak; VAD endpoints each utterance', 'ok');
+    } catch (err) {
+      logEvent(`Microphone access denied/unavailable: ${err instanceof Error ? err.message : String(err)}`, 'warn');
+      setMicOn(false);
+    }
+  };
+
+  // Release the mic when the call ends and on unmount.
+  useEffect(() => {
+    if (callState === 'idle' || callState === 'ended') stopMic();
+  }, [callState]);
+  useEffect(() => () => stopMic(), []);
 
   const demoActiveRef = useRef(false);
   const [demoStepTooltip, setDemoStepTooltip] = useState<{ id: string, text: string } | null>(null);
@@ -1250,8 +1356,10 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
     const id = nextId();
     const timestamp = durationRef.current;
     setTranscript(prev => [...prev, { ...msg, id, timestamp }]);
-    // Item 52: speak bot messages if sound enabled
-    if (soundEnabled && msg.kind === 'bot' && typeof window !== 'undefined' && window.speechSynthesis) {
+    // Demo mode only: synthesize bot speech in the browser. In live mode the real
+    // bot audio (Orpheus/Magpie + ambient bed) streams from VB_Svc and is played
+    // via enqueueAudio(), so browser SpeechSynthesis would double up — skip it.
+    if (!liveCall && soundEnabled && msg.kind === 'bot' && typeof window !== 'undefined' && window.speechSynthesis) {
       const utter = new SpeechSynthesisUtterance(msg.text);
       utter.rate = msg.tone === 'firm' ? 0.9 : msg.tone === 'cheerful' ? 1.1 : 1.0;
       utter.pitch = msg.tone === 'empathetic' ? 0.9 : 1.0;
@@ -1381,11 +1489,13 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
         onCallState: (status) => setCallState(status as CallState),
         onTranscript: (speaker, text, d) =>
           addMsg({ kind: speaker === 'bot' ? 'bot' : 'user', text, tone: d.tone as Tone | undefined }),
+        onAudio: (d) => { void enqueueAudio(d.audio_b64 as string | undefined); },
         onFiller: (text) => {
           addMsg({ kind: 'filler', text });
           logEvent('NLP first token >300ms — pre-rendered filler injected (latency masking)', 'warn');
         },
         onTtsKill: (reason) => {
+          flushPlayback();  // halt in-flight bot audio immediately (barge-in)
           setTranscript(prev => {
             const copy = [...prev];
             for (let i = copy.length - 1; i >= 0; i--) {
@@ -2011,6 +2121,20 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
               <div className="p-3 md:p-4" style={{ backgroundColor: theme.surface }}>
                 <div className="flex items-center gap-3 overflow-x-auto pb-1">
                   <span className="text-[11px] font-bold uppercase tracking-widest whitespace-nowrap px-3 py-1.5 rounded-md border" style={{ color: theme.inkMuted, backgroundColor: theme.surfaceCard, borderColor: theme.rule }}>Customer Replies</span>
+                  {liveCall && micSupported() && (
+                    <button
+                      onClick={toggleMic}
+                      title={micOn ? 'Stop microphone' : 'Speak to the bot (real mic → Whisper STT)'}
+                      aria-pressed={micOn}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-full border text-sm font-semibold whitespace-nowrap transition-all shadow-sm focus-visible:ring-2"
+                      style={micOn
+                        ? { backgroundColor: theme.accent, borderColor: theme.accent, color: '#fff' }
+                        : { backgroundColor: theme.surfaceCard, borderColor: theme.rule, color: theme.ink }}
+                    >
+                      <Mic size={14} className={micOn ? 'animate-pulse' : ''} />
+                      {micOn ? 'Listening…' : 'Mic'}
+                    </button>
+                  )}
                   {callState === 'listening' ? (
                     scenario.chips.map((chip, idx) => {
                       const isDemoTarget = demoStepTooltip?.id === `chip-${idx}`;
@@ -3239,31 +3363,78 @@ function KV({ k, v, theme, mono }: { k: string; v: string; theme: ReturnType<typ
 // ============================================================================
 // Screen 6 — Knowledge Base
 // ============================================================================
-function KnowledgeBaseView({ theme }: { theme: ReturnType<typeof getTheme> }) {
+function KnowledgeBaseView({ theme, token, onToast }: { theme: ReturnType<typeof getTheme>; token: string | null; onToast: (m: string) => void }) {
   const [search, setSearch] = useState('');
+  const [indexes, setIndexes] = useState<KnowledgeIndex[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ rag_index: '', use_case: 'credit_card', title: '', content: '' });
+  const [saving, setSaving] = useState(false);
 
-  const kbItems = [
-    { id: 'kb_hdfc_regalia_v3', name: 'HDFC Regalia Benefits', docs: 24, lastSync: '2h ago', status: 'active' as const, size: '2.4 MB' },
-    { id: 'kb_hdfc_millennia_v1', name: 'HDFC Millennia Benefits', docs: 18, lastSync: '6h ago', status: 'active' as const, size: '1.8 MB' },
-    { id: 'kb_icici_plat_v2', name: 'ICICI Platinum Benefits', docs: 31, lastSync: '1d ago', status: 'active' as const, size: '3.1 MB' },
-    { id: 'kb_collections_scripts', name: 'Collections Script Bank', docs: 42, lastSync: '3d ago', status: 'active' as const, size: '5.2 MB' },
-    { id: 'kb_insurance_riders', name: 'Life Insurance Riders', docs: 15, lastSync: '5d ago', status: 'stale' as const, size: '1.2 MB' },
-    { id: 'kb_compliance_rbi', name: 'RBI Compliance Handbook', docs: 8, lastSync: '12h ago', status: 'active' as const, size: '0.9 MB' },
-  ];
+  const refresh = useCallback(async () => {
+    if (!token) { setLoading(false); return; }
+    setLoading(true);
+    try {
+      setIndexes(await getKnowledgeIndexes(token));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof KoelApiError ? e.message : 'Could not load knowledge indexes.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
-  const filtered = kbItems.filter(kb => kb.name.toLowerCase().includes(search.toLowerCase()) || kb.id.toLowerCase().includes(search.toLowerCase()));
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const submit = async () => {
+    if (!token || !form.rag_index.trim() || !form.title.trim() || !form.content.trim()) return;
+    setSaving(true);
+    try {
+      await createKnowledgeChunk(token, { ...form, chunk: form.content.length > 1200 });
+      onToast(`Knowledge added to “${form.rag_index}” and embedded for retrieval.`);
+      setForm({ rag_index: '', use_case: 'credit_card', title: '', content: '' });
+      setShowForm(false);
+      await refresh();
+    } catch (e) {
+      onToast(e instanceof KoelApiError ? e.message : 'Failed to add knowledge.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const filtered = indexes.filter(kb => kb.rag_index.toLowerCase().includes(search.toLowerCase()));
+  const totalChunks = indexes.reduce((s, k) => s + k.chunk_count, 0);
 
   return (
     <div className="animate-in" style={{ fontFamily: '"DM Sans", sans-serif' }}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight" style={{ color: theme.ink }}>Knowledge base</h1>
-          <p className="text-[13px] mt-0.5" style={{ color: theme.faint }}>{kbItems.length} indexes · {kbItems.reduce((s, k) => s + k.docs, 0)} documents</p>
+          <p className="text-[13px] mt-0.5" style={{ color: theme.faint }}>{indexes.length} indexes · {totalChunks} chunks</p>
         </div>
-        <button className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
-          <Plus size={14} /> New index
+        <button onClick={() => setShowForm(v => !v)} className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
+          <Plus size={14} /> {showForm ? 'Close' : 'New chunk'}
         </button>
       </div>
+
+      {showForm && (
+        <div className="rounded-lg border p-4 mb-4 grid gap-3" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
+          <div className="grid grid-cols-2 gap-3">
+            <input value={form.rag_index} onChange={e => setForm({ ...form, rag_index: e.target.value })} placeholder="RAG index (e.g. cc_hdfc)" className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+            <select value={form.use_case} onChange={e => setForm({ ...form, use_case: e.target.value })} className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }}>
+              {['credit_card', 'collections', 'personal_loan', 'insurance', 'custom'].map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="Title (e.g. Objection: annual fee)" className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+          <textarea value={form.content} onChange={e => setForm({ ...form, content: e.target.value })} placeholder="Knowledge content — this is embedded and used to ground responses." rows={3} className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2 resize-y" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+          <div className="flex justify-end">
+            <button onClick={() => void submit()} disabled={saving} className="text-[13px] font-bold px-4 py-2 rounded-md text-white disabled:opacity-50" style={{ backgroundColor: theme.primary }}>
+              {saving ? 'Embedding…' : 'Add & embed'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="mb-4">
         <div className="relative">
@@ -3277,32 +3448,22 @@ function KnowledgeBaseView({ theme }: { theme: ReturnType<typeof getTheme> }) {
           <thead>
             <tr style={{ backgroundColor: theme.inset }}>
               <th className="text-left px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Index ID</th>
-              <th className="text-left px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Name</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Documents</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Size</th>
-              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Last sync</th>
-              <th className="text-center px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Status</th>
+              <th className="text-right px-4 py-2.5 font-medium text-[12px]" style={{ color: theme.faint }}>Chunks</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map(kb => (
-              <tr key={kb.id} className="border-t cursor-pointer hover:opacity-80" style={{ borderColor: theme.ruleSubtle }}>
-                <td className="px-4 py-3 font-mono text-[12px]" style={{ color: theme.primary }}>{kb.id}</td>
-                <td className="px-4 py-3 font-medium" style={{ color: theme.ink }}>{kb.name}</td>
-                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.ink }}>{kb.docs}</td>
-                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.inkMuted }}>{kb.size}</td>
-                <td className="px-4 py-3 text-right" style={{ color: theme.faint }}>{kb.lastSync}</td>
-                <td className="px-4 py-3 text-center">
-                  <span className="px-2 py-0.5 rounded text-[11px] font-medium" style={{ backgroundColor: kb.status === 'active' ? theme.greenLight : theme.warningLight, color: kb.status === 'active' ? theme.green : theme.warning }}>
-                    {kb.status === 'active' ? 'Active' : 'Stale'}
-                  </span>
-                </td>
+              <tr key={kb.rag_index} className="border-t" style={{ borderColor: theme.ruleSubtle }}>
+                <td className="px-4 py-3 font-mono text-[12px]" style={{ color: theme.primary }}>{kb.rag_index}</td>
+                <td className="px-4 py-3 text-right font-mono" style={{ color: theme.ink }}>{kb.chunk_count}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        {filtered.length === 0 && (
-          <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>No indexes match your search.</div>
+        {loading && <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>Loading indexes…</div>}
+        {!loading && error && <div className="p-8 text-center text-[13px]" style={{ color: theme.warning }}>{error}</div>}
+        {!loading && !error && filtered.length === 0 && (
+          <div className="p-8 text-center text-[13px]" style={{ color: theme.faint }}>No indexes yet — add a knowledge chunk to create one.</div>
         )}
       </div>
     </div>

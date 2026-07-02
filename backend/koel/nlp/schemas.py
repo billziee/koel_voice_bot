@@ -30,6 +30,7 @@ class TurnContext(BaseModel):
 
     session_id: str
     bot_id: str
+    org_id: str | None = None  # tenant scope for RAG retrieval isolation (AF)
     use_case: str
     language: Language
     customer_text: str
@@ -39,12 +40,22 @@ class TurnContext(BaseModel):
     crm_context: dict = Field(default_factory=dict)
     rag_enabled: bool = True
     rag_index: str | None = None
+    # Per-bot RAG tuning overrides (W); None → NLP_svc config defaults.
+    rag_top_k: int | None = None
+    rag_score_threshold: float | None = None
 
 
 class RetrievedChunk(BaseModel):
     title: str
     content: str
     score: float
+
+
+class Citation(BaseModel):
+    """A KB chunk the reply grounded a product fact in (PRD §12 anti-hallucination)."""
+
+    title: str
+    excerpt: str = ""
 
 
 class NlpResponse(BaseModel):
@@ -59,3 +70,8 @@ class NlpResponse(BaseModel):
     end_call: bool = False
     confidence: float = Field(ge=0.0, le=1.0, default=0.8)
     retrieved: list[RetrievedChunk] = Field(default_factory=list)
+    # KB chunks the reply cited; empty when the turn asserts no product fact.
+    citations: list[Citation] = Field(default_factory=list)
+    # False when a product-fact assertion could not be tied to a citation — the
+    # orchestrator/eval can treat this as a soft grounding failure (never hard-drop).
+    grounded: bool = True

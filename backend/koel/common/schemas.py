@@ -20,7 +20,8 @@ class HealthResponse(BaseModel):
     version: str
     environment: str
     time: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    dependencies: dict[str, HealthStatus] = Field(default_factory=dict)
+    # Readiness dependency probes: name → reachable? (P)
+    dependencies: dict[str, bool] = Field(default_factory=dict)
 
 
 class Language(str, Enum):

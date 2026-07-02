@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (lint · type · test · security)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: koel
+          POSTGRES_PASSWORD: koel
+          POSTGRES_DB: koel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U koel" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      KOEL_DATABASE_URL: postgresql+asyncpg://koel:koel@localhost:5432/koel
+      KOEL_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint (ruff)
+        run: ruff check koel tests scripts
+      - name: Type check (mypy)
+        run: mypy koel || true  # advisory until fully annotated
+      - name: Migrate
+        run: alembic upgrade head
+      - name: Test + coverage gate (>=75%)
+        run: pytest --cov
+      - name: Dependency audit
+        run: pip install pip-audit && pip-audit || true  # advisory
+
+  frontend:
+    name: Frontend (build · e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: npm ci || npm install
+      - name: Type check + build
+        run: npm run build
+      - name: Audit
+        run: npm audit --production || true  # advisory
+      - name: Playwright E2E
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e -- --project=chromium
+
+  image:
+    name: Docker build + Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t koel-backend:ci backend
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: koel-backend:ci
+          severity: CRITICAL,HIGH
+          exit-code: "0"  # advisory; flip to 1 to block on CRITICAL/HIGH

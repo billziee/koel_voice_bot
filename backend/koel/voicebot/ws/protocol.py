@@ -35,6 +35,7 @@ class ClientMessageType(str, enum.Enum):
     barge_in_candidate = "barge_in_candidate"
     pong = "pong"
     end_call = "end_call"
+    playback_done = "playback_done"  # client audio queue drained — bot truly stopped speaking
 
 
 class ServerMessageType(str, enum.Enum):
@@ -55,6 +56,9 @@ class ClientMessage(BaseModel):
     audio_b64: str | None = None
     is_final: bool = False
     sample_rate: int = 16000
+    # Container of the captured mic audio (webm/mp4/wav/…) so STT names the file
+    # with the right extension for the codec (real mic sends webm/opus).
+    audio_format: str = "wav"
     data: dict[str, Any] = Field(default_factory=dict)
 
 
