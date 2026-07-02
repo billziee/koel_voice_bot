@@ -14,13 +14,13 @@ from koel.voicebot.session.models import CallStatus, SessionState
 
 
 class _Clients:
-    def __init__(self, stt_lang: Language, stt_conf: float = 0.95) -> None:
-        self.stt_lang, self.stt_conf = stt_lang, stt_conf
+    def __init__(self, stt_lang: Language, stt_conf: float = 0.95, text: str = "something") -> None:
+        self.stt_lang, self.stt_conf, self.text = stt_lang, stt_conf, text
         self.flags: list = []
 
     async def transcribe(self, request):  # noqa: ANN001
         return TranscriptResult(
-            session_id=request.session_id, text="something", is_final=True,
+            session_id=request.session_id, text=self.text, is_final=True,
             language_id=self.stt_lang, language_confidence=self.stt_conf,
             speech_duration_ms=600, word_confidence=0.9,
         )
@@ -82,3 +82,24 @@ async def test_adapt_flag_enables_switch(test_db):
     state = _state(Language.hinglish)
     await _run(_orch(clients, adapt_language_to_caller=True), state, clients)
     assert state.language == Language.hi
+
+
+async def test_explicit_english_request_sticks(test_db):
+    # A caller saying "continue in English" locks English even on a Hinglish bot,
+    # even with STT still guessing Hinglish (explicit request beats STT guess).
+    clients = _Clients(Language.hinglish, text="Please continue in English from now on")
+    state = _state(Language.hinglish)
+    await _run(_orch(clients), state, clients)
+    assert state.language == Language.en
+    assert state.transcript[-1].text == "lang=en"
+
+
+def test_requested_language_detection():
+    from koel.voicebot.pipeline.orchestrator import _requested_language
+
+    assert _requested_language("please continue in English") == Language.en
+    assert _requested_language("Hindi mein baat karo") == Language.hi
+    assert _requested_language("aap English bol sakte hain?") == Language.en
+    # Not a language request → no switch.
+    assert _requested_language("yes I am interested") is None
+    assert _requested_language("annual fee kitni hai") is None

@@ -306,6 +306,12 @@ export class LiveCall {
     });
   }
 
+  /** Tell the server the audio queue drained — the bot has truly stopped
+   *  speaking, so the no-input timer should start from now (not the estimate). */
+  playbackDone(): void {
+    this.send({ type: 'playback_done' });
+  }
+
   endCall(): void {
     this.send({ type: 'end_call' });
   }

@@ -44,6 +44,9 @@ logger = get_logger("koel.voicebot.ws")
 
 # Cap the recording buffer so a very long call can't exhaust memory (~a few MB).
 _MAX_RECORDING_FRAMES = 500
+# Per-chunk cushion (s) added to the playback estimate to absorb browser decode /
+# gapless-scheduling lag, so the no-input timer never starts mid-playback.
+_CHUNK_PLAYBACK_MARGIN_S = 0.2
 
 
 class CallSession:
@@ -105,8 +108,11 @@ class CallSession:
             duration_ms = message.data.get("duration_ms", 0) or 0
             # Accumulate across streamed chunks: if audio is still queued to play,
             # extend from that end, not from now — so the no-input timer waits for
-            # ALL queued sentences to finish, not just the last chunk (Tier 2).
-            self._speech_until = max(self._speech_until, time.monotonic()) + duration_ms / 1000
+            # ALL queued sentences to finish, not just the last chunk (Tier 2). Real
+            # audio gets a small cushion for browser decode/scheduling lag (keeping
+            # this an OVER-estimate); the precise end comes from client playback_done.
+            extra = duration_ms / 1000 + _CHUNK_PLAYBACK_MARGIN_S if duration_ms > 0 else 0.0
+            self._speech_until = max(self._speech_until, time.monotonic()) + extra
             # Buffer bot WAV audio for the call recording (K), capped to bound memory.
             is_wav = message.data.get("audio_format", "wav") == "wav"
             if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
@@ -183,9 +189,10 @@ class CallSession:
                 )
                 continue
 
-            # Heartbeat pongs are not input — only real client frames reset the
-            # no-input clock (PRD §05).
-            if msg.type != ClientMessageType.pong:
+            # Only real customer input resets the no-input clock — not heartbeat
+            # pongs, and not playback_done (that's the bot's audio finishing, which
+            # is exactly when the no-input window should START).
+            if msg.type not in (ClientMessageType.pong, ClientMessageType.playback_done):
                 self._last_input_at = time.monotonic()
 
             # A failure in any AI-service call (httpx) or unexpected error must
@@ -225,6 +232,13 @@ class CallSession:
     async def _dispatch(self, msg: ClientMessage) -> None:
         if msg.type == ClientMessageType.pong:
             self._last_pong = time.monotonic()  # heartbeat liveness
+            return
+        if msg.type == ClientMessageType.playback_done:
+            # The client's audio queue drained → the bot has truly finished
+            # speaking. Start the no-input clock from NOW (precise), overriding the
+            # send-time estimate so a re-prompt never fires mid-playback.
+            self._speech_until = time.monotonic()
+            self._bot_speaking = False
             return
         if msg.type == ClientMessageType.end_call:
             await self._orch.end_call(self._state, self.send, outcome="declined")

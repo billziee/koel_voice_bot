@@ -14,6 +14,7 @@ the WebSocket handler today and a telephony bridge later.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -39,6 +40,27 @@ from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 logger = get_logger("koel.voicebot.orchestrator")
 
 Sender = Callable[[ServerMessage], Awaitable[None]]
+
+# Explicit "switch language" request in the caller's words (reliable, unlike STT
+# language guessing). A request cue + a language word → lock that language.
+_LANG_REQUEST_CUE = re.compile(
+    r"(continue|speak|switch|talk|reply|answer|prefer|in\b|karo|karein|bol|baat|mein|me\b)", re.I
+)
+_LANG_WORDS: list[tuple[Language, re.Pattern]] = [
+    (Language.en, re.compile(r"\b(english|angre[zj]i)\b", re.I)),
+    (Language.hi, re.compile(r"(\bhindi\b|हिंदी|हिन्दी)", re.I)),
+]
+
+
+def _requested_language(text: str) -> Language | None:
+    """Detect an explicit caller request to switch language (e.g. 'continue in
+    English', 'Hindi mein baat karo'). Returns None if it isn't clearly a request."""
+    if not text or not _LANG_REQUEST_CUE.search(text):
+        return None
+    for lang, pat in _LANG_WORDS:
+        if pat.search(text):
+            return lang
+    return None
 
 # Graceful unsupported-language message (PRD §06 Graceful Language Fallback).
 _FALLBACK_TEXT = (
@@ -235,10 +257,15 @@ class Orchestrator:
             await self._escalate_unsupported_language(state, send)
             return
 
-        # Mid-call language switch (PRD §06) — OFF by default so the bot's
-        # configured language stays authoritative (an English bot must not flip to
-        # Hinglish because Whisper guessed the caller's accent that way).
-        if (
+        # Language control. An EXPLICIT caller request ("continue in English") is a
+        # reliable signal — honour it and make it stick for the rest of the call.
+        # Otherwise the bot's configured language stays authoritative; STT-detected
+        # language only switches when adapt_language_to_caller is on (it's an
+        # unreliable guess on code-mixed audio, off by default).
+        requested = _requested_language(stt.text)
+        if requested is not None:
+            state.language = requested
+        elif (
             self._settings.adapt_language_to_caller
             and stt.language_id
             and stt.language_id in (Language.en, Language.hi, Language.hinglish)

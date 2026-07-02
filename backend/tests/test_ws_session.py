@@ -146,6 +146,18 @@ async def test_malformed_frame_yields_error_then_continues(test_db):
     assert any(e["code"] == "bad_message" for e in errors)
 
 
+async def test_playback_done_starts_no_input_clock_and_is_not_input(test_db):
+    # playback_done sets speech_until≈now (bot truly stopped) without counting as
+    # customer input — so the no-input window begins at real playback end.
+    ws = FakeWebSocket([json.dumps({"type": "playback_done"})])
+    call = _session(ws, _state("ws_pbd"), ScriptedClients(nlp=_nlp()))
+    call._last_input_at = 1000.0  # noqa: SLF001 — sentinel
+    call._speech_until = 9e9  # noqa: SLF001 — far-future estimate
+    await call.run()
+    assert call._speech_until < 9e9  # noqa: SLF001 — reset to ~now
+    assert call._last_input_at == 1000.0  # noqa: SLF001 — NOT treated as input
+
+
 async def test_confirmed_barge_in_sends_tts_kill(test_db):
     # A long, non-backchannel interrupt during bot speech → TTS_KILL.
     bargein = json.dumps({

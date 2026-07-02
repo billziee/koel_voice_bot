@@ -1175,7 +1175,13 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
     const ctx = audioCtxRef.current;
     const analyser = analyserRef.current;
     const buf = audioQueueRef.current.shift();
-    if (!buf || !ctx || !analyser) { audioPlayingRef.current = false; return; }
+    if (!buf || !ctx || !analyser) {
+      // Queue drained after playing → tell the server the bot truly finished so
+      // the no-input timer starts now, not from the send-time estimate.
+      if (audioPlayingRef.current) liveCallRef.current?.playbackDone();
+      audioPlayingRef.current = false;
+      return;
+    }
     audioPlayingRef.current = true;
     const src = ctx.createBufferSource();
     src.buffer = buf;

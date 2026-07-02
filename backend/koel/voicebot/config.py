@@ -23,8 +23,12 @@ class VoiceBotSettings(CommonSettings):
     filler_trigger_ms: int = 300  # inject filler if NLP first token exceeds this
 
     # Silence / timeout rules (PRD §05 table).
-    no_input_reprompt_ms: int = 5000  # re-prompt after 5s silence
-    no_input_close_ms: int = 5000  # close after a further 5s
+    # Silence AFTER the bot's audio finishes before a re-prompt/close. 5s felt
+    # impatient on real calls (fired while the caller was still thinking), so the
+    # window is more forgiving; the clock only starts once playback truly ends
+    # (client playback_done) — see ws/handler.
+    no_input_reprompt_ms: int = 8000  # re-prompt after 8s of real silence
+    no_input_close_ms: int = 8000  # close after a further 8s
 
     # WebSocket lifecycle (PRD §05 / §08).
     session_grace_ttl_seconds: int = 15  # Redis grace on disconnect

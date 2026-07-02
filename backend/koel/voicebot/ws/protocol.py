@@ -35,6 +35,7 @@ class ClientMessageType(str, enum.Enum):
     barge_in_candidate = "barge_in_candidate"
     pong = "pong"
     end_call = "end_call"
+    playback_done = "playback_done"  # client audio queue drained — bot truly stopped speaking
 
 
 class ServerMessageType(str, enum.Enum):
