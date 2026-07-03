@@ -97,6 +97,10 @@ def _by_language(table: dict[Language, str], language: Language) -> str:
     return table.get(language, table[Language.hinglish])
 
 
+# ambient_profile values that mean "no floor chatter" — set by the FE on/off toggle.
+_AMBIENT_OFF = {"", "silent", "none", "off"}
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -138,6 +142,11 @@ class Orchestrator:
         state.add_turn(turn)
         state.last_confirmed_turn_index = turn.index
 
+        # Ambient bed is per-bot: an "off"/"silent" profile disables the floor chatter
+        # (the Bot Builder / Config toggle sets the profile). It's mixed INTO the clip,
+        # so it only ever plays while the bot speaks — never as a standalone loop.
+        use_ambient = ambient and state.ambient_profile.strip().lower() not in _AMBIENT_OFF
+
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.bot_speaking))
         await send(
             ServerMessage.of(
@@ -155,8 +164,8 @@ class Orchestrator:
             tone=tone,
             voice_gender=state.voice_gender,
             speaking_rate=state.speaking_rate,
-            ambient=ambient,
-            ambient_profile=state.ambient_profile if ambient else None,
+            ambient=use_ambient,
+            ambient_profile=state.ambient_profile if use_ambient else None,
             telephony=self._settings.telephony_mode,
         )
         with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
