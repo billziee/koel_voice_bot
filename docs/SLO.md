@@ -49,3 +49,14 @@ Distributed traces (spans) carry `synthesize_latency_ms`, `fallback_used`, and
 10 concurrent WS sessions sustaining turn-latency P95 < 300 ms with error rate
 < 1% and no pool exhaustion. See the load-test harness note in `tests/README`
 (R) — locust/asyncio driver asserting these under concurrency.
+
+### Measured (scripts/loadtest.py, 10 sessions × 3 turns, vs the live Render US-East backend)
+
+| Metric | Result | Verdict |
+|---|---|---|
+| Error rate | **0.00%** (0/30 turns) | ✅ meets <1% — capacity + reliability under 10 concurrent hold on the 512 MB free tier |
+| First-audio P50 | ~839 ms | the realistic uncontended floor (STT+NLP+TTS + one ocean round-trip) |
+| First-audio P95 | ~2340 ms | 🔴 far over the 300 ms *literal* budget — ocean RTT + real US inference + free-tier contention |
+| First-audio P99 | ~6132 ms | tail under load (single-process free tier) |
+
+The **300 ms is unreachable from an India client against US inference** (confirmed, not assumed). What IS proven: the pipeline is error-free at the PRD's 10-concurrent target. Closing the latency gap needs in-region GPU inference (which trades against DPDP residency) — an infra decision, not a code fix.

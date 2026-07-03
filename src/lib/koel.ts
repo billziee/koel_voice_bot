@@ -176,6 +176,26 @@ export async function createKnowledgeChunk(token: string, payload: NewKnowledgeC
   );
 }
 
+// Upload a text/PDF file → server extracts, chunks, embeds, and stores it.
+export async function uploadKnowledgeFile(
+  token: string,
+  opts: { file: File; ragIndex: string; useCase: string; language?: string },
+): Promise<unknown[]> {
+  const fd = new FormData();
+  fd.append('file', opts.file);
+  fd.append('rag_index', opts.ragIndex);
+  fd.append('use_case', opts.useCase);
+  fd.append('language', opts.language ?? 'hinglish');
+  // No Content-Type header — the browser sets the multipart boundary itself.
+  return jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/knowledge-files`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    }),
+  );
+}
+
 export async function startSession(
   token: string,
   botId: string,

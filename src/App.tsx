@@ -7,6 +7,7 @@ import {
   patchBot,
   getKnowledgeIndexes,
   createKnowledgeChunk,
+  uploadKnowledgeFile,
   getAllStats,
   USE_CASE_CUSTOMER,
   LiveCall,
@@ -3393,6 +3394,10 @@ function KnowledgeBaseView({ theme, token, onToast }: { theme: ReturnType<typeof
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ rag_index: '', use_case: 'credit_card', title: '', content: '' });
   const [saving, setSaving] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadMeta, setUploadMeta] = useState({ rag_index: '', use_case: 'credit_card' });
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     if (!token) { setLoading(false); return; }
@@ -3425,6 +3430,26 @@ function KnowledgeBaseView({ theme, token, onToast }: { theme: ReturnType<typeof
     }
   };
 
+  const doUpload = async () => {
+    const file = fileRef.current?.files?.[0];
+    if (!token || !uploadMeta.rag_index.trim() || !file) return;
+    setUploading(true);
+    try {
+      const chunks = await uploadKnowledgeFile(token, {
+        file, ragIndex: uploadMeta.rag_index.trim(), useCase: uploadMeta.use_case,
+      });
+      onToast(`Ingested “${file.name}” → ${chunks.length} chunk${chunks.length === 1 ? '' : 's'} embedded into “${uploadMeta.rag_index}”.`);
+      if (fileRef.current) fileRef.current.value = '';
+      setUploadMeta({ rag_index: '', use_case: 'credit_card' });
+      setShowUpload(false);
+      await refresh();
+    } catch (e) {
+      onToast(e instanceof KoelApiError ? e.message : 'File upload failed.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const filtered = indexes.filter(kb => kb.rag_index.toLowerCase().includes(search.toLowerCase()));
   const totalChunks = indexes.reduce((s, k) => s + k.chunk_count, 0);
 
@@ -3435,10 +3460,33 @@ function KnowledgeBaseView({ theme, token, onToast }: { theme: ReturnType<typeof
           <h1 className="text-[22px] font-semibold tracking-tight" style={{ color: theme.ink }}>Knowledge base</h1>
           <p className="text-[13px] mt-0.5" style={{ color: theme.faint }}>{indexes.length} indexes · {totalChunks} chunks</p>
         </div>
-        <button onClick={() => setShowForm(v => !v)} className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
-          <Plus size={14} /> {showForm ? 'Close' : 'New chunk'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setShowUpload(v => !v); setShowForm(false); }} className="flex items-center gap-2 text-[13px] font-semibold px-4 py-2 rounded-md border" style={{ borderColor: theme.rule, color: theme.ink }}>
+            <BookOpen size={14} /> {showUpload ? 'Close' : 'Upload file'}
+          </button>
+          <button onClick={() => { setShowForm(v => !v); setShowUpload(false); }} className="flex items-center gap-2 text-[13px] font-bold px-4 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
+            <Plus size={14} /> {showForm ? 'Close' : 'New chunk'}
+          </button>
+        </div>
       </div>
+
+      {showUpload && (
+        <div className="rounded-lg border p-4 mb-4 grid gap-3" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
+          <div className="grid grid-cols-2 gap-3">
+            <input value={uploadMeta.rag_index} onChange={e => setUploadMeta({ ...uploadMeta, rag_index: e.target.value })} placeholder="RAG index (e.g. cc_hdfc)" className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }} />
+            <select value={uploadMeta.use_case} onChange={e => setUploadMeta({ ...uploadMeta, use_case: e.target.value })} className="border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2" style={{ borderColor: theme.rule, backgroundColor: theme.inset, color: theme.ink }}>
+              {['credit_card', 'collections', 'personal_loan', 'insurance', 'custom'].map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,text/plain,application/pdf" className="text-[13px]" style={{ color: theme.ink }} />
+          <p className="text-[11px]" style={{ color: theme.faint }}>Text or PDF, up to 2 MB. The file is split into passages, embedded, and stored under the index above.</p>
+          <div className="flex justify-end">
+            <button onClick={() => void doUpload()} disabled={uploading} className="text-[13px] font-bold px-4 py-2 rounded-md text-white disabled:opacity-50" style={{ backgroundColor: theme.primary }}>
+              {uploading ? 'Ingesting…' : 'Upload & embed'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <div className="rounded-lg border p-4 mb-4 grid gap-3" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
