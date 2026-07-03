@@ -124,9 +124,11 @@ async def test_hindi_greeting_is_devanagari(test_db):
     assert "Do minute" not in greeting and "automated call" not in greeting.lower()
 
 
-async def test_hinglish_greeting_is_devanagari(test_db):
-    # Hinglish is voiced by Magpie too, which only renders Devanagari cleanly — the
-    # old romanized default came out as gibberish. Greeting must be Devanagari now.
+async def test_hinglish_greeting_is_romanized(test_db):
+    # Hinglish is voiced by Orpheus (English TTS) → romanized Latin. Devanagari
+    # would be gibberish through Orpheus; only pure-hi bots use Magpie/Devanagari.
+    import re
+
     clients = _Clients(Language.hinglish)
     state = _state(Language.hinglish)
     sent: list = []
@@ -136,8 +138,25 @@ async def test_hinglish_greeting_is_devanagari(test_db):
 
     await _orch(clients).greet(state, send)
     greeting = state.transcript[-1].text
-    assert "नमस्ते" in greeting  # Devanagari
-    assert "bol rahi hoon" not in greeting and "Do minute" not in greeting  # no romanized Hindi
+    assert "bol rahi hoon" in greeting and "Do minute" in greeting  # romanized Hinglish
+    assert not re.search(r"[ऀ-ॿ]", greeting)  # no Devanagari (Orpheus can't voice it)
+
+
+def test_operational_strings_match_tts_script():
+    # Every hardcoded bot utterance for hi MUST be Devanagari (Magpie); hinglish MUST
+    # be romanized (Orpheus). Otherwise romanized text leaks into a hi call → Magpie
+    # gibberish (the no-input reprompt / filler bug).
+    import re
+
+    from koel.voicebot.pipeline.filler import FILLER_PHRASES
+    from koel.voicebot.pipeline.silence import CLOSE_TEXT, REPROMPT_TEXT
+
+    deva = re.compile(r"[ऀ-ॿ]")
+    assert deva.search(REPROMPT_TEXT[Language.hi]) and deva.search(CLOSE_TEXT[Language.hi])
+    assert all(deva.search(p) for p in FILLER_PHRASES[Language.hi])
+    # hinglish stays romanized (Orpheus voices it).
+    assert not deva.search(REPROMPT_TEXT[Language.hinglish])
+    assert not deva.search(CLOSE_TEXT[Language.hinglish])
 
 
 def test_requested_language_detection():

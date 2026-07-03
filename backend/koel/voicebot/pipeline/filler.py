@@ -19,7 +19,8 @@ from koel.common.schemas import Language, Tone
 # Filler text per language. Tone selects energy when these are synthesised.
 FILLER_PHRASES: dict[Language, list[str]] = {
     Language.en: ["Hmm…", "Let me pull that up…", "One moment please…"],
-    Language.hi: ["Hmm…", "Ek second kijiye…", "Main dekh rahi hoon…"],
+    # hi → Magpie, so Devanagari only. hinglish → Orpheus, so romanized Latin.
+    Language.hi: ["हम्म…", "एक सेकंड कीजिए…", "मैं देख रही हूँ…"],
     Language.hinglish: ["Hmm…", "Ek second kijiye…", "Let me check…", "Bas ek minute…"],
 }
 
