@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from koel.common.config import CommonSettings
+from koel.tts.schemas import CANONICAL_SAMPLE_RATE
 
 
 class TtsSettings(CommonSettings):
@@ -35,7 +36,10 @@ class TtsSettings(CommonSettings):
     nvidia_tts_uri: str = "grpc.nvcf.nvidia.com:443"
     nvidia_tts_function_id: str = "877104f7-e885-42b9-8de8-f6e4c6303969"  # magpie-tts-multilingual
     nvidia_tts_voice: str = "Magpie-Multilingual"
-    nvidia_tts_sample_rate: int = 44100
+    # MUST equal CANONICAL_SAMPLE_RATE: the ambient mixer, sentence concat, and the
+    # browser gapless scheduler all assume ONE rate. Magpie at 44.1k while the rest
+    # ran at 24k made Hindi/Devanagari play ~1.84x fast → high-pitched gibberish.
+    nvidia_tts_sample_rate: int = CANONICAL_SAMPLE_RATE
     nvidia_tts_timeout_s: float = 30.0
 
     @property
