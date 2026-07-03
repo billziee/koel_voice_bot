@@ -72,20 +72,23 @@ _FALLBACK_TEXT = (
 # default greeting + the consent suffix were hardcoded Hinglish. Keyed by Language;
 # Hindi is Devanagari (spoken by Magpie), Hinglish stays romanized. `{name}`/`{bank}`
 # are filled from CRM. Falls back to Hinglish for any unmapped language.
+# hi AND hinglish are voiced by Magpie, which only renders DEVANAGARI cleanly
+# (romanized Hindi comes out as gibberish). So both use Devanagari, keeping English
+# brand/banking terms in Latin (natural code-mix Magpie-Multilingual handles).
 _DEFAULT_GREETING: dict[Language, str] = {
     Language.en: "Hello {name}, this is KOEL calling on behalf of {bank}.",
     Language.hi: "नमस्ते {name} जी, मैं {bank} की ओर से KOEL बोल रही हूँ।",
-    Language.hinglish: "Namaste {name} ji, main {bank} ki taraf se KOEL bol rahi hoon.",
+    Language.hinglish: "नमस्ते {name} जी, मैं {bank} की ओर से KOEL बोल रही हूँ।",
 }
 _DISCLOSURE: dict[Language, str] = {
     Language.en: "This is an automated call.",
     Language.hi: "यह एक स्वचालित कॉल है।",
-    Language.hinglish: "Yeh ek automated call hai.",
+    Language.hinglish: "यह एक automated call है।",
 }
 _CONSENT_ASK: dict[Language, str] = {
     Language.en: "Do you have two minutes to talk?",
     Language.hi: "क्या आप दो मिनट बात कर सकते हैं?",
-    Language.hinglish: "Do minute baat kar sakte hain?",
+    Language.hinglish: "क्या हम दो मिनट बात कर सकते हैं?",
 }
 
 

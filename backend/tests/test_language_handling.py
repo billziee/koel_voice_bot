@@ -124,6 +124,22 @@ async def test_hindi_greeting_is_devanagari(test_db):
     assert "Do minute" not in greeting and "automated call" not in greeting.lower()
 
 
+async def test_hinglish_greeting_is_devanagari(test_db):
+    # Hinglish is voiced by Magpie too, which only renders Devanagari cleanly — the
+    # old romanized default came out as gibberish. Greeting must be Devanagari now.
+    clients = _Clients(Language.hinglish)
+    state = _state(Language.hinglish)
+    sent: list = []
+
+    async def send(m):  # noqa: ANN001
+        sent.append(m)
+
+    await _orch(clients).greet(state, send)
+    greeting = state.transcript[-1].text
+    assert "नमस्ते" in greeting  # Devanagari
+    assert "bol rahi hoon" not in greeting and "Do minute" not in greeting  # no romanized Hindi
+
+
 def test_requested_language_detection():
     from koel.voicebot.pipeline.orchestrator import _requested_language
 

@@ -258,6 +258,10 @@ class CallSession:
                 sample_rate=msg.sample_rate,
                 is_final=msg.is_final,
                 audio_format=msg.audio_format,
+                # Pin transcription to the bot's language — otherwise Whisper
+                # auto-detects and mislabels idle/short/code-mixed audio (Hindi →
+                # Russian/Ukrainian, noise → Spanish/French), garbling the turn.
+                language_hint=self._state.language,
             )
         )
         if not stt.is_final:
