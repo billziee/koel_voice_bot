@@ -30,8 +30,9 @@ class TtsSettings(CommonSettings):
     # Orpheus is English; for Hindi we route to NVIDIA Magpie which speaks hi-IN
     # natively. Set tts_hindi_provider=nvidia + KOEL_NVIDIA_API_KEY to enable.
     tts_hindi_provider: str = "default"  # "default" (use base provider) | "nvidia"
-    # Languages routed to the Hindi provider (comma-separated Language values).
-    tts_nvidia_languages: str = "hi,hinglish"
+    # Languages routed to the Hindi provider (Magpie, Devanagari-only). Just "hi":
+    # Hinglish is romanized code-mix → voiced by Orpheus (base), not Magpie.
+    tts_nvidia_languages: str = "hi"
     nvidia_api_key: str | None = None
     nvidia_tts_uri: str = "grpc.nvcf.nvidia.com:443"
     nvidia_tts_function_id: str = "877104f7-e885-42b9-8de8-f6e4c6303969"  # magpie-tts-multilingual
