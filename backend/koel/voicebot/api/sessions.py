@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
@@ -78,7 +79,14 @@ async def start_session(
     # RBI fair-practice calling-hours window (PRD §11). Opt-in via config so
     # demos run any time; when enabled, out-of-hours dials are refused.
     if runtime.settings.enforce_calling_hours:
-        hour = datetime.now().hour
+        # Evaluate the window in the configured timezone (IST) — NOT the server's
+        # clock, which is UTC on the cloud host (a 9–21 window in UTC would be
+        # 14:30–02:30 IST, refusing legitimate daytime dials).
+        try:
+            tz = ZoneInfo(runtime.settings.calling_hours_tz)
+        except Exception:  # noqa: BLE001 — bad tz string → fail safe to UTC
+            tz = ZoneInfo("UTC")
+        hour = datetime.now(tz).hour
         if not (runtime.settings.calling_hours_start <= hour < runtime.settings.calling_hours_end):
             raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,

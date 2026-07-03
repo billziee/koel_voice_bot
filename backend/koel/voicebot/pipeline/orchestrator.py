@@ -407,11 +407,23 @@ class Orchestrator:
 
     def _is_unsupported_language(self, stt: TranscriptResult) -> bool:
         supported = {Language.en, Language.hi, Language.hinglish}
-        if stt.language_id is None:
-            return False
-        return (
-            stt.language_id not in supported
+        # (a) Auto-detect path: STT explicitly reports a non-supported language with
+        #     confidence (used when transcription isn't force-pinned).
+        if (
+            stt.language_id is not None
+            and stt.language_id not in supported
             and stt.language_confidence >= self._settings.language_confidence_threshold
+        ):
+            return True
+        # (b) Force-pinned path: STT is pinned to the bot's language, so an
+        #     unsupported language is transcribed into it with very LOW confidence.
+        #     A sustained, real utterance that still transcribes poorly ⇒ the caller
+        #     isn't speaking a language we support. High-confidence Hindi/English is
+        #     well clear of the floor, so supported callers are never mis-flagged.
+        return bool(
+            stt.text.strip()
+            and stt.speech_duration_ms >= self._settings.unsupported_min_speech_ms
+            and stt.language_confidence < self._settings.unsupported_confidence_floor
         )
 
     async def _escalate_unsupported_language(self, state: SessionState, send: Sender) -> None:

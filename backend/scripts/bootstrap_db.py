@@ -89,6 +89,64 @@ KB_CC: list[dict] = [
     },
 ]
 
+# Collections (pre-due) RAG knowledge — romanized Hinglish (ICICI bot → Orpheus).
+KB_COL: list[dict] = [
+    {
+        "title": "Objection: already paid",
+        "content": (
+            "Agar aapne payment kar di hai to dhanyavaad — system mein reflect hone "
+            "mein 24-48 ghante lag sakte hain. Reference number share kar dein to "
+            "main note kar leti hoon."
+        ),
+    },
+    {
+        "title": "Partial payment offer",
+        "content": (
+            "Agar poora amount abhi possible nahi hai, aap partial payment kar sakte "
+            "hain — isse late fee aur credit score par asar kam hota hai."
+        ),
+    },
+    {
+        "title": "Payment options and due date",
+        "content": (
+            "Aap UPI, net banking ya payment link se pay kar sakte hain. Due date se "
+            "pehle payment par koi late fee nahi lagti."
+        ),
+    },
+]
+
+# Life-insurance (IRDAI) RAG knowledge — Devanagari Hindi (Insurance bot → Magpie).
+KB_INS: list[dict] = [
+    {
+        "title": "Product: term plan basics",
+        "content": (
+            "टर्म लाइफ प्लान में प्रीमियम पूरी पॉलिसी अवधि के लिए फिक्स रहता है — उम्र या "
+            "क्लेम के साथ नहीं बढ़ता। जल्दी लेने पर प्रीमियम कम रहता है।"
+        ),
+    },
+    {
+        "title": "Objection: premium too high",
+        "content": (
+            "प्रीमियम आपकी उम्र और कवर राशि पर निर्भर करता है। उपयुक्त कवर या लंबी अवधि "
+            "चुनकर प्रीमियम को किफायती बनाया जा सकता है।"
+        ),
+    },
+    {
+        "title": "Nominee and IRDAI disclosure",
+        "content": (
+            "नॉमिनी क्लेम राशि का हकदार होता है। यह एक IRDAI-अनुमोदित प्लान है; बाध्यकारी "
+            "चरणों के लिए आपको एक लाइसेंस प्राप्त सलाहकार से जोड़ा जाएगा।"
+        ),
+    },
+]
+
+# (rag_index, use_case, language, chunks) — every configured bot's KB is grounded.
+KB_INDEXES: list[tuple] = [
+    ("cc_hdfc", UseCase.credit_card, "hinglish", KB_CC),
+    ("col_icici", UseCase.collections, "hinglish", KB_COL),
+    ("ins_term", UseCase.insurance, "hi", KB_INS),
+]
+
 
 async def _seed() -> None:
     embedder = build_embedder(get_nlp_settings())
@@ -104,22 +162,24 @@ async def _seed() -> None:
             if await db.get(BotConfig, bot["id"]) is None:
                 db.add(BotConfig(**bot))
 
-        # Knowledge base: refresh so embeddings always match the current embedder
-        # (switching hash → nvidia requires re-embedding). Chunks are "passages".
-        await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.rag_index == "cc_hdfc"))
-        for chunk in KB_CC:
-            db.add(
-                KnowledgeChunk(
-                    rag_index="cc_hdfc",
-                    use_case=UseCase.credit_card,
-                    language="hinglish",
-                    title=chunk["title"],
-                    content=chunk["content"],
-                    embedding=await embedder.embed(
-                        chunk["title"] + " " + chunk["content"], input_type="passage"
-                    ),
+        # Knowledge base: refresh every index so embeddings always match the current
+        # embedder (switching hash → nvidia requires re-embedding). Chunks are
+        # "passages". Every configured bot's rag_index is grounded — not just CC.
+        for rag_index, use_case, language, chunks in KB_INDEXES:
+            await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.rag_index == rag_index))
+            for chunk in chunks:
+                db.add(
+                    KnowledgeChunk(
+                        rag_index=rag_index,
+                        use_case=use_case,
+                        language=language,
+                        title=chunk["title"],
+                        content=chunk["content"],
+                        embedding=await embedder.embed(
+                            chunk["title"] + " " + chunk["content"], input_type="passage"
+                        ),
+                    )
                 )
-            )
 
     aclose = getattr(embedder, "aclose", None)
     if aclose is not None:

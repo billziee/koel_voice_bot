@@ -10,7 +10,7 @@ from koel.tts.providers import StubOrpheusProvider
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline.filler import FillerCache
 from koel.voicebot.pipeline.orchestrator import Orchestrator
-from koel.voicebot.session.models import CallStatus, SessionState
+from koel.voicebot.session.models import SessionState
 
 
 class _Clients:
@@ -66,14 +66,23 @@ async def test_english_bot_stays_english_despite_hinglish_detection(test_db):
     assert state.transcript[-1].text == "lang=en"  # responded in English
 
 
-async def test_unsupported_detection_does_not_end_call_by_default(test_db):
-    # #2: a foreign STT guess must not escalate/end the call by default.
+async def test_unsupported_language_escalates_when_detected(test_db):
+    # Re-enabled by default (safe now STT is pinned): a genuine unsupported language
+    # (high-confidence foreign STT id) escalates gracefully to a human.
     clients = _Clients(Language.other, stt_conf=0.99)
     state = _state(Language.hinglish)
     await _run(_orch(clients), state, clients)
+    assert state.escalated
+    assert state.outcome == "unsupported_language"
+    assert ("c", "unsupported_language") in clients.flags
+
+
+async def test_supported_caller_not_escalated(test_db):
+    # A supported-language caller at high confidence is never mis-escalated.
+    clients = _Clients(Language.hi, stt_conf=0.99, text="haan boliye")
+    state = _state(Language.hinglish)
+    await _run(_orch(clients), state, clients)
     assert not state.escalated
-    assert state.status != CallStatus.escalating
-    assert ("c", "unsupported_language") not in clients.flags
 
 
 async def test_adapt_flag_enables_switch(test_db):
@@ -188,6 +197,25 @@ async def test_ambient_profile_gates_floor_bed(test_db):
     s_on.ambient_profile = "callfloor"
     await _orch(on).greet(s_on, send)
     assert on.ambient_seen is True
+
+
+def test_unsupported_language_detection_survives_force_pinned_stt():
+    # With STT force-pinned, an unsupported language transcribes into the bot's
+    # language with LOW confidence — that's the signal. Supported-language callers
+    # (high confidence) are never mis-flagged; short blips are ignored.
+    from koel.stt.schemas import TranscriptResult
+
+    orch = _orch(_Clients(Language.hi))
+
+    def stt(conf: float, dur: int, text: str = "काहीतरी") -> TranscriptResult:
+        return TranscriptResult(
+            session_id="s", text=text, is_final=True, language_id=Language.hi,
+            language_confidence=conf, speech_duration_ms=dur,
+        )
+
+    assert orch._is_unsupported_language(stt(0.20, 1500)) is True   # unsupported: low conf, sustained
+    assert orch._is_unsupported_language(stt(0.90, 1500, "haan boliye")) is False  # clean Hindi
+    assert orch._is_unsupported_language(stt(0.10, 200)) is False   # blip/noise: too short
 
 
 def test_requested_language_detection():
