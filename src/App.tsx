@@ -1240,6 +1240,17 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
           logEvent(`Mic utterance captured (${fmt}) → streaming to STT`, 'info');
           liveCallRef.current?.sendAudioChunk(b64, fmt);
         },
+        // Real barge-in: the instant the caller speaks over the bot, cut the bot's
+        // audio locally (feels like a real interruption) and tell VB_Svc so it stops
+        // streaming the rest of the turn. Echo cancellation keeps the bot's own
+        // audio from self-triggering this.
+        onSpeechStart: () => {
+          if (audioPlayingRef.current) {
+            flushPlayback();
+            liveCallRef.current?.bargeIn('', 0);
+            logEvent('Barge-in — caller spoke over the bot; playback halted', 'info');
+          }
+        },
         onError: (err) => logEvent(`Mic error: ${err instanceof Error ? err.message : String(err)}`, 'warn'),
       });
       await cap.start();
@@ -2757,7 +2768,7 @@ function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: ConfigView
   const [persona, setPersona] = useState(seed?.persona || 'Kore — Female, Firm & Professional');
   const [speed, setSpeed] = useState(seed?.speed || 1.0);
   const [ambientVolume] = useState(seed?.ambientVolume || 20);
-  const [ambientProfile] = useState<AmbientProfile>(seed?.ambientProfile || 'callfloor'); // Item 7
+  const [ambientProfile, setAmbientProfile] = useState<AmbientProfile>(seed?.ambientProfile || 'callfloor'); // Item 7
   const [backchannels] = useState(seed?.backchannels || ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah']);
   const [ragEnabled, setRagEnabled] = useState(seed?.ragEnabled ?? true);
   const [ragIndex, setRagIndex] = useState(seed?.ragIndex || 'hdfc_regalia_benefits_v2');
@@ -2918,6 +2929,7 @@ function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: ConfigView
                 </div>
               )}
               <ToggleRow title="Regulatory disclosure block" sub="Non-skippable disclosure script read before any binding step." checked={disclosureEnabled} onChange={setDisclosureEnabled} theme={theme} />
+              <ToggleRow title="Ambient call-floor audio" sub="Low-level background chatter mixed under the bot's voice — plays only while the bot speaks, never in silence." checked={ambientProfile !== 'silent'} onChange={(v) => setAmbientProfile(v ? 'callfloor' : 'silent')} theme={theme} />
             </div>
           </div>
 
@@ -3017,6 +3029,7 @@ function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotC
   const [voiceGender, setVoiceGender] = useState('Female');
   const [voiceSpeed, setVoiceSpeed] = useState(1.05);
   const [disclosure, setDisclosure] = useState(true);
+  const [ambientEnabled, setAmbientEnabled] = useState(true);
   const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
   const [selectedNode, setSelectedNode] = useState<string | null>('Handle objection');
   const [nodeScript, setNodeScript] = useState('Bilkul samajh sakti hoon. Yeh card {benefit_1} aur {benefit_2} deta hai — aapke existing cards se alag benefit. {fee_clause}. Interested hain?');
@@ -3047,7 +3060,7 @@ function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotC
       persona: `KOEL · ${voiceGender} · ${voiceSpeed}×`,
       speed: voiceSpeed,
       ambientVolume: 20,
-      ambientProfile: 'callfloor',
+      ambientProfile: ambientEnabled ? 'callfloor' : 'silent',
       backchannels: ['hmm', 'haan', 'okay'],
       ragEnabled: true,
       ragIndex,
@@ -3170,6 +3183,15 @@ function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotC
                   </div>
                   <button onClick={() => setDisclosure(!disclosure)} className="w-9 h-5 rounded-full relative transition-colors" style={{ backgroundColor: disclosure ? theme.primary : theme.rule }}>
                     <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all" style={{ left: disclosure ? '18px' : '2px' }} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between py-3 px-4 rounded-md border" style={{ borderColor: theme.ruleSubtle, backgroundColor: theme.inset }}>
+                  <div>
+                    <span className="text-[13px] font-medium" style={{ color: theme.ink }}>Ambient call-floor audio</span>
+                    <p className="text-[11.5px]" style={{ color: theme.faint }}>Background chatter under the bot's voice — only while it speaks, never in silence</p>
+                  </div>
+                  <button onClick={() => setAmbientEnabled(!ambientEnabled)} className="w-9 h-5 rounded-full relative transition-colors" style={{ backgroundColor: ambientEnabled ? theme.primary : theme.rule }}>
+                    <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all" style={{ left: ambientEnabled ? '18px' : '2px' }} />
                   </button>
                 </div>
               </div>

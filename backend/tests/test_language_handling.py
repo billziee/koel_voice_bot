@@ -159,6 +159,37 @@ def test_operational_strings_match_tts_script():
     assert not deva.search(CLOSE_TEXT[Language.hinglish])
 
 
+async def test_ambient_profile_gates_floor_bed(test_db):
+    # The Bot Builder / Config toggle sets ambient_profile; "silent" must disable the
+    # floor bed (ambient=False on the synth request), "callfloor" must enable it.
+    from koel.tts.providers import StubOrpheusProvider
+
+    class Rec(_Clients):
+        def __init__(self, lang: Language) -> None:
+            super().__init__(lang)
+            self.ambient_seen: bool | None = None
+
+        async def stream_synthesis(self, request):  # noqa: ANN001
+            self.ambient_seen = request.ambient
+            async for c in StubOrpheusProvider()._stream_by_sentence(request):  # noqa: SLF001
+                yield c
+
+    async def send(m):  # noqa: ANN001
+        pass
+
+    off = Rec(Language.hi)
+    s_off = _state(Language.hi)
+    s_off.ambient_profile = "silent"
+    await _orch(off).greet(s_off, send)
+    assert off.ambient_seen is False
+
+    on = Rec(Language.hi)
+    s_on = _state(Language.hi)
+    s_on.ambient_profile = "callfloor"
+    await _orch(on).greet(s_on, send)
+    assert on.ambient_seen is True
+
+
 def test_requested_language_detection():
     from koel.voicebot.pipeline.orchestrator import _requested_language
 

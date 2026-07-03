@@ -10,6 +10,7 @@ export type UtteranceHandler = (audioB64: string, format: string) => void;
 
 export interface MicCaptureOptions {
   onUtterance: UtteranceHandler;
+  onSpeechStart?: () => void; // fires the instant speech begins (for barge-in)
   onLevel?: (rms: number) => void; // 0..1, for the waveform / mic meter
   onError?: (err: unknown) => void;
   thresholdRms?: number; // speech vs. silence
@@ -80,6 +81,7 @@ export class MicCapture {
       minSpeechMs: 300,
       maxIdleMs: 8000,
       onLevel: () => {},
+      onSpeechStart: () => {},
       ...options,
     };
   }
@@ -160,6 +162,7 @@ export class MicCapture {
       if (!this.hadSpeech) {
         this.hadSpeech = true;
         this.speechStartAt = now;
+        this.opts.onSpeechStart(); // barge-in: caller halts bot audio if it's speaking
       }
     } else if (this.hadSpeech && now - this.lastVoiceAt >= this.opts.silenceMs) {
       // End of utterance — emit only if the speech was long enough to be real.
