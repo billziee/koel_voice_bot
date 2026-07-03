@@ -24,6 +24,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.45b0",
     "opentelemetry-exporter-otlp>=1.24",
     "python-multipart>=0.0.9",
+    "pypdf>=4.2",  # extract text from uploaded PDF knowledge files (pure-python)
 ]
 
 [project.optional-dependencies]

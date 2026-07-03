@@ -8,7 +8,9 @@ is immediately retrievable. Tenant-scoped (AF).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, status
+import io
+
+from fastapi import APIRouter, File, Form, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
@@ -117,6 +119,82 @@ async def create_chunks(payload: ChunkIn, user: CurrentUser) -> list[ChunkOut]:
                 rag_index=payload.rag_index,
                 use_case=payload.use_case,
                 language=payload.language,
+                title=title,
+                content=body,
+                embedding=await embedder.embed(f"{title} {body}", input_type="passage"),
+            )
+            db.add(row)
+            await db.flush()
+            created.append(_to_out(row))
+    return created
+
+
+_MAX_UPLOAD_BYTES = 2_000_000  # 2 MB — plenty for a KB doc, bounds memory + embed cost
+
+
+def _extract_text(filename: str, data: bytes) -> str:
+    """Pull plain text from an uploaded file. Text formats decode directly; PDFs
+    use pypdf when available (degrades to a clear 415 if not installed)."""
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        try:
+            import pypdf
+        except ImportError as exc:  # pragma: no cover - dep present in the image
+            raise ApiError(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                code="pdf_unsupported",
+                message="PDF parsing is not available on this server; upload text instead.",
+            ) from exc
+        reader = pypdf.PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1", errors="ignore")
+
+
+@router.post(
+    "/knowledge-files", response_model=list[ChunkOut], status_code=status.HTTP_201_CREATED
+)
+async def upload_knowledge_file(
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    rag_index: str = Form(...),
+    use_case: UseCase = Form(...),
+    language: str = Form("hinglish"),
+) -> list[ChunkOut]:
+    """Upload a text or PDF file → extract, split into passages, embed, and store as
+    knowledge chunks under ``rag_index`` (X — file-based KB ingestion, PRD §06)."""
+    data = await file.read()
+    if not data:
+        raise ApiError(
+            status_code=status.HTTP_400_BAD_REQUEST, code="empty_file", message="Uploaded file is empty."
+        )
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise ApiError(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            code="file_too_large",
+            message=f"File exceeds the {_MAX_UPLOAD_BYTES // 1000} KB limit.",
+        )
+    text = _extract_text(file.filename or "upload", data).strip()
+    bodies = chunk_text(text)
+    if not bodies:
+        raise ApiError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="empty_content",
+            message="No extractable text found in the file.",
+        )
+    fname = file.filename or "upload"
+    embedder = _get_embedder()
+    created: list[ChunkOut] = []
+    async with session_scope() as db:
+        for i, body in enumerate(bodies):
+            title = fname if len(bodies) == 1 else f"{fname} ({i + 1}/{len(bodies)})"
+            row = KnowledgeChunk(
+                org_id=user.org_id,
+                rag_index=rag_index,
+                use_case=use_case,
+                language=language,
                 title=title,
                 content=body,
                 embedding=await embedder.embed(f"{title} {body}", input_type="passage"),
