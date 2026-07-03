@@ -68,6 +68,31 @@ _FALLBACK_TEXT = (
     "Main aapko ek agent se connect karti hoon."
 )
 
+# Greeting must be in the BOT'S language — an English bot spoke Hinglish because the
+# default greeting + the consent suffix were hardcoded Hinglish. Keyed by Language;
+# Hindi is Devanagari (spoken by Magpie), Hinglish stays romanized. `{name}`/`{bank}`
+# are filled from CRM. Falls back to Hinglish for any unmapped language.
+_DEFAULT_GREETING: dict[Language, str] = {
+    Language.en: "Hello {name}, this is KOEL calling on behalf of {bank}.",
+    Language.hi: "नमस्ते {name} जी, मैं {bank} की ओर से KOEL बोल रही हूँ।",
+    Language.hinglish: "Namaste {name} ji, main {bank} ki taraf se KOEL bol rahi hoon.",
+}
+_DISCLOSURE: dict[Language, str] = {
+    Language.en: "This is an automated call.",
+    Language.hi: "यह एक स्वचालित कॉल है।",
+    Language.hinglish: "Yeh ek automated call hai.",
+}
+_CONSENT_ASK: dict[Language, str] = {
+    Language.en: "Do you have two minutes to talk?",
+    Language.hi: "क्या आप दो मिनट बात कर सकते हैं?",
+    Language.hinglish: "Do minute baat kar sakte hain?",
+}
+
+
+def _by_language(table: dict[Language, str], language: Language) -> str:
+    """Language-appropriate copy, defaulting to Hinglish (the demo's lingua franca)."""
+    return table.get(language, table[Language.hinglish])
+
 
 class Orchestrator:
     def __init__(
@@ -185,16 +210,19 @@ class Orchestrator:
         """
         name = state.crm_context.get("name", "")
         bank = state.crm_context.get("bank", "the bank")
+        lang = state.language
 
         if state.greeting_template:
             greeting = self._render_template(state.greeting_template, state.crm_context)
         else:
-            greeting = f"Namaste {name} ji, main {bank} ki taraf se KOEL bol rahi hoon."
+            greeting = _by_language(_DEFAULT_GREETING, lang).format(name=name, bank=bank)
 
-        disclosure = "Yeh ek automated call hai."
+        # Automated-call disclosure + consent ask, spoken in the bot's language so an
+        # en/hi bot never gets Hinglish tacked on (§12 trust / §11 consent).
+        disclosure = _by_language(_DISCLOSURE, lang)
         if disclosure.lower() not in greeting.lower() and "automated" not in greeting.lower():
             greeting = f"{greeting} {disclosure}"
-        greeting = f"{greeting} Do minute baat kar sakte hain?"
+        greeting = f"{greeting} {_by_language(_CONSENT_ASK, lang)}"
 
         await self._send_bot_turn(state, send, text=greeting, tone=state.default_tone, intent="greeting")
         # Consent captured at call open with the automated disclosure spoken,

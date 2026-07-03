@@ -94,6 +94,36 @@ async def test_explicit_english_request_sticks(test_db):
     assert state.transcript[-1].text == "lang=en"
 
 
+async def test_greeting_uses_bot_language_not_hinglish(test_db):
+    # An English bot with no template must greet in English — not the old hardcoded
+    # Hinglish default + "Do minute baat kar sakte hain?" suffix.
+    clients = _Clients(Language.en)
+    state = _state(Language.en)  # greeting_template defaults to ""
+    sent: list = []
+
+    async def send(m):  # noqa: ANN001
+        sent.append(m)
+
+    await _orch(clients).greet(state, send)
+    greeting = state.transcript[-1].text
+    assert "automated call" in greeting.lower() and "two minutes" in greeting.lower()
+    assert "bol rahi hoon" not in greeting and "Do minute" not in greeting
+
+
+async def test_hindi_greeting_is_devanagari(test_db):
+    clients = _Clients(Language.hi)
+    state = _state(Language.hi)
+    sent: list = []
+
+    async def send(m):  # noqa: ANN001
+        sent.append(m)
+
+    await _orch(clients).greet(state, send)
+    greeting = state.transcript[-1].text
+    assert "स्वचालित" in greeting  # Devanagari disclosure — Magpie voices this natively
+    assert "Do minute" not in greeting and "automated call" not in greeting.lower()
+
+
 def test_requested_language_detection():
     from koel.voicebot.pipeline.orchestrator import _requested_language
 

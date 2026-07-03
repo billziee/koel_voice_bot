@@ -78,3 +78,13 @@ def test_orpheus_voice_by_gender():
     # Unknown/blank gender → the configured default voice.
     other = SynthesizeRequest(session_id="s", text="hi", language=Language.en, voice_gender="")
     assert p._voice_for(other) == "diana"
+
+
+def test_magpie_sample_rate_matches_canonical():
+    # Magpie MUST emit at the pipeline's canonical rate. It was 44100 while the
+    # mixer/concat/browser assumed 24000 → Hindi/Devanagari played ~1.84x fast
+    # (high-pitched gibberish). Guards against that drift regressing.
+    from koel.tts.config import TtsSettings
+    from koel.tts.schemas import CANONICAL_SAMPLE_RATE
+
+    assert TtsSettings().nvidia_tts_sample_rate == CANONICAL_SAMPLE_RATE
