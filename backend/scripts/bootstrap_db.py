@@ -48,7 +48,7 @@ DEMO_BOTS = [
         "language": "hinglish",
         "default_tone": "cheerful",
         "rag_index": "cc_hdfc",
-        "greeting_template": "Namaste {name} ji, main HDFC Bank ki taraf se KOEL bol rahi hoon.",
+        "greeting_template": "नमस्ते {name} जी, मैं HDFC Bank की ओर से KOEL बोल रही हूँ।",
     },
     {
         "id": "bot_icici_col",
@@ -57,7 +57,7 @@ DEMO_BOTS = [
         "language": "hinglish",
         "default_tone": "empathetic",
         "rag_index": "col_icici",
-        "greeting_template": "Namaste {name} ji, main ICICI Bank se baat kar rahi hoon.",
+        "greeting_template": "नमस्ते {name} जी, मैं ICICI Bank की ओर से बात कर रही हूँ।",
     },
     {
         "id": "bot_insurance",
@@ -66,7 +66,7 @@ DEMO_BOTS = [
         "language": "hi",
         "default_tone": "neutral",
         "rag_index": "ins_term",
-        "greeting_template": "Namaste {name} ji, main Devotica Life se baat kar rahi hoon.",
+        "greeting_template": "नमस्ते {name} जी, मैं Devotica Life की ओर से बात कर रही हूँ।",
     },
 ]
 

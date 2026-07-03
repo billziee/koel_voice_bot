@@ -32,6 +32,15 @@ _WHISPER_LANG: dict[str, Language] = {
     "hindi": Language.hi,
 }
 
+# Force Whisper's transcription language from the bot's language (ISO-639-1) so it
+# never auto-detects. Hinglish is Hindi-dominant code-mix → transcribe as Hindi
+# (Whisper has no "hinglish"); it still captures embedded English banking terms.
+_WHISPER_FORCE: dict[Language, str] = {
+    Language.en: "en",
+    Language.hi: "hi",
+    Language.hinglish: "hi",
+}
+
 
 class SttProvider(ABC):
     @abstractmethod
@@ -197,8 +206,8 @@ class GroqWhisperProvider(SttProvider):
                 data={
                     "model": self._model,
                     "response_format": "verbose_json",
-                    **({"language": request.language_hint.value}
-                       if request.language_hint and request.language_hint != Language.hinglish else {}),
+                    **({"language": _WHISPER_FORCE[request.language_hint]}
+                       if request.language_hint in _WHISPER_FORCE else {}),
                 },
             )
             resp.raise_for_status()

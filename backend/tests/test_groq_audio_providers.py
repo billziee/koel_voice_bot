@@ -135,3 +135,33 @@ async def test_orpheus_falls_back_to_stub_on_unreachable_host():
     audio = base64.b64decode(res.audio_b64)
     assert audio[:4] == b"RIFF" and res.audio_format == "wav"
     await prov.aclose()
+
+
+async def test_whisper_forces_transcription_language_from_hint():
+    # The bot's language must PIN Whisper (no auto-detect), so idle/short/code-mixed
+    # audio isn't mislabelled (Hindi→Russian/Ukrainian, noise→Spanish/French).
+    # Hinglish has no Whisper code → forced to Hindi.
+    prov = GroqWhisperProvider(api_key="x", model="whisper-large-v3-turbo")
+
+    class _Resp:
+        def raise_for_status(self):  # noqa: ANN201
+            ...
+
+        def json(self):  # noqa: ANN201
+            return {"text": "नमस्ते", "segments": [], "language": "hindi", "duration": 1.0}
+
+    captured: dict = {}
+
+    async def _capture(url, headers=None, files=None, data=None):  # noqa: ANN001, ANN202
+        captured.clear()
+        captured.update(data or {})
+        return _Resp()
+
+    prov._client.post = _capture  # type: ignore[method-assign]  # noqa: SLF001
+    audio = base64.b64encode(_wav(0.3)).decode()
+    for hint, expect in ((Language.hinglish, "hi"), (Language.hi, "hi"), (Language.en, "en")):
+        await prov.transcribe(
+            TranscribeRequest(session_id="s", audio_b64=audio, is_final=True, language_hint=hint)
+        )
+        assert captured.get("language") == expect, f"{hint} should force {expect}"
+    await prov.aclose()
