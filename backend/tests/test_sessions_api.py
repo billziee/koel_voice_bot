@@ -107,6 +107,33 @@ async def test_rbi_calling_hours_allowed_within_window(app_client, access_header
     assert r.status_code == 201, r.text
 
 
+async def test_calling_hours_use_configured_tz(app_client, access_headers, test_db, monkeypatch):
+    # The window must be evaluated in the configured tz (IST), not the server clock
+    # (UTC on the cloud host). 04:00 UTC == 09:30 IST: inside a 9–21 IST window, but
+    # would be REFUSED if the naive UTC hour (4) were used.
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    client, runtime = app_client
+    runtime.clients.customer = CUSTOMER
+    await seed_bot(test_db)
+    runtime.settings.enforce_calling_hours = True
+    runtime.settings.calling_hours_start = 9
+    runtime.settings.calling_hours_end = 21
+    runtime.settings.calling_hours_tz = "Asia/Kolkata"
+
+    fixed = _dt.datetime(2026, 7, 3, 4, 0, tzinfo=ZoneInfo("UTC"))  # 09:30 IST
+
+    class _FrozenDatetime:
+        @staticmethod
+        def now(tz=None):  # noqa: ANN001
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr("koel.voicebot.api.sessions.datetime", _FrozenDatetime)
+    r = await _start(client, access_headers)
+    assert r.status_code == 201, r.text  # allowed → tz honoured (would be 403 on UTC)
+
+
 async def test_unauthenticated_rejected_401(app_client, test_db):
     client, runtime = app_client
     runtime.clients.customer = CUSTOMER

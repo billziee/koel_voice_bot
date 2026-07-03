@@ -45,16 +45,21 @@ class VoiceBotSettings(CommonSettings):
     # RBI fair-practice calling-hours window (PRD §11). Off by default so demos
     # run any time; enable in production to refuse out-of-hours dials.
     enforce_calling_hours: bool = False
-    calling_hours_start: int = 9  # inclusive, local hour (24h)
-    calling_hours_end: int = 21  # exclusive, local hour (24h)
+    calling_hours_start: int = 9  # inclusive, hour (24h) in calling_hours_tz
+    calling_hours_end: int = 21  # exclusive, hour (24h) in calling_hours_tz
+    calling_hours_tz: str = "Asia/Kolkata"  # window is evaluated in this timezone
 
-    # Language handling. STT language detection on code-mixed Indian phone audio is
-    # unreliable, so by default the BOT's configured language is authoritative:
-    #  - don't switch the response language from per-utterance STT detection, and
-    #  - don't escalate a call as "unsupported language" on an STT guess (it was
-    #    ending calls after one turn). Enable these only with a trusted STT.
+    # Language handling. Per-utterance STT language DETECTION is unreliable on
+    # code-mixed audio, so the bot's configured language stays authoritative and we
+    # don't switch the response language from it.
     adapt_language_to_caller: bool = False
-    escalate_on_unsupported_language: bool = False
+    # Graceful unsupported-language fallback (PRD §06). Safe to keep on now that STT
+    # is language-pinned: a supported-language caller is never mis-escalated. An
+    # unsupported language, force-transcribed into the bot's language, comes back
+    # with very LOW confidence over a real (sustained) utterance — that's the signal.
+    escalate_on_unsupported_language: bool = True
+    unsupported_confidence_floor: float = 0.35  # below this on a real utterance ⇒ unsupported
+    unsupported_min_speech_ms: int = 800  # ignore blips/noise; require sustained speech
 
     # Telephony seam (F): when true, synthesized audio is transcoded to 8 kHz
     # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
