@@ -50,7 +50,7 @@ class TtsSettings(CommonSettings):
     # shared-tier cold-invocation cost (~30s/call) that Magpie pays every call.
     sarvam_api_key: str | None = None
     sarvam_base_url: str = "https://api.sarvam.ai"
-    sarvam_model: str = "bulbul:v3"
+    sarvam_tts_model: str = "bulbul:v3"
     sarvam_speaker: str = "priya"
     sarvam_audio_format: str = "wav"
     sarvam_sample_rate: int = CANONICAL_SAMPLE_RATE

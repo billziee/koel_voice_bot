@@ -240,6 +240,96 @@ class GroqWhisperProvider(SttProvider):
         await self._client.aclose()
 
 
+# Sarvam's returned BCP-47 language code → our internal enum. Unlike Whisper
+# (forced via language_hint, see _WHISPER_FORCE), Sarvam is called in
+# auto-detect mode (language_code="unknown") specifically so it returns a
+# genuine language_probability — that's what feeds the unsupported-language
+# escalation floor (orchestrator._is_unsupported_language). Forcing it the
+# way Whisper does would zero out that signal (Sarvam returns a null
+# probability when a specific language is provided), silently disabling the
+# escalation path.
+_SARVAM_LANG: dict[str, Language] = {
+    "hi-in": Language.hi,
+    "en-in": Language.en,
+}
+
+
+class SarvamSttProvider(SttProvider):
+    """Live STT via Sarvam Saaras (multipart ``/speech-to-text``), primary for
+    Hindi/code-mixed calls — Sarvam is trained on real-world Indian code-switched
+    speech, unlike Whisper which needs language pinning to stay usable here.
+    Any failure (or the ``TEXT:`` type-to-talk sentinel) falls through to
+    ``fallback`` (Groq Whisper), which itself falls to the deterministic stub —
+    a live call never drops.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.sarvam.ai",
+        mode: str = "transcribe",
+        timeout_s: float = 20.0,
+        fallback: SttProvider,
+    ) -> None:
+        self._model = model
+        self._mode = mode
+        self._url = f"{base_url.rstrip('/')}/speech-to-text"
+        self._headers = {"api-subscription-key": api_key}
+        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._fallback = fallback
+        self._warned = False
+
+    async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
+        try:
+            raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
+        except (ValueError, base64.binascii.Error):
+            raw = b""
+        # Type-to-talk passthrough / empty audio → skip the network call entirely.
+        if raw.startswith(_TEXT_SENTINEL) or not raw:
+            return await self._fallback.transcribe(request)
+
+        fmt = (request.audio_format or "wav").lower()
+        mime = _AUDIO_MIME.get(fmt, "application/octet-stream")
+        try:
+            resp = await self._client.post(
+                self._url,
+                headers=self._headers,
+                files={"file": (f"audio.{fmt}", raw, mime)},
+                data={"model": self._model, "mode": self._mode, "language_code": "unknown"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:  # noqa: BLE001 — never drop a live turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning(
+                    "sarvam_stt_failed; falling back",
+                    extra={"extra_fields": {"session_id": request.session_id}},
+                    exc_info=True,
+                )
+            return await self._fallback.transcribe(request)
+
+        text = (data.get("transcript") or "").strip()
+        lang = _SARVAM_LANG.get(str(data.get("language_code", "")).lower(), Language.other)
+        if request.language_hint and lang is Language.other:
+            lang = request.language_hint
+        confidence = data.get("language_probability")
+        return TranscriptResult(
+            session_id=request.session_id,
+            text=text,
+            is_final=request.is_final,
+            language_id=lang,
+            language_confidence=confidence if confidence is not None else 0.5,
+            speech_duration_ms=max(120, len(text) * 60),
+            word_confidence=0.9,  # Sarvam's REST response has no per-word score
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
 class WhisperSageMakerProvider(SttProvider):
     """Real provider — invokes a SageMaker Whisper endpoint. Not wired in MVP boilerplate."""
 
