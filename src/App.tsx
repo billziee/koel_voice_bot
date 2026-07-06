@@ -945,8 +945,12 @@ interface DashboardViewProps { bots: Bot[]; onLaunch: (id: string) => void; onCo
 
 function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps) {
   const [sortBy] = useState<string>('calls');
+  const [search, setSearch] = useState('');
 
-  const sortedBots = [...bots].sort((a, b) => {
+  const filteredBots = bots.filter(
+    b => !search || `${b.name} ${b.useCase}`.toLowerCase().includes(search.toLowerCase())
+  );
+  const sortedBots = [...filteredBots].sort((a, b) => {
     if (sortBy === 'calls') return b.calls - a.calls;
     if (sortBy === 'conversion') return b.conversionNum - a.conversionNum;
     if (sortBy === 'name') return a.name.localeCompare(b.name);
@@ -967,9 +971,21 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
           <h1 className="text-[19px] font-semibold tracking-tight" style={{ color: theme.ink }}>Bot Dashboard</h1>
           <p className="text-[13px] mt-0.5" style={{ color: theme.inkMuted }}>{bots.filter(b => b.status === 'Active').length} active bot instances · last sync 2 min ago</p>
         </div>
-        <button onClick={onBuilder} className="flex items-center gap-2 px-3.5 py-[7px] rounded-md text-[13.5px] text-white font-normal transition-colors hover:opacity-90" style={{ backgroundColor: theme.primary }}>
-          <Plus size={15} /> New bot
-        </button>
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: theme.faint }} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search bots…"
+              className="border rounded-md pl-9 pr-3 py-2 text-[13px] outline-none focus:ring-2 w-40 md:w-56"
+              style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }}
+            />
+          </div>
+          <button onClick={onBuilder} className="flex items-center gap-2 px-3.5 py-[7px] rounded-md text-[13.5px] text-white font-normal transition-colors hover:opacity-90" style={{ backgroundColor: theme.primary }}>
+            <Plus size={15} /> New bot
+          </button>
+        </div>
       </div>
 
       {/* KPI strip — 4 cards matching design */}
@@ -979,6 +995,12 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
         <KpiCard label="Warm leads / 100 calls" value="13.4" meta="1.1" metaDir="up" theme={theme} />
         <KpiCard label="Escalation rate" value="9.7%" meta="100% with full context handoff" metaDir="flat" theme={theme} />
       </div>
+
+      {search && sortedBots.length === 0 && (
+        <div className="text-[13px] text-center py-8" style={{ color: theme.inkMuted }}>
+          No bots match “{search}”.
+        </div>
+      )}
 
       {/* Bot grid — 3 columns */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
