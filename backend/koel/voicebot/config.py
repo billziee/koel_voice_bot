@@ -34,9 +34,15 @@ class VoiceBotSettings(CommonSettings):
     session_grace_ttl_seconds: int = 15  # Redis grace on disconnect
     session_active_ttl_seconds: int = 3600  # active session TTL
     heartbeat_interval_seconds: int = 5  # ping/pong dead-connection detection
-    # Declare the peer dead if no pong arrives within this window (~2 missed
-    # pings). Detected liveness loss is routed to the same 15s grace path.
-    heartbeat_timeout_seconds: int = 12
+    # Declare the peer dead if no pong arrives within this window. Must clear a
+    # bot turn's worst-case audio delivery time: the ping/pong shares the same
+    # ordered WS connection as audio_chunk frames, so a large turn (e.g. a
+    # multi-sentence Hindi reply) can queue the ping behind it — a live,
+    # actively-streaming connection is not a dead one. Measured: a 3-sentence
+    # Sarvam TTS greeting alone pushed ping delivery out to ~14s; 12s (~2
+    # missed 5s pings) was tuned for near-instant ping delivery and false-
+    # positived on exactly the connections doing real work.
+    heartbeat_timeout_seconds: int = 45
 
     # Language fallback (PRD §06): escalate below this STT language confidence
     # for an unsupported language.
