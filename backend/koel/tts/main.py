@@ -37,12 +37,12 @@ def _build_provider() -> TtsProvider:
         if settings.groq_enabled
         else StubOrpheusProvider()
     )
-    # Hindi cascade: Sarvam (primary, if enabled) → Magpie (fallback, if enabled)
-    # → base (Orpheus/stub). Each stage only wraps the next if it's configured,
-    # so any subset of {Sarvam, Magpie} being enabled still degrades gracefully.
-    hindi: TtsProvider = base
+    # Magpie is Devanagari-only (romanized text comes out as gibberish), so it's
+    # built standalone here and only ever wired in as SarvamTtsProvider's
+    # hi-specific fallback below — never as a direct Hinglish handler.
+    magpie: TtsProvider | None = None
     if settings.nvidia_enabled:
-        hindi = NvidiaMagpieTtsProvider(
+        magpie = NvidiaMagpieTtsProvider(
             api_key=settings.nvidia_api_key,  # type: ignore[arg-type]  # nvidia_enabled guards None
             function_id=settings.nvidia_tts_function_id,
             uri=settings.nvidia_tts_uri,
@@ -51,6 +51,11 @@ def _build_provider() -> TtsProvider:
             timeout_s=settings.nvidia_tts_timeout_s,
             fallback=base,
         )
+    # hi + hinglish cascade: Sarvam (primary, if enabled) handles both — verified
+    # live that Bulbul voices romanized Hinglish correctly, unlike Magpie. Sarvam
+    # falls back to Magpie only for hi (same Devanagari script family) and
+    # straight to base for hinglish/en (Magpie would mangle romanized text).
+    hindi: TtsProvider = magpie if magpie is not None else base
     if settings.sarvam_enabled:
         hindi = SarvamTtsProvider(
             api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_enabled guards None
@@ -60,13 +65,17 @@ def _build_provider() -> TtsProvider:
             audio_format=settings.sarvam_audio_format,
             sample_rate=settings.sarvam_sample_rate,
             timeout_s=settings.sarvam_timeout_s,
-            fallback=hindi,
+            fallback=base,
+            hi_fallback=magpie,
         )
     if hindi is base:
         return base
-    return RoutingTtsProvider(
-        default=base, hindi=hindi, hindi_languages=settings.nvidia_language_set
-    )
+    # Without Sarvam, Magpie can only take hi (never hinglish) — restrict the
+    # routed set accordingly regardless of what's configured.
+    hindi_languages = settings.nvidia_language_set
+    if not settings.sarvam_enabled:
+        hindi_languages = hindi_languages & {"hi"}
+    return RoutingTtsProvider(default=base, hindi=hindi, hindi_languages=hindi_languages)
 
 
 @asynccontextmanager

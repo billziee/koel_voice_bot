@@ -339,8 +339,15 @@ class NvidiaMagpieTtsProvider(TtsProvider):
 
 
 class SarvamTtsProvider(TtsProvider):
-    """Hindi TTS via Sarvam AI's Bulbul model (REST) — the primary Hindi engine;
-    ``fallback`` (Magpie, then Orpheus/stub) covers any failure so a call never drops.
+    """Hindi + Hinglish TTS via Sarvam AI's Bulbul model (REST) — the primary
+    engine for both. Verified live: Bulbul voices romanized Hinglish text
+    correctly (round-tripped through Sarvam STT at 1.0 language_probability),
+    unlike Magpie which requires Devanagari (romanized comes out as gibberish).
+
+    Fallback is language-aware because of that same script split: a hi request
+    falls back to Magpie (also Devanagari-native — the correct script family),
+    while a hinglish/en request falls straight to ``fallback`` (Orpheus/stub —
+    Magpie would mangle romanized text). Never drops a turn either way.
     """
 
     _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN"}
@@ -356,6 +363,7 @@ class SarvamTtsProvider(TtsProvider):
         sample_rate: int = CANONICAL_SAMPLE_RATE,
         timeout_s: float = 20.0,
         fallback: TtsProvider,
+        hi_fallback: TtsProvider | None = None,
     ) -> None:
         self._model = model
         self._speaker = speaker
@@ -365,7 +373,13 @@ class SarvamTtsProvider(TtsProvider):
         self._headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
         self._client = make_async_client(timeout_s=timeout_s)
         self._fallback = fallback
+        self._hi_fallback = hi_fallback
         self._warned = False
+
+    def _fallback_for(self, request: SynthesizeRequest) -> TtsProvider:
+        if request.language.value == "hi" and self._hi_fallback is not None:
+            return self._hi_fallback
+        return self._fallback
 
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
         prosody = resolve_prosody(request)
@@ -391,7 +405,7 @@ class SarvamTtsProvider(TtsProvider):
             if not self._warned:
                 self._warned = True
                 logger.warning("sarvam_tts_failed; falling back", exc_info=True)
-            result = await self._fallback.synthesize(request)
+            result = await self._fallback_for(request).synthesize(request)
             result.fallback_used = True
             return result
 
