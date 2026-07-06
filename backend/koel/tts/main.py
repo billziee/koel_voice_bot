@@ -54,7 +54,7 @@ def _build_provider() -> TtsProvider:
     if settings.sarvam_enabled:
         hindi = SarvamTtsProvider(
             api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_enabled guards None
-            model=settings.sarvam_model,
+            model=settings.sarvam_tts_model,
             speaker=settings.sarvam_speaker,
             base_url=settings.sarvam_base_url,
             audio_format=settings.sarvam_audio_format,
