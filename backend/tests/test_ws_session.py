@@ -6,6 +6,7 @@ scripted fake socket, covering the paths that per-file coverage showed untested.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import WebSocketDisconnect
@@ -227,3 +228,46 @@ async def test_no_input_service_failure_fails_call_not_crash(test_db):
 
     assert call._closed  # noqa: SLF001
     assert any(e["code"] == "no_input_failed" for e in ws.frames_of(ServerMessageType.error))
+
+
+async def test_call_summary_skipped_when_sarvam_disabled(test_db):
+    # Default settings have no sarvam_api_key — must not attempt a summary call.
+    ws = FakeWebSocket([json.dumps({"type": "end_call"})])
+    clients = ScriptedClients(nlp=_nlp())
+    call = _session(ws, _state("ws_summary_off"), clients)
+
+    await call.run()
+    await asyncio.gather(*call._background_tasks)  # noqa: SLF001 — drain any scheduled tasks
+
+    assert clients.call_summaries == []
+
+
+async def test_call_summary_runs_when_sarvam_enabled(monkeypatch, test_db):
+    from koel.voicebot.pipeline.summarizer import CallSummary
+
+    class StubSummarizer:
+        def __init__(self, **kwargs) -> None:  # noqa: ANN003
+            pass
+
+        async def summarize(self, turns) -> CallSummary:  # noqa: ANN001
+            return CallSummary(
+                interest_shown=True, objection="", sentiment="positive", next_action="Follow up"
+            )
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("koel.voicebot.ws.handler.SarvamSummarizer", StubSummarizer)
+
+    ws = FakeWebSocket([json.dumps({"type": "end_call"})])
+    clients = ScriptedClients(nlp=_nlp())
+    call = _session(ws, _state("ws_summary_on"), clients, sarvam_api_key="k")
+
+    await call.run()
+    await asyncio.gather(*call._background_tasks)  # noqa: SLF001 — drain the fire-and-forget task
+
+    assert len(clients.call_summaries) == 1
+    customer_id, summary = clients.call_summaries[0]
+    assert customer_id == "cust_x"
+    assert summary["interest_shown"] is True
+    assert summary["next_action"] == "Follow up"

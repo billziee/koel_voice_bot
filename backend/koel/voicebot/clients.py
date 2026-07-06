@@ -120,5 +120,18 @@ class ServiceClients:
             headers=self._headers(),
         )
 
+    async def add_call_summary(
+        self, customer_id: str, *, session_id: str, interest_shown: bool,
+        objection: str = "", sentiment: str = "neutral", next_action: str = "",
+    ) -> None:
+        await self._client.post(
+            f"{self._settings.crm_svc_url}/v1/customers/{quote(customer_id, safe='')}/call-summary",
+            json={
+                "session_id": session_id, "interest_shown": interest_shown,
+                "objection": objection, "sentiment": sentiment, "next_action": next_action,
+            },
+            headers=self._headers(),
+        )
+
     async def aclose(self) -> None:
         await self._client.aclose()
