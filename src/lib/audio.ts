@@ -13,7 +13,9 @@ export interface MicCaptureOptions {
   onSpeechStart?: () => void; // fires the instant speech begins (for barge-in)
   onLevel?: (rms: number) => void; // 0..1, for the waveform / mic meter
   onError?: (err: unknown) => void;
-  thresholdRms?: number; // speech vs. silence
+  thresholdRms?: number; // absolute floor for speech vs. silence — never go below this
+  noiseMultiplier?: number; // speech must clear (ambient noise floor * this) too
+  noiseFloorAlpha?: number; // EMA smoothing for the rolling ambient noise estimate
   silenceMs?: number; // trailing silence that ends an utterance
   minSpeechMs?: number; // ignore sub-threshold blips (coughs, clicks)
   maxIdleMs?: number; // recycle the recorder if no speech, to bound memory
@@ -71,10 +73,17 @@ export class MicCapture {
   private lastVoiceAt = 0;
   private speechStartAt = 0;
   private segmentStartAt = 0;
+  // Rolling ambient noise estimate (RMS), adapted only during non-speech ticks.
+  // A single fixed threshold either misses quiet speech or false-triggers on
+  // loud background chatter (public places) — this makes the cutoff track the
+  // room instead of assuming one fixed noise level everywhere.
+  private noiseFloor = 0;
 
   constructor(options: MicCaptureOptions) {
     this.opts = {
       thresholdRms: 0.025,
+      noiseMultiplier: 2.5,
+      noiseFloorAlpha: 0.05,
       // Trailing silence before we call end-of-utterance. Every ms here is added
       // latency before STT even starts, so keep it tight (was 800ms).
       silenceMs: 500,
@@ -157,7 +166,11 @@ export class MicCapture {
     this.opts.onLevel(rms);
 
     const now = performance.now();
-    if (rms >= this.opts.thresholdRms) {
+    // Speech must clear the ambient floor by a margin, but never drop below the
+    // absolute thresholdRms — that floor keeps a dead-silent room from letting
+    // noiseFloor collapse toward 0 and becoming hypersensitive to any faint sound.
+    const speechThreshold = Math.max(this.opts.thresholdRms, this.noiseFloor * this.opts.noiseMultiplier);
+    if (rms >= speechThreshold) {
       this.lastVoiceAt = now;
       if (!this.hadSpeech) {
         this.hadSpeech = true;
@@ -169,6 +182,10 @@ export class MicCapture {
       this.finalizeSegment(this.lastVoiceAt - this.speechStartAt >= this.opts.minSpeechMs);
     } else if (!this.hadSpeech && now - this.segmentStartAt >= this.opts.maxIdleMs) {
       this.finalizeSegment(false); // recycle idle silence to bound memory
+    } else if (!this.hadSpeech) {
+      // Only adapt while there's no candidate speech in progress, so a loud
+      // utterance's own trailing decay is never absorbed into the noise floor.
+      this.noiseFloor += (rms - this.noiseFloor) * this.opts.noiseFloorAlpha;
     }
   };
 
