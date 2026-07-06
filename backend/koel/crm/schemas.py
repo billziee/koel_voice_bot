@@ -37,3 +37,15 @@ class FlagRequest(BaseModel):
     flag: str  # "retry", "opt_out", "callback", "unsupported_language"
     reason: str | None = None
     idempotency_key: str | None = Field(default=None, max_length=80)
+
+
+class CallSummaryRequest(BaseModel):
+    """Structured post-call insight (interest/objection/sentiment/next action),
+    extracted by the voicebot's LLM summarizer and appended to the customer's
+    CRM record. Deduped on session_id so a retry never double-writes."""
+
+    session_id: str
+    interest_shown: bool
+    objection: str = ""
+    sentiment: str = "neutral"  # "positive" | "neutral" | "negative"
+    next_action: str = ""

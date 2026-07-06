@@ -6,6 +6,8 @@ the database so the same shape works when a real CRM replaces the seed data.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -15,7 +17,7 @@ from koel.common.auth import ServicePrincipal
 from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account
 from koel.common.telemetry import span
-from koel.crm.schemas import CustomerRecord, FlagRequest, InteractionLog
+from koel.crm.schemas import CallSummaryRequest, CustomerRecord, FlagRequest, InteractionLog
 from koel.db.models import CrmCustomer, InteractionLogRow
 from koel.db.session import session_scope
 
@@ -118,6 +120,40 @@ async def flag_customer(customer_id: str, payload: FlagRequest, _: ServicePrinci
             row.dnd = True
         row.attributes = attrs
     return {"status": "flagged", "customer_id": customer_id, "flag": payload.flag}
+
+
+@router.post("/{customer_id}/call-summary", status_code=status.HTTP_201_CREATED)
+async def add_call_summary(customer_id: str, payload: CallSummaryRequest, _: ServicePrincipal) -> dict:
+    """Append the LLM-generated post-call summary onto the customer's record
+    (visible via GET /v1/customers/{id}.attributes.call_notes). Deduped on
+    session_id so a retry from the fire-and-forget caller never double-writes."""
+    async with session_scope() as db:
+        row = await db.get(CrmCustomer, customer_id)
+        if row is None:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="customer_not_found",
+                message=f"No customer with id {customer_id}.",
+            )
+        attrs = dict(row.attributes or {})
+        notes = list(attrs.get("call_notes", []))
+        if any(n.get("session_id") == payload.session_id for n in notes):
+            return {"status": "duplicate", "customer_id": customer_id, "session_id": payload.session_id}
+        notes.append({
+            "session_id": payload.session_id,
+            "interest_shown": payload.interest_shown,
+            "objection": payload.objection,
+            "sentiment": payload.sentiment,
+            "next_action": payload.next_action,
+            "created_at": datetime.now(UTC).isoformat(),
+        })
+        attrs["call_notes"] = notes
+        row.attributes = attrs
+    logger.info(
+        "crm_call_summary_added",
+        extra={"extra_fields": {"customer_id": mask_account(customer_id), "session_id": payload.session_id}},
+    )
+    return {"status": "logged", "customer_id": customer_id, "session_id": payload.session_id}
 
 
 app.include_router(router)

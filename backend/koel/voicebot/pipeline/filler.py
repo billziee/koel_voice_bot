@@ -15,14 +15,17 @@ from __future__ import annotations
 from collections import defaultdict
 
 from koel.common.schemas import Language, Tone
+from koel.voicebot.pipeline import localization
 
 # Filler text per language. Tone selects energy when these are synthesised.
-FILLER_PHRASES: dict[Language, list[str]] = {
-    Language.en: ["Hmm…", "Let me pull that up…", "One moment please…"],
-    # hi → Magpie, so Devanagari only. hinglish → Orpheus, so romanized Latin.
-    Language.hi: ["हम्म…", "एक सेकंड कीजिए…", "मैं देख रही हूँ…"],
-    Language.hinglish: ["Hmm…", "Ek second kijiye…", "Let me check…", "Bas ek minute…"],
-}
+# hi → Magpie/Sarvam, Devanagari only, hand-authored. hinglish → Orpheus,
+# romanized Latin, derived from hi via Sarvam transliteration at startup
+# (localization.warm()) — see localization.py for why.
+FILLER_PHRASES = localization.register(localization.LocalizedList(
+    en=["Hmm…", "Let me pull that up…", "One moment please…"],
+    hi=["हम्म…", "एक सेकंड कीजिए…", "मैं देख रही हूँ…"],
+    hinglish_fallback=["Hmm…", "Ek second kijiye…", "Let me check…", "Bas ek minute…"],
+))
 
 
 class FillerCache:
@@ -38,7 +41,7 @@ class FillerCache:
         self._audio[language] = clips_b64
 
     def phrases(self, language: Language) -> list[str]:
-        return FILLER_PHRASES.get(language, FILLER_PHRASES[Language.en])
+        return FILLER_PHRASES.get(language)
 
     def is_ready(self, language: Language) -> bool:
         return bool(self._audio.get(language))

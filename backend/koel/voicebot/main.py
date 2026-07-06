@@ -19,7 +19,9 @@ from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.api import analytics, auth, bots, history, knowledge, sessions
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
+from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.filler import FILLER_PHRASES, filler_tone_for
+from koel.voicebot.pipeline.transliteration import SarvamTransliterator
 from koel.voicebot.session.models import CallStatus
 from koel.voicebot.ws.handler import handle_connection
 
@@ -65,6 +67,24 @@ async def _warm_filler_cache(runtime) -> None:
             logger.warning("filler_warm_failed language=%s", language.value)
 
 
+async def _warm_localization() -> None:
+    """Derive Hinglish operational copy from its Devanagari source (PRD §06
+    dual-script collapse). Runs before the filler-cache warm so the filler
+    phrases it TTS-synthesizes below already reflect the live transliteration.
+    Best-effort — localization.warm() itself never raises."""
+    if not settings.sarvam_enabled:
+        return
+    transliterator = SarvamTransliterator(
+        api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_enabled guards None
+        base_url=settings.sarvam_base_url,
+        timeout_s=settings.sarvam_translit_timeout_s,
+    )
+    try:
+        await localization.warm(transliterator.to_hinglish)
+    finally:
+        await transliterator.aclose()
+
+
 # How long the lifespan waits for in-flight WS calls to finish on SIGTERM (P).
 _DRAIN_TIMEOUT_S = 12.0
 
@@ -76,6 +96,7 @@ async def lifespan(app: FastAPI):
     app.state.active_calls = 0
     app.state.active_sessions = set()  # session_ids with a live socket (concurrency guard)
     logger.info("voicebot_svc starting; redis_ok=%s", await runtime.store.ping())
+    await _warm_localization()
     await _warm_filler_cache(runtime)
     yield
     # Graceful SIGTERM drain (P): stop accepting new calls, let live ones finish

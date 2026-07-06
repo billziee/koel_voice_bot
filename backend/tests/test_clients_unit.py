@@ -69,6 +69,29 @@ async def test_flag_and_log_interaction_post_to_crm():
     await c.aclose()
 
 
+async def test_add_call_summary_posts_to_crm():
+    import json
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"status": "logged"})
+
+    c = _clients(handler)
+    await c.add_call_summary(
+        "cust_1", session_id="s1", interest_shown=True,
+        objection="too expensive", sentiment="negative", next_action="close",
+    )
+    assert captured["path"].endswith("/call-summary")
+    assert captured["body"] == {
+        "session_id": "s1", "interest_shown": True,
+        "objection": "too expensive", "sentiment": "negative", "next_action": "close",
+    }
+    await c.aclose()
+
+
 async def test_stream_synthesis_yields_ndjson_chunks():
     def handler(request: httpx.Request) -> httpx.Response:
         lines = "\n".join(

@@ -91,6 +91,7 @@ class FakeClients:
     def __init__(self, customer: CustomerRecord | None = None) -> None:
         self.customer = customer
         self.flags: list[tuple[str, str, str | None]] = []
+        self.call_summaries: list[tuple[str, dict]] = []
 
     async def get_customer(self, customer_id: str) -> CustomerRecord:
         if self.customer is None:
@@ -99,6 +100,9 @@ class FakeClients:
 
     async def flag_customer(self, customer_id: str, flag: str, reason: str | None = None) -> None:
         self.flags.append((customer_id, flag, reason))
+
+    async def add_call_summary(self, customer_id: str, **summary) -> None:
+        self.call_summaries.append((customer_id, summary))
 
     async def synthesize(self, request):  # noqa: ANN001
         return await StubOrpheusProvider().synthesize(request)
