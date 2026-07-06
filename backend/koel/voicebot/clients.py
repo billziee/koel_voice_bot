@@ -22,6 +22,17 @@ from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
 
 _SERVICE_PRINCIPAL = "voicebot_svc"
 
+# TTS providers (Orpheus, Magpie) each carry their own ~30s internal ceiling
+# (groq_timeout_s / nvidia_tts_timeout_s) for a real neural-synthesis call, and
+# on the non-streaming path a failed primary cascades into a second full
+# attempt against the fallback. The generic 10s STT/NLP/CRM timeout used to
+# apply here too, so the orchestrator's own client gave up and disconnected
+# *before* the provider could finish or even fail — starving Magpie/Hindi
+# turns of audio every time (the cancellation raises asyncio.CancelledError,
+# a BaseException, so the provider's own except-Exception fallback never ran).
+_TTS_STREAM_TIMEOUT_S = 40.0  # one provider attempt, no cascade on the stream path
+_TTS_SYNTHESIZE_TIMEOUT_S = 70.0  # primary + fallback cascade, worst case
+
 
 class ServiceClients:
     """Thin async clients with shared auth + tracing headers."""
@@ -68,6 +79,7 @@ class ServiceClients:
             f"{self._settings.tts_svc_url}/v1/synthesize",
             json=request.model_dump(mode="json"),
             headers=self._headers(),
+            timeout=_TTS_SYNTHESIZE_TIMEOUT_S,
         )
         resp.raise_for_status()
         return SynthesisResult.model_validate(resp.json())
@@ -85,6 +97,7 @@ class ServiceClients:
             f"{self._settings.tts_svc_url}/v1/stream",
             json=request.model_dump(mode="json"),
             headers=self._headers(),
+            timeout=_TTS_STREAM_TIMEOUT_S,
         ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
