@@ -338,6 +338,85 @@ class NvidiaMagpieTtsProvider(TtsProvider):
             yield chunk
 
 
+class SarvamTtsProvider(TtsProvider):
+    """Hindi TTS via Sarvam AI's Bulbul model (REST) — the primary Hindi engine;
+    ``fallback`` (Magpie, then Orpheus/stub) covers any failure so a call never drops.
+    """
+
+    _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN"}
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        speaker: str,
+        base_url: str = "https://api.sarvam.ai",
+        audio_format: str = "wav",
+        sample_rate: int = CANONICAL_SAMPLE_RATE,
+        timeout_s: float = 20.0,
+        fallback: TtsProvider,
+    ) -> None:
+        self._model = model
+        self._speaker = speaker
+        self._format = audio_format
+        self._sr = sample_rate
+        self._url = f"{base_url.rstrip('/')}/text-to-speech"
+        self._headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
+        self._client = make_async_client(timeout_s=timeout_s)
+        self._fallback = fallback
+        self._warned = False
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            resp = await self._client.post(
+                self._url,
+                headers=self._headers,
+                json={
+                    "text": request.text,
+                    "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
+                    "speaker": self._speaker,
+                    "model": self._model,
+                    "speech_sample_rate": self._sr,
+                    "audio_format": self._format,
+                },
+            )
+            resp.raise_for_status()
+            audios = resp.json().get("audios") or []
+            if not audios:
+                raise ValueError("Sarvam returned no audio")
+            wav = base64.b64decode(audios[0])
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning("sarvam_tts_failed; falling back", exc_info=True)
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True
+            return result
+
+        if request.ambient and request.ambient_profile:
+            wav = mix_into_wav(wav, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(wav).decode(),
+            duration_ms=_wav_duration_ms(wav) or self._fallback_duration(request, prosody),
+            prosody=prosody,
+            sample_rate=wav_sample_rate(wav) or self._sr,
+        )
+
+    @staticmethod
+    def _fallback_duration(request: SynthesizeRequest, prosody: Prosody) -> int:
+        return max(200, int(len(request.text) * _MS_PER_CHAR / max(prosody.rate, 0.1)))
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
 class RoutingTtsProvider(TtsProvider):
     """Routes synthesis by call language: Hindi/Hinglish → ``hindi`` provider
     (NVIDIA Magpie), everything else → ``default`` (Groq Orpheus / stub)."""

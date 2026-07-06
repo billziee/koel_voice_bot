@@ -15,6 +15,7 @@ from koel.tts.providers import (
     GroqOrpheusProvider,
     NvidiaMagpieTtsProvider,
     RoutingTtsProvider,
+    SarvamTtsProvider,
     StubOrpheusProvider,
     TtsProvider,
 )
@@ -36,9 +37,12 @@ def _build_provider() -> TtsProvider:
         if settings.groq_enabled
         else StubOrpheusProvider()
     )
-    # Route Hindi/Hinglish to NVIDIA Magpie when enabled (falls back to base).
+    # Hindi cascade: Sarvam (primary, if enabled) → Magpie (fallback, if enabled)
+    # → base (Orpheus/stub). Each stage only wraps the next if it's configured,
+    # so any subset of {Sarvam, Magpie} being enabled still degrades gracefully.
+    hindi: TtsProvider = base
     if settings.nvidia_enabled:
-        magpie = NvidiaMagpieTtsProvider(
+        hindi = NvidiaMagpieTtsProvider(
             api_key=settings.nvidia_api_key,  # type: ignore[arg-type]  # nvidia_enabled guards None
             function_id=settings.nvidia_tts_function_id,
             uri=settings.nvidia_tts_uri,
@@ -47,10 +51,22 @@ def _build_provider() -> TtsProvider:
             timeout_s=settings.nvidia_tts_timeout_s,
             fallback=base,
         )
-        return RoutingTtsProvider(
-            default=base, hindi=magpie, hindi_languages=settings.nvidia_language_set
+    if settings.sarvam_enabled:
+        hindi = SarvamTtsProvider(
+            api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_enabled guards None
+            model=settings.sarvam_model,
+            speaker=settings.sarvam_speaker,
+            base_url=settings.sarvam_base_url,
+            audio_format=settings.sarvam_audio_format,
+            sample_rate=settings.sarvam_sample_rate,
+            timeout_s=settings.sarvam_timeout_s,
+            fallback=hindi,
         )
-    return base
+    if hindi is base:
+        return base
+    return RoutingTtsProvider(
+        default=base, hindi=hindi, hindi_languages=settings.nvidia_language_set
+    )
 
 
 @asynccontextmanager

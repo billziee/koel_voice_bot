@@ -43,6 +43,19 @@ class TtsSettings(CommonSettings):
     nvidia_tts_sample_rate: int = CANONICAL_SAMPLE_RATE
     nvidia_tts_timeout_s: float = 30.0
 
+    # --- Sarvam AI Bulbul (primary Hindi TTS) ---
+    # Set KOEL_SARVAM_API_KEY to enable. When set, Sarvam becomes the Hindi
+    # provider and Magpie (if also enabled) becomes ITS fallback, ahead of the
+    # base/Orpheus fallback — Sarvam's hosted REST API doesn't carry NVCF's
+    # shared-tier cold-invocation cost (~30s/call) that Magpie pays every call.
+    sarvam_api_key: str | None = None
+    sarvam_base_url: str = "https://api.sarvam.ai"
+    sarvam_model: str = "bulbul:v3"
+    sarvam_speaker: str = "priya"
+    sarvam_audio_format: str = "wav"
+    sarvam_sample_rate: int = CANONICAL_SAMPLE_RATE
+    sarvam_timeout_s: float = 20.0
+
     @property
     def groq_enabled(self) -> bool:
         return self.tts_provider.lower() == "groq" and bool(self.groq_api_key)
@@ -50,6 +63,10 @@ class TtsSettings(CommonSettings):
     @property
     def nvidia_enabled(self) -> bool:
         return self.tts_hindi_provider.lower() == "nvidia" and bool(self.nvidia_api_key)
+
+    @property
+    def sarvam_enabled(self) -> bool:
+        return bool(self.sarvam_api_key)
 
     @property
     def nvidia_language_set(self) -> set[str]:
