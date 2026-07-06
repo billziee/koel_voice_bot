@@ -16,20 +16,22 @@ import enum
 from dataclasses import dataclass
 
 from koel.common.schemas import Language
+from koel.voicebot.pipeline import localization
 
-# hi is voiced by Magpie → MUST be Devanagari (romanized comes out as gibberish).
-# hinglish/en are voiced by Orpheus → romanized Latin / English.
-REPROMPT_TEXT: dict[Language, str] = {
-    Language.en: "Hello, are you still there?",
-    Language.hi: "क्या आप मुझे सुन पा रहे हैं?",
-    Language.hinglish: "Hello, aap sun pa rahe hain? Are you still there?",
-}
+# hi is voiced by Magpie/Sarvam → MUST be Devanagari (romanized comes out as
+# gibberish), hand-authored. hinglish is voiced by Orpheus → romanized Latin,
+# derived from hi via Sarvam transliteration at startup (see localization.py).
+REPROMPT_TEXT = localization.register(localization.Localized(
+    en="Hello, are you still there?",
+    hi="क्या आप मुझे सुन पा रहे हैं?",
+    hinglish_fallback="Hello, aap sun pa rahe hain? Are you still there?",
+))
 
-CLOSE_TEXT: dict[Language, str] = {
-    Language.en: "It seems you're busy. I'll call back later. Thank you.",
-    Language.hi: "लगता है आप व्यस्त हैं। मैं बाद में कॉल करूँगी। धन्यवाद।",
-    Language.hinglish: "Lagta hai aap busy hain. Main baad mein call karti hoon. Dhanyavaad.",
-}
+CLOSE_TEXT = localization.register(localization.Localized(
+    en="It seems you're busy. I'll call back later. Thank you.",
+    hi="लगता है आप व्यस्त हैं। मैं बाद में कॉल करूँगी। धन्यवाद।",
+    hinglish_fallback="Lagta hai aap busy hain. Main baad mein call karti hoon. Dhanyavaad.",
+))
 
 
 class NoInputAction(str, enum.Enum):

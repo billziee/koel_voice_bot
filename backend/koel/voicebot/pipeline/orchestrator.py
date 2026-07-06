@@ -33,6 +33,7 @@ from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
+from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.filler import FillerCache, filler_tone_for
 from koel.voicebot.session.models import CallStatus, SessionState, Turn
 from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
@@ -73,28 +74,32 @@ _FALLBACK_TEXT = (
 # Hindi is Devanagari (spoken by Magpie), Hinglish stays romanized. `{name}`/`{bank}`
 # are filled from CRM. Falls back to Hinglish for any unmapped language.
 # Copy must match each language's TTS: en/hinglish → Orpheus (English/romanized
-# Latin), hi → Magpie (Devanagari only — romanized Hindi comes out as gibberish).
-# English brand/banking terms stay Latin. `{name}`/`{bank}` fill from CRM.
-_DEFAULT_GREETING: dict[Language, str] = {
-    Language.en: "Hello {name}, this is KOEL calling on behalf of {bank}.",
-    Language.hi: "नमस्ते {name} जी, मैं {bank} की ओर से KOEL बोल रही हूँ।",
-    Language.hinglish: "Namaste {name} ji, main {bank} ki taraf se KOEL bol rahi hoon.",
-}
-_DISCLOSURE: dict[Language, str] = {
-    Language.en: "This is an automated call.",
-    Language.hi: "यह एक स्वचालित कॉल है।",
-    Language.hinglish: "Yeh ek automated call hai.",
-}
-_CONSENT_ASK: dict[Language, str] = {
-    Language.en: "Do you have two minutes to talk?",
-    Language.hi: "क्या आप दो मिनट बात कर सकते हैं?",
-    Language.hinglish: "Do minute baat kar sakte hain?",
-}
+# Latin), hi → Magpie/Sarvam (Devanagari only — romanized Hindi comes out as
+# gibberish). English brand/banking terms stay Latin. `{name}`/`{bank}` fill
+# from CRM — the placeholder tokens survive transliteration intact (verified:
+# Sarvam only converts the Devanagari script, ASCII braces pass through).
+# hinglish is derived from hi via Sarvam transliteration at startup, not
+# hand-authored — see koel/voicebot/pipeline/localization.py.
+_DEFAULT_GREETING = localization.register(localization.Localized(
+    en="Hello {name}, this is KOEL calling on behalf of {bank}.",
+    hi="नमस्ते {name} जी, मैं {bank} की ओर से KOEL बोल रही हूँ।",
+    hinglish_fallback="Namaste {name} ji, main {bank} ki taraf se KOEL bol rahi hoon.",
+))
+_DISCLOSURE = localization.register(localization.Localized(
+    en="This is an automated call.",
+    hi="यह एक स्वचालित कॉल है।",
+    hinglish_fallback="Yeh ek automated call hai.",
+))
+_CONSENT_ASK = localization.register(localization.Localized(
+    en="Do you have two minutes to talk?",
+    hi="क्या आप दो मिनट बात कर सकते हैं?",
+    hinglish_fallback="Do minute baat kar sakte hain?",
+))
 
 
-def _by_language(table: dict[Language, str], language: Language) -> str:
+def _by_language(table: localization.Localized, language: Language) -> str:
     """Language-appropriate copy, defaulting to Hinglish (the demo's lingua franca)."""
-    return table.get(language, table[Language.hinglish])
+    return table.get(language)
 
 
 # ambient_profile values that mean "no floor chatter" — set by the FE on/off toggle.

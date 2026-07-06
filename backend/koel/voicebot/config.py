@@ -75,6 +75,20 @@ class VoiceBotSettings(CommonSettings):
     # bot starts speaking on the first sentence, not the whole clip. Reversible.
     stream_tts: bool = True
 
+    # Sarvam AI: transliteration (derives Hinglish operational copy from its
+    # Devanagari source at startup — see pipeline/localization.py) and chat
+    # completions (post-call CRM summarizer). Shares KOEL_SARVAM_API_KEY with
+    # the TTS/STT Sarvam integrations.
+    sarvam_api_key: str | None = None
+    sarvam_base_url: str = "https://api.sarvam.ai"
+    sarvam_translit_timeout_s: float = 15.0
+    sarvam_summary_model: str = "sarvam-30b"
+    sarvam_summary_timeout_s: float = 40.0
+
+    @property
+    def sarvam_enabled(self) -> bool:
+        return bool(self.sarvam_api_key)
+
 
 @lru_cache
 def get_voicebot_settings() -> VoiceBotSettings:
