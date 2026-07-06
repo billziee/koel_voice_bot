@@ -27,12 +27,17 @@ class TtsSettings(CommonSettings):
     groq_timeout_s: float = 30.0
 
     # --- NVIDIA Magpie (Hindi/multilingual neural TTS via NVCF gRPC/Riva) ---
-    # Orpheus is English; for Hindi we route to NVIDIA Magpie which speaks hi-IN
-    # natively. Set tts_hindi_provider=nvidia + KOEL_NVIDIA_API_KEY to enable.
+    # Devanagari-only (romanized text comes out as gibberish) — only ever used
+    # as Sarvam's hi-specific fallback (see SarvamTtsProvider.hi_fallback), or
+    # directly for hi if Sarvam is disabled. Set tts_hindi_provider=nvidia +
+    # KOEL_NVIDIA_API_KEY to enable.
     tts_hindi_provider: str = "default"  # "default" (use base provider) | "nvidia"
-    # Languages routed to the Hindi provider (Magpie, Devanagari-only). Just "hi":
-    # Hinglish is romanized code-mix → voiced by Orpheus (base), not Magpie.
-    tts_nvidia_languages: str = "hi"
+    # Languages routed to the Indic TTS bucket. Both hi and hinglish, since
+    # Sarvam (unlike Magpie) voices romanized Hinglish correctly — verified
+    # live via a Sarvam-STT round-trip at 1.0 language_probability. If Sarvam
+    # is disabled, _build_provider() restricts this back to {"hi"} at runtime
+    # since Magpie alone can't safely take hinglish.
+    tts_nvidia_languages: str = "hi,hinglish"
     nvidia_api_key: str | None = None
     nvidia_tts_uri: str = "grpc.nvcf.nvidia.com:443"
     nvidia_tts_function_id: str = "877104f7-e885-42b9-8de8-f6e4c6303969"  # magpie-tts-multilingual
@@ -43,11 +48,12 @@ class TtsSettings(CommonSettings):
     nvidia_tts_sample_rate: int = CANONICAL_SAMPLE_RATE
     nvidia_tts_timeout_s: float = 30.0
 
-    # --- Sarvam AI Bulbul (primary Hindi TTS) ---
-    # Set KOEL_SARVAM_API_KEY to enable. When set, Sarvam becomes the Hindi
-    # provider and Magpie (if also enabled) becomes ITS fallback, ahead of the
-    # base/Orpheus fallback — Sarvam's hosted REST API doesn't carry NVCF's
-    # shared-tier cold-invocation cost (~30s/call) that Magpie pays every call.
+    # --- Sarvam AI Bulbul (primary Hindi + Hinglish TTS) ---
+    # Set KOEL_SARVAM_API_KEY to enable. When set, Sarvam becomes the provider
+    # for both hi and hinglish; Magpie (if also enabled) becomes its fallback
+    # for hi only, ahead of the base/Orpheus fallback — Sarvam's hosted REST
+    # API doesn't carry NVCF's shared-tier cold-invocation cost (~30s/call)
+    # that Magpie pays every call.
     sarvam_api_key: str | None = None
     sarvam_base_url: str = "https://api.sarvam.ai"
     sarvam_tts_model: str = "bulbul:v3"

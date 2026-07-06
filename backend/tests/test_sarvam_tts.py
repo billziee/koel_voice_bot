@@ -98,3 +98,51 @@ def test_sarvam_language_code_mapping():
     assert p._LANG_CODE["hi"] == "hi-IN"
     assert p._LANG_CODE["hinglish"] == "hi-IN"
     assert p._LANG_CODE["en"] == "en-IN"
+
+
+class _MarkerProvider(StubOrpheusProvider):
+    """Tags its output so a test can tell which fallback branch ran."""
+
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    async def synthesize(self, request: SynthesizeRequest):  # noqa: ANN201
+        res = await super().synthesize(request)
+        return res.model_copy(update={"session_id": self.marker})
+
+
+async def test_sarvam_hi_request_falls_back_to_magpie_not_base():
+    # Magpie is Devanagari-native (same script family as hi) — a hi failure
+    # must cascade there, not straight to base/Orpheus.
+    p = SarvamTtsProvider(
+        api_key="k", model="bulbul:v3", speaker="priya", base_url="http://127.0.0.1:1", timeout_s=2,
+        fallback=_MarkerProvider("BASE"), hi_fallback=_MarkerProvider("MAGPIE"),
+    )
+    r = await p.synthesize(_req(Language.hi))
+    assert r.session_id == "MAGPIE"
+    assert r.fallback_used is True
+    await p.aclose()
+
+
+async def test_sarvam_hinglish_request_skips_magpie_falls_to_base():
+    # Magpie would mangle romanized Hinglish text — a hinglish failure must
+    # cascade straight to base/Orpheus, never to hi_fallback.
+    p = SarvamTtsProvider(
+        api_key="k", model="bulbul:v3", speaker="priya", base_url="http://127.0.0.1:1", timeout_s=2,
+        fallback=_MarkerProvider("BASE"), hi_fallback=_MarkerProvider("MAGPIE"),
+    )
+    r = await p.synthesize(_req(Language.hinglish))
+    assert r.session_id == "BASE"
+    assert r.fallback_used is True
+    await p.aclose()
+
+
+async def test_sarvam_hi_request_without_hi_fallback_uses_base():
+    # hi_fallback is optional (Magpie may not be configured at all).
+    p = SarvamTtsProvider(
+        api_key="k", model="bulbul:v3", speaker="priya", base_url="http://127.0.0.1:1", timeout_s=2,
+        fallback=_MarkerProvider("BASE"),
+    )
+    r = await p.synthesize(_req(Language.hi))
+    assert r.session_id == "BASE"
+    await p.aclose()
