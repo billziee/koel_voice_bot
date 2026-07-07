@@ -1,6 +1,6 @@
 # Pipecat-Inspired KOEL Upgrade Plan
 
-**Date:** 2026-07-07 · **Branch:** `feat/groq-nlp-and-prd-hardening` · **Status:** Phases 1-3 shipped (commits f908867, 952a56f, +WS TTS). Phase 4 pending capability proof — see prerequisite below.
+**Date:** 2026-07-07 · **Branch:** `feat/groq-nlp-and-prd-hardening` · **Status:** ALL FOUR PHASES SHIPPED. Phase 4 passed its Hindi/Hinglish capability eval (9/9 on production-representative cases) and is flag-gated off by default.
 
 Source of patterns: shallow clone of [pipecat-ai/pipecat](https://github.com/pipecat-ai/pipecat) (studied, NOT ported — see
 `docs/` research reports for why a full migration was rejected).
@@ -93,7 +93,23 @@ Lower time-to-first-audio on long sentences → filler clips needed less often.
 
 ---
 
-## Phase 4 — Semantic end-of-turn (smart-turn-v3.2) — **DEFERRED, do not build yet**
+## Phase 4 — Semantic end-of-turn (smart-turn-v3.2) — **SHIPPED (flag off by default)**
+
+**Capability eval (2026-07-07, gate for building this):** smart-turn-v3.2 run
+offline against Sarvam-TTS Hindi/Hinglish clips — 5 complete sentences scored
+0.77–0.99 (complete), 4 conjunction-ending fragments ("…ki", "…aur", "…to")
+scored 0.005–0.027 (incomplete). 9/9 on production-representative cases; the
+only misses were artificial mid-word chops, which cannot reach the gate (it
+only runs after the VAD's silence window). Verdict: capable → built.
+
+**As shipped:** the browser's Silero worklet already yields each utterance as
+16kHz PCM, so it rides the audio_chunk WS message (`pcm16_b64`) and the
+backend needs NO audio decoding — just numpy (already a dep) + onnxruntime
+(`pip install -e ".[smart-turn]"`). Incomplete verdict → transcript held up
+to `smart_turn_hold_ms` (1.5s) and merged with the follow-up. Enable with
+`KOEL_SMART_TURN_ENABLED=true` + `scripts/fetch_smart_turn_model.sh`.
+Missing model/dep degrades to gate-off; RMS-fallback clients (no PCM) skip
+the gate entirely.
 
 **Pipecat source:** `src/pipecat/audio/turn/smart_turn/local_smart_turn_v3.py` + bundled
 `smart-turn-v3.2-cpu.onnx` (**only 8.3MB** — feasible on KOEL's 512MB Render containers).

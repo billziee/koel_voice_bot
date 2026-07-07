@@ -15,7 +15,10 @@
 
 import { SileroVadEngine } from './vad';
 
-export type UtteranceHandler = (audioB64: string, format: string) => void;
+// pcm16B64 (s16le mono 16kHz, from the Silero worklet) rides along when the
+// neural engine endpointed the utterance — it feeds the backend's semantic
+// end-of-turn gate. Absent on the RMS fallback path.
+export type UtteranceHandler = (audioB64: string, format: string, pcm16B64?: string) => void;
 
 export interface MicCaptureOptions {
   onUtterance: UtteranceHandler;
@@ -49,12 +52,25 @@ function pickCodec(): Codec | null {
 
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
+  return bytesToBase64(bytes);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
+}
+
+function float32ToPcm16Base64(samples: Float32Array): string {
+  const pcm = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return bytesToBase64(new Uint8Array(pcm.buffer));
 }
 
 export function micSupported(): boolean {
@@ -92,6 +108,9 @@ export class MicCapture {
   // (and only if) the model comes up.
   private engine: 'rms' | 'silero' = 'rms';
   private silero: SileroVadEngine | null = null;
+  // Utterance PCM from the Silero worklet, held between speech-end and the
+  // recorder's onstop emit (they fire in that order within the same segment).
+  private pendingPcm16B64: string | undefined;
 
   constructor(options: MicCaptureOptions) {
     this.opts = {
@@ -152,11 +171,18 @@ export class MicCapture {
             this.opts.onSpeechStart(); // barge-in: caller halts bot audio if it's speaking
           }
         },
-        onSpeechEnd: () => {
+        onSpeechEnd: (pcm16) => {
           if (this.stopped || this.engine !== 'silero') return;
           this.lastVoiceAt = performance.now();
           // vad-web has already enforced minSpeechMs; this segment is real.
-          if (this.hadSpeech) this.finalizeSegment(true);
+          if (this.hadSpeech) {
+            try {
+              this.pendingPcm16B64 = float32ToPcm16Base64(pcm16);
+            } catch {
+              this.pendingPcm16B64 = undefined;
+            }
+            this.finalizeSegment(true);
+          }
         },
         onMisfire: () => {
           if (this.stopped || this.engine !== 'silero') return;
@@ -199,10 +225,12 @@ export class MicCapture {
     rec.onstop = () => {
       const emit = this.pendingEmit;
       this.pendingEmit = false;
+      const pcm16 = this.pendingPcm16B64;
+      this.pendingPcm16B64 = undefined;
       const blob = new Blob(this.chunks, { type: this.codec!.mime });
       if (emit && blob.size > 0) {
         blobToBase64(blob)
-          .then((b64) => this.opts.onUtterance(b64, this.codec!.format))
+          .then((b64) => this.opts.onUtterance(b64, this.codec!.format, pcm16))
           .catch((err) => this.opts.onError?.(err));
       }
       if (!this.stopped) this.arm(); // re-arm for the next utterance

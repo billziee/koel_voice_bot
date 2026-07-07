@@ -20,7 +20,10 @@ export interface SileroVadOptions {
   stream: MediaStream;
   audioContext: AudioContext;
   onSpeechStart: () => void;
-  onSpeechEnd: () => void;
+  /** pcm16 is the utterance as 16kHz mono Float32 samples straight from the
+   *  worklet — the semantic end-of-turn gate consumes it server-side, sparing
+   *  the backend any audio decoding. */
+  onSpeechEnd: (pcm16: Float32Array) => void;
   onMisfire: () => void;
   redemptionMs?: number;
   minSpeechMs?: number;
@@ -58,11 +61,11 @@ export class SileroVadEngine {
       negativeSpeechThreshold: opts.negativeSpeechThreshold ?? 0.35,
       redemptionMs: opts.redemptionMs ?? 500,
       minSpeechMs: opts.minSpeechMs ?? 300,
-      // The segment audio vad-web hands back is unused (MediaRecorder is the
-      // recording source of truth), so no pre-speech padding is needed.
+      // The segment audio feeds the end-of-turn gate, not the recording
+      // (MediaRecorder stays the recording source of truth) — no padding needed.
       preSpeechPadMs: 0,
       onSpeechStart: opts.onSpeechStart,
-      onSpeechEnd: () => opts.onSpeechEnd(),
+      onSpeechEnd: (audio: Float32Array) => opts.onSpeechEnd(audio),
       onVADMisfire: opts.onMisfire,
     });
     return new SileroVadEngine(vad);

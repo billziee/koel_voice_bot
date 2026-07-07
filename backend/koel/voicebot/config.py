@@ -26,6 +26,16 @@ class VoiceBotSettings(CommonSettings):
     # Filler audio (PRD §05 Latency Masking).
     filler_trigger_ms: int = 300  # inject filler if NLP first token exceeds this
 
+    # Semantic end-of-turn gate (smart-turn v3.2 ONNX; docs/PIPECAT_UPGRADE_PLAN
+    # Phase 4). When the utterance audio says the speaker paused mid-thought,
+    # hold the transcript up to smart_turn_hold_ms and merge the follow-up
+    # instead of answering half a sentence. Requires the `smart-turn` extra +
+    # scripts/fetch_smart_turn_model.sh; degrades to off if either is missing.
+    smart_turn_enabled: bool = False
+    smart_turn_model_path: str = "models/smart-turn-v3.2-cpu.onnx"
+    smart_turn_threshold: float = 0.5
+    smart_turn_hold_ms: int = 1500
+
     # Silence / timeout rules (PRD §05 table).
     # Silence AFTER the bot's audio finishes before a re-prompt/close. 5s felt
     # impatient on real calls (fired while the caller was still thinking), so the

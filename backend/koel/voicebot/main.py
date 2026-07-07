@@ -210,6 +210,7 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             store=runtime.store,
             orchestrator=runtime.orchestrator,
             bargein=runtime.bargein,
+            smart_turn=runtime.smart_turn,
             clients=runtime.clients,
             resumed=resumed,
             background_tasks=runtime.background_tasks,
