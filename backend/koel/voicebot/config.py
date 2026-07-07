@@ -18,6 +18,10 @@ class VoiceBotSettings(CommonSettings):
     # Barge-in (PRD §05 Dual-Gated Interruption Engine).
     backchannel_max_speech_ms: int = 300  # utterances shorter than this are ignored
     barge_in_stop_target_ms: int = 150  # confirmed interrupt → audible silence
+    # Min-words gate: a lone non-backchannel word is usually STT noise (horn,
+    # cough) — require ≥2 words, or a long-held single word, to kill TTS.
+    min_interrupt_words: int = 2
+    single_word_interrupt_ms: int = 1200
 
     # Filler audio (PRD §05 Latency Masking).
     filler_trigger_ms: int = 300  # inject filler if NLP first token exceeds this

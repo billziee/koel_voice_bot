@@ -39,7 +39,11 @@ def build_runtime(settings: VoiceBotSettings) -> Runtime:
         grace_ttl=settings.session_grace_ttl_seconds,
     )
     clients = ServiceClients(settings)
-    bargein = BargeInClassifier(backchannel_max_speech_ms=settings.backchannel_max_speech_ms)
+    bargein = BargeInClassifier(
+        backchannel_max_speech_ms=settings.backchannel_max_speech_ms,
+        min_interrupt_words=settings.min_interrupt_words,
+        single_word_interrupt_ms=settings.single_word_interrupt_ms,
+    )
     filler = FillerCache()
     orchestrator = Orchestrator(settings=settings, clients=clients, filler_cache=filler)
     return Runtime(
