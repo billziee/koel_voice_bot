@@ -61,6 +61,10 @@ class TtsSettings(CommonSettings):
     sarvam_audio_format: str = "wav"
     sarvam_sample_rate: int = CANONICAL_SAMPLE_RATE
     sarvam_timeout_s: float = 20.0
+    # True WebSocket streaming (/text-to-speech/ws): audio chunks arrive while
+    # synthesis runs, instead of one HTTP round-trip per sentence. Off by
+    # default until soak-tested; any WS failure falls back to the HTTP path.
+    sarvam_tts_ws_enabled: bool = False
 
     @property
     def groq_enabled(self) -> bool:

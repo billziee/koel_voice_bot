@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 import struct
@@ -364,6 +365,7 @@ class SarvamTtsProvider(TtsProvider):
         timeout_s: float = 20.0,
         fallback: TtsProvider,
         hi_fallback: TtsProvider | None = None,
+        ws_enabled: bool = False,
     ) -> None:
         self._model = model
         self._speaker = speaker
@@ -371,10 +373,16 @@ class SarvamTtsProvider(TtsProvider):
         self._sr = sample_rate
         self._url = f"{base_url.rstrip('/')}/text-to-speech"
         self._headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
+        self._api_key = api_key
         self._client = make_async_client(timeout_s=timeout_s)
+        self._timeout_s = timeout_s
         self._fallback = fallback
         self._hi_fallback = hi_fallback
         self._warned = False
+        self._ws_enabled = ws_enabled
+        # https:// → wss:// on the same host; model + completion event are query params.
+        ws_base = base_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+        self._ws_url = f"{ws_base}/text-to-speech/ws?model={model}&send_completion_event=true"
 
     def _fallback_for(self, request: SynthesizeRequest) -> TtsProvider:
         if request.language.value == "hi" and self._hi_fallback is not None:
@@ -424,8 +432,78 @@ class SarvamTtsProvider(TtsProvider):
         return max(200, int(len(request.text) * _MS_PER_CHAR / max(prosody.rate, 0.1)))
 
     async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # WS streaming skips ambient turns: the bed is mixed per complete WAV,
+        # and re-seeding it on every small WS chunk would make it stutter.
+        if self._ws_enabled and not (request.ambient and request.ambient_profile):
+            emitted = False
+            try:
+                async for chunk in self._stream_ws(request):
+                    emitted = True
+                    yield chunk
+                return
+            except Exception:  # noqa: BLE001 — degrade, never drop a turn
+                if emitted:
+                    # Part of the reply already reached the caller's ears; an
+                    # HTTP retry would replay it from the start. End the turn.
+                    logger.warning("sarvam_ws_failed_midstream; turn truncated", exc_info=True)
+                    return
+                logger.warning("sarvam_ws_failed; using http path", exc_info=True)
         async for chunk in self._stream_by_sentence(request):
             yield chunk
+
+    async def _stream_ws(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        """True streaming via Sarvam's ``/text-to-speech/ws``: linear16 chunks
+        arrive while synthesis runs, so first audio doesn't wait for the whole
+        first sentence (protocol per docs.sarvam.ai text-to-speech/stream).
+
+        Chunks are yielded the moment they arrive and are never held back to
+        tag ``is_final`` — the consumer (orchestrator sentence-streaming loop)
+        treats iterator termination as end-of-turn, and delaying the first
+        chunk would tax exactly the time-to-first-audio this path exists for.
+        """
+        from websockets.asyncio.client import connect as ws_connect
+
+        seq = 0
+        async with ws_connect(
+            self._ws_url,
+            additional_headers={"api-subscription-key": self._api_key},
+            open_timeout=self._timeout_s,
+            close_timeout=2.0,
+        ) as ws:
+            config = {
+                "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
+                "speaker": self._speaker,
+                "speech_sample_rate": str(self._sr),
+                "output_audio_codec": "linear16",
+                "model": self._model,
+            }
+            await ws.send(json.dumps({"type": "config", "data": config}))
+            await ws.send(json.dumps({"type": "text", "data": {"text": request.text}}))
+            await ws.send(json.dumps({"type": "flush"}))
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), timeout=self._timeout_s)
+                msg = json.loads(raw)
+                mtype = msg.get("type")
+                if mtype == "audio":
+                    pcm = base64.b64decode(msg["data"]["audio"])
+                    if not pcm:
+                        continue
+                    wav = _pcm_to_wav(pcm, self._sr)
+                    yield SynthesisChunk(
+                        session_id=request.session_id,
+                        seq=seq,
+                        audio_b64=base64.b64encode(wav).decode(),
+                        is_final=False,
+                        duration_ms=_wav_duration_ms(wav),
+                        sample_rate=self._sr,
+                    )
+                    seq += 1
+                elif mtype == "event" and msg.get("data", {}).get("event_type") == "final":
+                    break
+                elif mtype == "error":
+                    raise ValueError(f"sarvam ws error: {msg.get('data')}")
+        if seq == 0:
+            raise ValueError("Sarvam WS returned no audio")
 
     async def aclose(self) -> None:
         await self._client.aclose()

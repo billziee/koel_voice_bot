@@ -67,6 +67,7 @@ def _build_provider() -> TtsProvider:
             timeout_s=settings.sarvam_timeout_s,
             fallback=base,
             hi_fallback=magpie,
+            ws_enabled=settings.sarvam_tts_ws_enabled,
         )
     if hindi is base:
         return base

@@ -1,6 +1,6 @@
 # Pipecat-Inspired KOEL Upgrade Plan
 
-**Date:** 2026-07-07 · **Branch:** `feat/groq-nlp-and-prd-hardening` · **Status:** awaiting approval
+**Date:** 2026-07-07 · **Branch:** `feat/groq-nlp-and-prd-hardening` · **Status:** Phases 1-3 shipped (commits f908867, 952a56f, +WS TTS). Phase 4 pending capability proof — see prerequisite below.
 
 Source of patterns: shallow clone of [pipecat-ai/pipecat](https://github.com/pipecat-ai/pipecat) (studied, NOT ported — see
 `docs/` research reports for why a full migration was rejected).
