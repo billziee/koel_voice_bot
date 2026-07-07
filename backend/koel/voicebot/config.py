@@ -18,9 +18,23 @@ class VoiceBotSettings(CommonSettings):
     # Barge-in (PRD §05 Dual-Gated Interruption Engine).
     backchannel_max_speech_ms: int = 300  # utterances shorter than this are ignored
     barge_in_stop_target_ms: int = 150  # confirmed interrupt → audible silence
+    # Min-words gate: a lone non-backchannel word is usually STT noise (horn,
+    # cough) — require ≥2 words, or a long-held single word, to kill TTS.
+    min_interrupt_words: int = 2
+    single_word_interrupt_ms: int = 1200
 
     # Filler audio (PRD §05 Latency Masking).
     filler_trigger_ms: int = 300  # inject filler if NLP first token exceeds this
+
+    # Semantic end-of-turn gate (smart-turn v3.2 ONNX; docs/PIPECAT_UPGRADE_PLAN
+    # Phase 4). When the utterance audio says the speaker paused mid-thought,
+    # hold the transcript up to smart_turn_hold_ms and merge the follow-up
+    # instead of answering half a sentence. Requires the `smart-turn` extra +
+    # scripts/fetch_smart_turn_model.sh; degrades to off if either is missing.
+    smart_turn_enabled: bool = False
+    smart_turn_model_path: str = "models/smart-turn-v3.2-cpu.onnx"
+    smart_turn_threshold: float = 0.5
+    smart_turn_hold_ms: int = 1500
 
     # Silence / timeout rules (PRD §05 table).
     # Silence AFTER the bot's audio finishes before a re-prompt/close. 5s felt

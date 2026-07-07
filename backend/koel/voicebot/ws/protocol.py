@@ -59,6 +59,10 @@ class ClientMessage(BaseModel):
     # Container of the captured mic audio (webm/mp4/wav/…) so STT names the file
     # with the right extension for the codec (real mic sends webm/opus).
     audio_format: str = "wav"
+    # Same utterance as raw s16le mono 16kHz PCM (from the browser's Silero VAD
+    # worklet) — feeds the semantic end-of-turn gate with no server-side audio
+    # decoding. Only present when the neural mic VAD is active.
+    pcm16_b64: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
 
 

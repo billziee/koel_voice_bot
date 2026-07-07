@@ -23,11 +23,12 @@ from koel.common.auth import WS_SUBPROTOCOL
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
 from koel.common.telemetry import record_first_audio_latency, span
-from koel.stt.schemas import TranscribeRequest
+from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.persistence import persist_call
 from koel.voicebot.pipeline.bargein import BargeInClassifier
+from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcripts
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
 from koel.voicebot.pipeline.summarizer import SarvamSummarizer
@@ -65,6 +66,7 @@ class CallSession:
         clients,
         resumed: bool,
         background_tasks: set | None = None,
+        smart_turn: SmartTurnAnalyzer | None = None,
     ) -> None:
         self._ws = websocket
         self._state = state
@@ -86,6 +88,9 @@ class CallSession:
         self._send_lock = asyncio.Lock()
         self._audio_buffer: list[bytes] = []  # bot WAV frames for the call recording (K)
         self._turn_in_at: float | None = None  # when the customer's final audio arrived (first-audio metric)
+        self._smart_turn = smart_turn
+        # Mid-thought hold (smart-turn gate): stashed transcript + flush timer.
+        self._pending_turn: tuple[TranscriptResult, asyncio.Task] | None = None
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -271,7 +276,36 @@ class CallSession:
         # The customer is taking their turn — any prior bot audio is done.
         self._bot_speaking = False
         self._turn_in_at = time.monotonic()  # audio-in mark for the first-audio metric
+
+        if self._pending_turn is not None:
+            # Follow-up landed inside the merge window: combine with the held
+            # mid-thought fragment and answer the whole thought at once.
+            held, timer = self._pending_turn
+            self._pending_turn = None
+            timer.cancel()
+            stt = stt.model_copy(update={"text": merge_transcripts(held.text, stt.text)})
+        elif self._smart_turn is not None and msg.pcm16_b64 and stt.text.strip():
+            # Semantic end-of-turn gate: if the audio says the speaker paused
+            # mid-thought, hold the transcript briefly instead of answering
+            # half a sentence. None (gate unavailable) → proceed normally.
+            if await self._smart_turn.is_complete(msg.pcm16_b64) is False:
+                timer = asyncio.create_task(self._flush_pending_turn())
+                self._pending_turn = (stt, timer)
+                return
+
         await self._orch.handle_final_transcript(self._state, self.send, stt)
+        if self._state.status == CallStatus.ended:
+            self._closed = True
+
+    async def _flush_pending_turn(self) -> None:
+        """Merge window elapsed with no follow-up — the pause was just a pause.
+        Answer the held transcript as-is."""
+        await asyncio.sleep(self._settings.smart_turn_hold_ms / 1000)
+        if self._pending_turn is None or self._closed:
+            return
+        held, _ = self._pending_turn
+        self._pending_turn = None
+        await self._orch.handle_final_transcript(self._state, self.send, held)
         if self._state.status == CallStatus.ended:
             self._closed = True
 
@@ -434,6 +468,12 @@ class CallSession:
         if self._finalized:
             return
         self._finalized = True
+        if self._pending_turn is not None:
+            # A held mid-thought turn can't be answered on a dead socket; cancel
+            # its flush timer so it doesn't fire into the torn-down session.
+            _, timer = self._pending_turn
+            self._pending_turn = None
+            timer.cancel()
         await self._upload_recording()
         call_id = await persist_call(self._state)
         if call_id is not None:
@@ -506,6 +546,7 @@ async def handle_connection(
     clients,
     resumed: bool,
     background_tasks: set | None = None,
+    smart_turn: SmartTurnAnalyzer | None = None,
 ) -> None:
     set_correlation_id(session_id)
     call = CallSession(
@@ -518,5 +559,6 @@ async def handle_connection(
         clients=clients,
         resumed=resumed,
         background_tasks=background_tasks,
+        smart_turn=smart_turn,
     )
     await call.run()

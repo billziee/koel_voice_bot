@@ -1259,9 +1259,9 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
     if (!liveCall) { logEvent('Microphone is only available in live mode (real VB_Svc).', 'warn'); return; }
     try {
       const cap = new MicCapture({
-        onUtterance: (b64, fmt) => {
+        onUtterance: (b64, fmt, pcm16) => {
           logEvent(`Mic utterance captured (${fmt}) → streaming to STT`, 'info');
-          liveCallRef.current?.sendAudioChunk(b64, fmt);
+          liveCallRef.current?.sendAudioChunk(b64, fmt, pcm16);
         },
         // Real barge-in: the instant the caller speaks over the bot, cut the bot's
         // audio locally (feels like a real interruption) and tell VB_Svc so it stops
