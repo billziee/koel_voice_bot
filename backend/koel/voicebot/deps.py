@@ -14,6 +14,7 @@ from fastapi import Request
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline.bargein import BargeInClassifier
+from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer
 from koel.voicebot.pipeline.filler import FillerCache
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.session.store import RedisSessionStore
@@ -27,6 +28,8 @@ class Runtime:
     bargein: BargeInClassifier
     filler: FillerCache
     orchestrator: Orchestrator
+    # Semantic end-of-turn gate (None unless KOEL_SMART_TURN_ENABLED).
+    smart_turn: SmartTurnAnalyzer | None = None
     # Strong refs to detached grace-window finalizers (PRD §05 dropped calls),
     # so they survive after the WebSocket handler returns.
     background_tasks: set[asyncio.Task] = field(default_factory=set)
@@ -39,7 +42,17 @@ def build_runtime(settings: VoiceBotSettings) -> Runtime:
         grace_ttl=settings.session_grace_ttl_seconds,
     )
     clients = ServiceClients(settings)
-    bargein = BargeInClassifier(backchannel_max_speech_ms=settings.backchannel_max_speech_ms)
+    smart_turn = None
+    if settings.smart_turn_enabled:
+        smart_turn = SmartTurnAnalyzer(
+            model_path=settings.smart_turn_model_path,
+            threshold=settings.smart_turn_threshold,
+        )
+    bargein = BargeInClassifier(
+        backchannel_max_speech_ms=settings.backchannel_max_speech_ms,
+        min_interrupt_words=settings.min_interrupt_words,
+        single_word_interrupt_ms=settings.single_word_interrupt_ms,
+    )
     filler = FillerCache()
     orchestrator = Orchestrator(settings=settings, clients=clients, filler_cache=filler)
     return Runtime(
@@ -47,6 +60,7 @@ def build_runtime(settings: VoiceBotSettings) -> Runtime:
         store=store,
         clients=clients,
         bargein=bargein,
+        smart_turn=smart_turn,
         filler=filler,
         orchestrator=orchestrator,
     )

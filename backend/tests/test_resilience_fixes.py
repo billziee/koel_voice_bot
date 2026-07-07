@@ -23,7 +23,9 @@ from koel.voicebot.ws.protocol import ServerMessageType
 def test_per_bot_backchannel_word_is_ignored():
     clf = BargeInClassifier(backchannel_max_speech_ms=300)
     # "bilkul" is not in the default dict → without an override it interrupts.
-    base = clf.evaluate(partial_text="bilkul", speech_duration_ms=500, language=Language.hinglish)
+    # (Held ≥1.2s so the single word passes the min-words gate as a deliberate
+    # interjection — a short lone word is treated as STT noise, not an interrupt.)
+    base = clf.evaluate(partial_text="bilkul", speech_duration_ms=1300, language=Language.hinglish)
     assert base.interrupt is True
     # With a per-bot override it is treated as a backchannel → keep talking.
     override = clf.evaluate(

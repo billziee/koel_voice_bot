@@ -33,7 +33,14 @@ DEFAULT_BACKCHANNELS: dict[Language, set[str]] = {
 @dataclass(frozen=True)
 class BargeInDecision:
     interrupt: bool  # True → issue TTS_KILL
-    reason: str  # "backchannel" | "too_short" | "sustained_speech"
+    reason: str  # "backchannel" | "too_short" | "too_few_words" | "sustained_speech"
+
+
+# A single word that isn't a backchannel is usually a noise burst mis-transcribed
+# by STT (horn, cough, TV) — unless the speaker held it long enough to be a
+# deliberate interjection ("ruko…"). Below this duration, one word won't kill TTS.
+DEFAULT_MIN_INTERRUPT_WORDS = 2
+DEFAULT_SINGLE_WORD_INTERRUPT_MS = 1200
 
 
 class BargeInClassifier:
@@ -42,9 +49,13 @@ class BargeInClassifier:
         *,
         backchannel_max_speech_ms: int,
         dictionaries: dict[Language, set[str]] | None = None,
+        min_interrupt_words: int = DEFAULT_MIN_INTERRUPT_WORDS,
+        single_word_interrupt_ms: int = DEFAULT_SINGLE_WORD_INTERRUPT_MS,
     ) -> None:
         self._max_ms = backchannel_max_speech_ms
         self._dicts = dictionaries or DEFAULT_BACKCHANNELS
+        self._min_words = min_interrupt_words
+        self._single_word_ms = single_word_interrupt_ms
 
     @staticmethod
     def _normalise(text: str) -> str:
@@ -80,4 +91,7 @@ class BargeInClassifier:
             return BargeInDecision(interrupt=False, reason="too_short")
         if self.is_backchannel(partial_text, language, extra=extra_backchannels):
             return BargeInDecision(interrupt=False, reason="backchannel")
+        word_count = len(self._normalise(partial_text).split())
+        if word_count < self._min_words and speech_duration_ms < self._single_word_ms:
+            return BargeInDecision(interrupt=False, reason="too_few_words")
         return BargeInDecision(interrupt=True, reason="sustained_speech")

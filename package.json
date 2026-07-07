@@ -11,6 +11,7 @@
     "test:e2e:install": "playwright install --with-deps"
   },
   "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
     "lucide-react": "^0.300.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
@@ -24,6 +25,7 @@
     "postcss": "^8.4.32",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.2.2",
-    "vite": "^5.0.8"
+    "vite": "^5.0.8",
+    "vite-plugin-static-copy": "^1.0.6"
   }
 }

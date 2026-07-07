@@ -313,9 +313,17 @@ export class LiveCall {
     this.send({ type: 'audio_chunk', audio_b64, is_final: true, sample_rate: sampleRate });
   }
 
-  /** Send a captured microphone utterance (base64 webm/mp4/ogg) to real STT (Whisper). */
-  sendAudioChunk(audioB64: string, format = 'webm'): void {
-    this.send({ type: 'audio_chunk', audio_b64: audioB64, is_final: true, audio_format: format });
+  /** Send a captured microphone utterance (base64 webm/mp4/ogg) to real STT
+   *  (Whisper). pcm16B64 (s16le mono 16kHz, from the Silero VAD worklet) rides
+   *  along when available — it powers the server's semantic end-of-turn gate. */
+  sendAudioChunk(audioB64: string, format = 'webm', pcm16B64?: string): void {
+    this.send({
+      type: 'audio_chunk',
+      audio_b64: audioB64,
+      is_final: true,
+      audio_format: format,
+      ...(pcm16B64 ? { pcm16_b64: pcm16B64 } : {}),
+    });
   }
 
   /** Gate-1 barge-in candidate fired while the bot is speaking. */
