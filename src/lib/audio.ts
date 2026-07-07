@@ -1,10 +1,19 @@
-// Real microphone capture with energy-based VAD endpointing.
+// Real microphone capture with VAD endpointing.
 //
-// Runs a MediaRecorder continuously and uses an AnalyserNode to detect
-// speech→silence boundaries. Each detected utterance is stopped, encoded
-// (webm/opus where supported), base64'd, and handed to `onUtterance` for the
-// live call to forward to STT (Groq Whisper). Leading silence is harmless —
-// Whisper trims it — and re-arming happens in `onstop` so segments never overlap.
+// Runs a MediaRecorder continuously and detects speech→silence boundaries.
+// Each detected utterance is stopped, encoded (webm/opus where supported),
+// base64'd, and handed to `onUtterance` for the live call to forward to STT
+// (Groq Whisper). Leading silence is harmless — Whisper trims it — and
+// re-arming happens in `onstop` so segments never overlap.
+//
+// Two detection engines, one state machine:
+//   1. Silero neural VAD (src/lib/vad.ts) — primary. Classifies speech
+//      specifically, so coughs/keyboard/traffic don't fire barge-in.
+//      Loaded asynchronously after start(); capture begins on RMS.
+//   2. RMS energy + adaptive noise floor — fallback (and the onLevel meter
+//      source). Takes over automatically if the neural engine fails to load.
+
+import { SileroVadEngine } from './vad';
 
 export type UtteranceHandler = (audioB64: string, format: string) => void;
 
@@ -78,6 +87,11 @@ export class MicCapture {
   // loud background chatter (public places) — this makes the cutoff track the
   // room instead of assuming one fixed noise level everywhere.
   private noiseFloor = 0;
+  // Which engine currently owns speech start/end decisions. RMS from t=0 so the
+  // call is never deaf while the neural model loads; flips to 'silero' when
+  // (and only if) the model comes up.
+  private engine: 'rms' | 'silero' = 'rms';
+  private silero: SileroVadEngine | null = null;
 
   constructor(options: MicCaptureOptions) {
     this.opts = {
@@ -114,6 +128,59 @@ export class MicCapture {
     this.arm();
     // setInterval (not rAF) so the VAD keeps ticking in background/headless tabs.
     this.timer = setInterval(this.tick, 50);
+    // Progressive enhancement: bring the neural engine up in the background.
+    // RMS is live from the first tick either way, so a slow model download (or
+    // a failed one) never delays or breaks the call.
+    void this.initSilero();
+  }
+
+  private async initSilero(): Promise<void> {
+    if (!this.stream || !this.ctx) return;
+    try {
+      const engine = await SileroVadEngine.create({
+        stream: this.stream,
+        audioContext: this.ctx,
+        redemptionMs: this.opts.silenceMs,
+        minSpeechMs: this.opts.minSpeechMs,
+        onSpeechStart: () => {
+          if (this.stopped || this.engine !== 'silero') return;
+          const now = performance.now();
+          this.lastVoiceAt = now;
+          if (!this.hadSpeech) {
+            this.hadSpeech = true;
+            this.speechStartAt = now;
+            this.opts.onSpeechStart(); // barge-in: caller halts bot audio if it's speaking
+          }
+        },
+        onSpeechEnd: () => {
+          if (this.stopped || this.engine !== 'silero') return;
+          this.lastVoiceAt = performance.now();
+          // vad-web has already enforced minSpeechMs; this segment is real.
+          if (this.hadSpeech) this.finalizeSegment(true);
+        },
+        onMisfire: () => {
+          if (this.stopped || this.engine !== 'silero') return;
+          // Too short to be speech — recycle the segment without emitting so
+          // the next real utterance starts from a clean recorder.
+          if (this.hadSpeech) this.finalizeSegment(false);
+        },
+      });
+      if (this.stopped) {
+        engine.destroy(); // stop() raced the model load
+        return;
+      }
+      this.silero = engine;
+      this.engine = 'silero';
+      // If an RMS-tracked utterance is in flight at switchover, close it out
+      // now: the neural engine only judges audio from this point on, so no
+      // other path would ever finalize that segment.
+      if (this.hadSpeech) {
+        this.finalizeSegment(this.lastVoiceAt - this.speechStartAt >= this.opts.minSpeechMs);
+      }
+    } catch {
+      // Asset missing / WASM blocked / old browser — RMS stays in charge.
+      this.engine = 'rms';
+    }
   }
 
   get analyserNode(): AnalyserNode | null {
@@ -166,6 +233,14 @@ export class MicCapture {
     this.opts.onLevel(rms);
 
     const now = performance.now();
+    if (this.engine === 'silero') {
+      // The neural engine owns speech start/end; this loop still meters level
+      // (above) and recycles long idle segments to bound recorder memory.
+      if (!this.hadSpeech && now - this.segmentStartAt >= this.opts.maxIdleMs) {
+        this.finalizeSegment(false);
+      }
+      return;
+    }
     // Speech must clear the ambient floor by a margin, but never drop below the
     // absolute thresholdRms — that floor keeps a dead-silent room from letting
     // noiseFloor collapse toward 0 and becoming hypersensitive to any faint sound.
@@ -192,6 +267,9 @@ export class MicCapture {
   stop(): void {
     this.stopped = true;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.silero?.destroy();
+    this.silero = null;
+    this.engine = 'rms';
     const rec = this.recorder;
     this.recorder = null;
     if (rec && rec.state !== 'inactive') {
