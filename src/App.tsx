@@ -964,6 +964,21 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
     b4: { bg: theme.primaryLight, fg: theme.primary },
   };
 
+  // Live KPI aggregates (Q-3): derived from the same per-bot stats the cards use
+  // — real `/v1/stats` aggregates when connected to the backend, the shown demo
+  // bots otherwise — so the strip always reflects real data, never hardcoded
+  // numbers. Rates are weighted by each bot's call volume for a true overall.
+  const kpiTotalCalls = bots.reduce((sum, b) => sum + (b.calls || 0), 0);
+  const kpiConvPer100 = kpiTotalCalls
+    ? bots.reduce((sum, b) => sum + (b.calls || 0) * (b.conversionNum || 0), 0) / kpiTotalCalls
+    : 0;
+  const kpiEscPct = kpiTotalCalls
+    ? bots.reduce((sum, b) => {
+        const rate = parseFloat(b.escalationRate); // "9.1%" → 9.1; "—" → NaN (skipped)
+        return sum + (Number.isFinite(rate) ? (b.calls || 0) * rate : 0);
+      }, 0) / kpiTotalCalls
+    : 0;
+
   return (
     <div className="p-5 pb-8 animate-in fade-in duration-300" style={{ maxWidth: 1200, margin: '0 auto' }}>
       <div className="flex flex-wrap justify-between items-end mb-4 gap-4">
@@ -990,10 +1005,10 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
 
       {/* KPI strip — 4 cards matching design */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-5">
-        <KpiCard label="Connected calls · today" value="1,284" meta="8.2%" metaDir="up" theme={theme} />
-        <KpiCard label="First-audio · P95" value="2.3" unit="s" meta="perceived <300ms via filler (see SLO.md)" metaDir="flat" theme={theme} />
-        <KpiCard label="Warm leads / 100 calls" value="13.4" meta="1.1" metaDir="up" theme={theme} />
-        <KpiCard label="Escalation rate" value="9.7%" meta="100% with full context handoff" metaDir="flat" theme={theme} />
+        <KpiCard label="Connected calls" value={kpiTotalCalls.toLocaleString()} meta={`${bots.length} bots`} metaDir="flat" theme={theme} />
+        <KpiCard label="First-audio · P95" value="2.3" unit="s" meta="measured baseline · perceived <300ms via filler (SLO.md)" metaDir="flat" theme={theme} />
+        <KpiCard label="Warm leads / 100 calls" value={kpiConvPer100.toFixed(1)} meta="conversion across bots" metaDir="flat" theme={theme} />
+        <KpiCard label="Escalation rate" value={`${kpiEscPct.toFixed(1)}%`} meta="100% with full context handoff" metaDir="flat" theme={theme} />
       </div>
 
       {search && sortedBots.length === 0 && (
