@@ -17,7 +17,16 @@ COPY koel ./koel
 COPY scripts ./scripts
 COPY migrations ./migrations
 COPY alembic.ini ./
-RUN pip install --upgrade pip && pip install .
+# `smart-turn` extra pulls onnxruntime for the semantic end-of-turn gate
+# (koel/voicebot/pipeline/endpointing.py); the model itself is fetched below —
+# it's not on PyPI, so it can't be a pip dependency.
+RUN pip install --upgrade pip && pip install ".[smart-turn]"
+# curl isn't in the slim base image and the fetch script needs it; install it
+# just for this build step (the builder stage is discarded, so it never reaches
+# the runtime image).
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && bash scripts/fetch_smart_turn_model.sh models/smart-turn-v3.2-cpu.onnx
 
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.11-slim AS runtime
@@ -33,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && useradd --create-home --uid 10001 koel
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder --chown=koel:koel /build/models ./models
 COPY --chown=koel:koel koel ./koel
 COPY --chown=koel:koel scripts ./scripts
 COPY --chown=koel:koel migrations ./migrations

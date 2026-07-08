@@ -26,7 +26,19 @@ nor NVIDIA NVCF currently offers an India region or a no-retention/region-pinnin
 - **DPDP field minimisation**: only use-case-relevant CRM fields load into a session.
 - **Transport encryption**: TLS to all providers; DB `sslmode=require`, Redis `rediss://` in prod.
 - **Embeddings can stay in-region**: set `KOEL_NLP_EMBEDDER=bedrock` to use AWS Bedrock
-  Titan v2 (ap-south-1) for KB embeddings instead of NVIDIA NIM (US).
+  Titan v2 (ap-south-1) for KB embeddings instead of NVIDIA NIM (US) — **note:** this
+  provider is currently a stub (`embed()` raises `NotImplementedError`); see
+  `FUTURE_PROCEEDINGS.md` item **6.8**.
+- **New since this doc was written — Sarvam AI is India-hosted** (`api.sarvam.ai`)
+  and now handles Hindi/Hinglish STT and TTS live (`SarvamSttProvider`,
+  `SarvamTtsProvider`). This is a **real, partial mitigation** — Hindi/Hinglish
+  audio/text for those two hops no longer transits the US — but it does not
+  close the gap: NLP (Groq) and English TTS/STT still egress to the US, and
+  Sarvam's hosting region + data-processing agreement should be **confirmed in
+  writing** before treating it as compliant, not just geographically
+  convenient. Expanding Sarvam's role (adding an NLP provider against its
+  chat-completions API) is the cheapest available step toward full residency —
+  tracked as `FUTURE_PROCEEDINGS.md` **O-7, Track A**.
 
 ## The compliant path (when required)
 To meet PRD §11, self-host the models in ap-south-1:

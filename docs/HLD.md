@@ -1,5 +1,9 @@
 # KOEL Voice Bot — High-Level Design (HLD)
 
+> **⚠️ Superseded — see [`HLD_V2.md`](./HLD_V2.md) for the current system.**
+> This document reflects the initial MVP boilerplate and is kept for historical
+> reference only.
+
 > Status: reflects the implemented MVP (backend + demo frontend) as validated against
 > `koel-voice-bot-prd-v1.2.html`. Companion document: [LLD.md](./LLD.md).
 

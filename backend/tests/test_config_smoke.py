@@ -16,6 +16,17 @@ def test_service_settings_build_with_sane_defaults():
     assert isinstance(nlp.groq_enabled, bool)
 
 
+def test_ws_streaming_and_smart_turn_on_by_default():
+    # Both are soak-tested and self-degrade on failure (WS→HTTP fallback,
+    # smart-turn→gate-off without the model/onnxruntime), so on-by-default is
+    # safe; a silent flip back to False would quietly regress latency.
+    from koel.tts.config import TtsSettings
+    from koel.voicebot.config import VoiceBotSettings
+
+    assert TtsSettings().sarvam_tts_ws_enabled is True
+    assert VoiceBotSettings().smart_turn_enabled is True
+
+
 def test_seed_customers_cover_all_use_cases():
     from koel.crm.seed import SEED_CUSTOMERS
 

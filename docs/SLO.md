@@ -60,3 +60,24 @@ Distributed traces (spans) carry `synthesize_latency_ms`, `fallback_used`, and
 | First-audio P99 | ~6132 ms | tail under load (single-process free tier) |
 
 The **300 ms is unreachable from an India client against US inference** (confirmed, not assumed). What IS proven: the pipeline is error-free at the PRD's 10-concurrent target. Closing the latency gap needs in-region GPU inference (which trades against DPDP residency) — an infra decision, not a code fix.
+
+### Expected effect of Sarvam WS streaming + smart-turn (both enabled by default this cycle)
+
+The numbers above were measured with `KOEL_SARVAM_TTS_WS_ENABLED` and
+`KOEL_SMART_TURN_ENABLED` both **off** (their defaults at the time of that
+run). Both are now **on by default**. Expected, not yet re-measured, effect:
+
+- **Sarvam WS streaming TTS** removes the "wait for a full HTTP round-trip per
+  sentence" cost for Hindi/Hinglish turns — audio starts arriving while
+  synthesis is still running rather than after it completes. This should
+  primarily improve **first-audio latency on hi/hinglish turns**, which
+  previously paid the full sentence-synthesis time before any audio played.
+- **Smart-turn v3.2** does not reduce latency — if anything it can *add* up to
+  `smart_turn_hold_ms` (1500ms) in the specific case where the model judges an
+  utterance mid-thought. Its purpose is conversation *quality* (not
+  interrupting a speaker who paused) at a bounded latency cost, not a speed
+  optimization.
+- **Action item**: re-run `scripts/loadtest.py` against the current deploy and
+  update the table above with fresh numbers — this has not been done since the
+  defaults changed. See `FUTURE_PROCEEDINGS.md` for the broader latency
+  roadmap (Part A) that builds on this baseline.

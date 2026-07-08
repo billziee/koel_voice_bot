@@ -1,24 +1,41 @@
-# KOEL — Backend (Phase 0 boilerplate + core services)
+# KOEL — Backend
 
-FastAPI monorepo implementing the KOEL Voice Bot backend per the PRD (v1.2).
-This is the **Phase 0 / Sprint 0** deliverable: boilerplate that meets the §08
-engineering standards plus the core microservices with swappable provider
-interfaces.
+FastAPI monorepo implementing the KOEL Voice Bot backend. See
+[`../docs/PRD_V2.md`](../docs/PRD_V2.md) for the current conformance status
+against the original PRD (v1.2), and [`../docs/LLD_V2.md`](../docs/LLD_V2.md)
+for the full code-level design. This file is a quick orientation + run guide.
 
 ## Services
 
 | Service        | Module                  | Port | Role |
 |----------------|-------------------------|------|------|
-| VoiceBot_svc   | `koel.voicebot.main`    | 8100 | Orchestrator: session lifecycle, STT→NLP→TTS routing, WebSocket, barge-in, filler, recovery |
-| STT_svc        | `koel.stt.main`         | 8101 | Speech-to-text (Whisper interface; stub provider) |
-| NLP_svc        | `koel.nlp.main`         | 8102 | Intent + RAG-grounded response + tone tag (stub or live Groq inference) |
-| TTS_svc        | `koel.tts.main`         | 8103 | Tone-aware TTS (Orpheus interface; stub provider) |
+| VoiceBot_svc   | `koel.voicebot.main`    | 8100 | Orchestrator: session lifecycle, STT→NLP→TTS routing, WebSocket, barge-in, filler, smart-turn endpointing, recovery |
+| STT_svc        | `koel.stt.main`         | 8101 | Speech-to-text — **real**: Groq Whisper (language-pinned) + Sarvam; stub for offline/CI |
+| NLP_svc        | `koel.nlp.main`         | 8102 | Intent + RAG-grounded response + tone tag — **real**: Groq, language-routed (8B for English, 70B for Hindi/Hinglish); stub for offline/CI |
+| TTS_svc        | `koel.tts.main`         | 8103 | Tone-aware TTS — **real, 3 engines**: Groq Orpheus (English), NVIDIA Magpie (Hindi/Devanagari), Sarvam Bulbul (Hindi+Hinglish, WebSocket streaming); stub for offline/CI |
 | Dummy CRM      | `koel.crm.main`         | 8104 | Synthetic customer records behind the production CRM contract |
 
-The three AI services and the CRM ship with **runnable stub providers** so the
-entire pipeline works locally without GPUs or AWS. Real Whisper/Bedrock/Orpheus
-endpoints drop in behind the same provider interface — no orchestrator changes
-(PRD §12 vendor-lock-in mitigation).
+All four services ship with **deterministic stub providers** (used
+automatically when no API key is configured, and in tests/CI), so the entire
+pipeline runs locally without any external accounts. With keys configured, the
+real providers above are what actually runs — see the flags table below.
+Provider selection is a config-only switch; no orchestrator changes are needed
+to add, remove, or swap a vendor (proven in practice: Sarvam was added as a
+second real STT+TTS vendor after Groq with zero orchestrator changes).
+
+## Key feature flags (`KOEL_` env)
+
+| Flag | Default | Effect |
+|---|---|---|
+| `SARVAM_TTS_WS_ENABLED` | `true` | WebSocket streaming TTS for Hindi/Hinglish (Sarvam); auto-falls-back to HTTP on any failure |
+| `SMART_TURN_ENABLED` | `true` | Semantic end-of-turn gate (ONNX); self-disables if the model/onnxruntime is unavailable |
+| `STREAM_TTS` | `true` | Sentence-streaming TTS — first sentence plays before the rest of the reply is generated |
+| `ENFORCE_CALLING_HOURS` | `false` | RBI fair-practice calling window, evaluated in `CALLING_HOURS_TZ` (default `Asia/Kolkata`) |
+| `ESCALATE_ON_UNSUPPORTED_LANGUAGE` | `true` | Graceful fallback + human escalation for a genuinely unsupported language |
+| `TELEPHONY_MODE` | `false` | Transcode synthesized audio to 8kHz µ-law for a PSTN leg (no carrier bridge consumes this yet) |
+| `KEEPALIVE_URL` | unset | Self-ping target to prevent free-tier idle spin-down (see `docs/DEPLOY.md`) |
+
+See [`LLD_V2.md`](../docs/LLD_V2.md) §9 for the full configuration reference.
 
 ## Engineering standards baked in (PRD §08)
 
@@ -105,11 +122,15 @@ dev-server origin can call the API.
 
 ## Tests
 
-Pure-logic tests (no DB/Redis needed) cover the resilience engines, JWT,
-prosody, PII masking, and the service-principal authZ guard:
+264 tests (ruff-clean) cover the resilience engines, JWT, prosody, PII masking,
+the service-principal authZ guard, every real provider's request shape and
+fallback-on-failure behavior, language pinning + script correctness, the
+smart-turn gate (including graceful self-disable without the model file), and
+config-default smoke tests:
 
 ```bash
-pytest tests/
+pytest -q
+ruff check koel tests scripts
 ```
 
 ## Audit hardening (applied)
@@ -133,35 +154,51 @@ An end-to-end audit drove these fixes:
   frames and socket errors are handled; the config panel now persists new bots
   to VB_Svc (`POST /v1/bots`).
 
-## Known MVP limitations (by design)
+## Known limitations (current)
 
-- **AI models are stub providers by default.** STT/NLP/TTS run deterministic
-  stubs (silent PCM, keyword intent, hash embeddings) behind the real provider
-  interfaces; Whisper/Orpheus/Titan drop in with no orchestrator change.
-  **NLP can run live**: set `KOEL_NLP_PROVIDER=groq` + `KOEL_GROQ_API_KEY=...`
-  to generate grounded turns via Groq (falls back to the stub on any error).
-- **Ambient audio layer** (§06) is config-only — not mixed into the stub audio.
-- **OTel cross-service stitching** — each service emits manual per-hop spans and
-  a shared correlation id links logs, but W3C `traceparent` is not yet propagated
-  FE→VB→AI into one trace (FastAPI auto-instrumentation is off; see config note).
-- **Bot config update** — create persists to the backend; in-place *edit* of an
-  existing bot is frontend-state only (no `PATCH /v1/bots/{id}` yet).
+See [`../docs/FUTURE_PROCEEDINGS.md`](../docs/FUTURE_PROCEEDINGS.md) for the
+full, prioritized list. Highlights:
+
+- **Data residency**: inference runs on US-hosted Groq/NVIDIA; only Sarvam
+  (part of the STT/TTS pipeline) is India-hosted. See
+  [`../docs/RESIDENCY.md`](../docs/RESIDENCY.md).
+- **Two provider stubs remain unimplemented seams**: `WhisperSageMakerProvider`
+  and `OrpheusSageMakerProvider` (AWS-residency path). A third,
+  `BedrockTitanEmbedder`, is *selectable* in config but raises at first use
+  rather than at boot — a startup-validation guard for this is the top item in
+  the roadmap.
+- **No first-token NLP streaming or streaming STT yet** — both providers are
+  still request/response, not incrementally streamed to/from the orchestrator
+  (TTS *is* sentence-streamed and, for Sarvam, WebSocket-streamed).
+- **Human escalation ends the call rather than transferring it** — the full
+  handoff payload (transcript + CRM context) is built and sent; there's no
+  agent queue or console to receive it yet.
 
 ## Layout
 
 ```
 koel/
-  common/     shared boilerplate (config, logging, telemetry, auth, errors, app factory)
+  common/     shared boilerplate: config, logging, telemetry, auth, errors, app
+              factory, http (shared client factory), ratelimit, resilience
+              (circuit breaker), text_guard (PII redaction)
   db/         SQLAlchemy models + schema (sessions, calls, transcripts, CRM, pgvector RAG)
-  stt/        STT_svc
-  nlp/        NLP_svc (+ RAG retrieval)
-  tts/        TTS_svc
+  stt/        STT_svc — stub, Groq Whisper, Sarvam, SageMaker seam
+  nlp/        NLP_svc (+ RAG retrieval) — stub, Groq (language-routed); embedders:
+              hash stub, real NVIDIA, Bedrock Titan seam
+  tts/        TTS_svc — stub, Groq Orpheus, NVIDIA Magpie, Sarvam (HTTP+WS),
+              routing/fallback cascade, SageMaker seam
   crm/        Dummy CRM (+ seed data)
   voicebot/   VoiceBot_svc orchestrator
     session/  state, Redis store, lifecycle
-    pipeline/ bargein, filler, silence, orchestrator
-    ws/       protocol, handler
-    api/      auth, bots, sessions, history
-scripts/      bootstrap_db.py
-tests/        pure-logic unit tests
+    pipeline/ orchestrator, bargein, filler, silence, endpointing (smart-turn),
+              localization, transliteration, summarizer, whisper_features
+    ws/       protocol (incl. playback_done), handler
+    api/      auth (+ refresh), bots (+ PATCH), sessions, history, analytics,
+              knowledge (KB admin + file-upload ingestion)
+scripts/      bootstrap_db.py, loadtest.py, fetch_smart_turn_model.sh
+tests/        264 tests
 ```
+
+See [`../docs/FUTURE_PROCEEDINGS.md`](../docs/FUTURE_PROCEEDINGS.md) for what's
+planned next, and [`../docs/HLD_V2.md`](../docs/HLD_V2.md) /
+[`../docs/LLD_V2.md`](../docs/LLD_V2.md) for the full architecture writeup.
