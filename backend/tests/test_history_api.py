@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from koel.db.models import CallLog, CallOutcome, TranscriptTurn
+from koel.voicebot.persistence import persist_call_summary
 from tests.conftest import seed_bot
 
 
@@ -59,3 +60,29 @@ async def test_get_missing_call_is_404(app_client, access_headers, test_db):
     client, _ = app_client
     r = await client.get("/v1/calls/nope", headers=access_headers)
     assert r.status_code == 404
+
+
+async def test_call_summary_persists_and_surfaces_in_detail(app_client, access_headers, test_db):
+    # 5.3: the post-call summarizer output is stored on the call and exposed in
+    # the detail view. persist_call_summary keys on session_id ("sess_call_1").
+    client, _ = app_client
+    await seed_bot(test_db)
+    await _seed_call(test_db)
+    await persist_call_summary("sess_call_1", {
+        "interest_shown": True, "objection": "annual fee",
+        "sentiment": "positive", "next_action": "send WhatsApp link",
+    })
+    r = await client.get("/v1/calls/call_1", headers=access_headers)
+    assert r.status_code == 200
+    assert r.json()["summary"] == {
+        "interest_shown": True, "objection": "annual fee",
+        "sentiment": "positive", "next_action": "send WhatsApp link",
+    }
+
+
+async def test_call_detail_summary_is_null_when_absent(app_client, access_headers, test_db):
+    client, _ = app_client
+    await seed_bot(test_db)
+    await _seed_call(test_db)  # no summary persisted
+    r = await client.get("/v1/calls/call_1", headers=access_headers)
+    assert r.status_code == 200 and r.json()["summary"] is None

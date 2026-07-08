@@ -26,7 +26,7 @@ from koel.common.telemetry import record_first_audio_latency, span
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
-from koel.voicebot.persistence import persist_call
+from koel.voicebot.persistence import persist_call, persist_call_summary
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcripts
 from koel.voicebot.pipeline.orchestrator import Orchestrator
@@ -511,6 +511,18 @@ class CallSession:
         )
         try:
             summary = await summarizer.summarize(state.transcript)
+            # 5.3: also persist the summary on the call so operators see it in the
+            # history API (persist_call_summary self-swallows, so a CallLog update
+            # failure can't stop the CRM annotation below).
+            await persist_call_summary(
+                state.session_id,
+                {
+                    "interest_shown": summary.interest_shown,
+                    "objection": summary.objection,
+                    "sentiment": summary.sentiment,
+                    "next_action": summary.next_action,
+                },
+            )
             await self._clients.add_call_summary(
                 state.customer_id,  # type: ignore[arg-type]  # guarded by caller
                 session_id=state.session_id,
