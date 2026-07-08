@@ -1,38 +1,45 @@
-# Render Blueprint (Tier 1) — deploy KOEL in a US region co-located with Groq/
-# NVIDIA so the STT/NLP/TTS/embedding calls are US-local (~ms) instead of
-# crossing the Pacific per hop (~250ms each). Region `ohio` = us-east, closest to
-# Groq. Only the browser↔backend leg then crosses the ocean.
+# Render Blueprint — the LIVE topology: ONE combined web service running all five
+# FastAPI apps in a single process (koel.combined:app), which fits the free/small
+# tier's 512MB limit. The five-service split (independently scalable) is preserved
+# in render.split.yaml for the Phase-2 scale-out (docs/PRODUCTION_MASTERPLAN.md).
 #
-# FREE-TIER CAVEAT: `plan: free` web services spin down after 15 min idle
-# (~50s cold start) and cap at 512MB RAM — fine to PROVE the co-location latency
-# win on a warm demo, but a cold start drops the first call. For always-on voice
-# traffic use `plan: starter` (no spin-down). Inter-service calls use Render's
-# private network (US-local) regardless of plan.
+# Region `ohio` (us-east) co-locates inference with Groq/NVIDIA (~ms) instead of
+# crossing the Pacific per hop (~250ms); only the browser↔backend leg crosses the
+# ocean. Sarvam (India-hosted) is the exception — see docs/RESIDENCY.md.
+#
+# FREE-TIER CAVEAT: `plan: free` spins down after 15 min idle (~50s cold start)
+# and caps at 512MB RAM. The in-app keep-alive (self-ping) + a GitHub Actions cron
+# offset spin-down; `plan: starter` removes it outright. See docs/DEPLOY.md.
 #
 # Secrets (KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET)
 # are set in the Render dashboard / a synced env group — never committed.
 
 services:
   - type: web
-    name: koel-voicebot
+    name: koel-voicebot          # kept for continuity; serves the whole combined app
     runtime: docker
     region: ohio
-    plan: starter          # free works for a warm demo; starter avoids spin-down
+    plan: starter                # free works for a warm demo; starter avoids spin-down
     dockerfilePath: backend/Dockerfile
     dockerContext: backend
-    healthCheckPath: /health/ready
-    dockerCommand: uvicorn koel.voicebot.main:app --host 0.0.0.0 --port 8100
+    healthCheckPath: /health
+    # One process serves every service (mounted under /stt, /nlp, /tts, /crm and
+    # voicebot at /). It self-migrates + self-seeds on boot (koel/combined.py
+    # _ensure_schema), since the free tier has no pre-deploy hook.
+    dockerCommand: uvicorn koel.combined:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: KOEL_ENVIRONMENT
         value: production
+      # Combined process: the fan-out reaches the other apps in-process over
+      # localhost at their mount prefixes (koel/combined.py).
       - key: KOEL_STT_SVC_URL
-        value: http://koel-stt:8101
+        value: http://localhost:$PORT/stt
       - key: KOEL_NLP_SVC_URL
-        value: http://koel-nlp:8102
+        value: http://localhost:$PORT/nlp
       - key: KOEL_TTS_SVC_URL
-        value: http://koel-tts:8103
+        value: http://localhost:$PORT/tts
       - key: KOEL_CRM_SVC_URL
-        value: http://koel-crm:8104
+        value: http://localhost:$PORT/crm
       - key: KOEL_STREAM_TTS
         value: "true"
       - key: KOEL_SARVAM_TTS_WS_ENABLED
@@ -45,12 +52,6 @@ services:
       - key: KOEL_REDIS_URL
         fromService: { name: koel-redis, type: keyvalue, property: connectionString }
 
-  # Internal AI/CRM services — same region, reached over the private network.
-  - { type: pserv, name: koel-stt, runtime: docker, region: ohio, plan: starter, dockerfilePath: backend/Dockerfile, dockerContext: backend, dockerCommand: "uvicorn koel.stt.main:app --host 0.0.0.0 --port 8101", envVars: [{ fromGroup: koel-secrets }] }
-  - { type: pserv, name: koel-nlp, runtime: docker, region: ohio, plan: starter, dockerfilePath: backend/Dockerfile, dockerContext: backend, dockerCommand: "uvicorn koel.nlp.main:app --host 0.0.0.0 --port 8102", envVars: [{ fromGroup: koel-secrets }] }
-  - { type: pserv, name: koel-tts, runtime: docker, region: ohio, plan: starter, dockerfilePath: backend/Dockerfile, dockerContext: backend, dockerCommand: "uvicorn koel.tts.main:app --host 0.0.0.0 --port 8103", envVars: [{ fromGroup: koel-secrets }] }
-  - { type: pserv, name: koel-crm, runtime: docker, region: ohio, plan: starter, dockerfilePath: backend/Dockerfile, dockerContext: backend, dockerCommand: "uvicorn koel.crm.main:app --host 0.0.0.0 --port 8104", envVars: [{ fromGroup: koel-secrets }] }
-
   - type: keyvalue        # managed Redis (session store)
     name: koel-redis
     region: ohio
@@ -58,6 +59,6 @@ services:
     ipAllowList: []       # private only
 
 databases:
-  - name: koel-postgres   # managed Postgres; enable the `vector` extension + run `alembic upgrade head`
+  - name: koel-postgres   # managed Postgres; the combined app enables `vector` + runs `alembic upgrade head` on boot
     region: ohio
     plan: basic-256mb

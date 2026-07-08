@@ -55,5 +55,7 @@ EXPOSE 8100 8101 8102 8103 8104
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8100/health/live || exit 1
 
-# Default command is the orchestrator; compose overrides port/module per service.
-CMD ["uvicorn", "koel.voicebot.main:app", "--host", "0.0.0.0", "--port", "8100"]
+# Default command is the combined single-process app (all five services mounted
+# in one process — the live topology; see render.yaml + koel/combined.py). Compose
+# overrides the module/port per service to run the split topology locally.
+CMD ["uvicorn", "koel.combined:app", "--host", "0.0.0.0", "--port", "8100"]

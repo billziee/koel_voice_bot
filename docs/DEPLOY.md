@@ -37,11 +37,10 @@ localhost.** After setting it, trigger a fresh deploy so it's re-baked.
 
 The live backend runs `koel.combined:app` — all 5 services (voicebot, stt, nlp,
 tts, crm) in one process, needed to fit the 512MB free-tier memory limit.
-`render.yaml` at repo root still describes a 5-service split topology (each on
-a `starter` plan) that **does not match this live deployment** — reconciling
-that file with reality (or vice versa) is a tracked cleanup item in
-[`FUTURE_PROCEEDINGS.md`](./FUTURE_PROCEEDINGS.md) (**Q-6**). Until then,
-configure the web service by hand:
+`render.yaml` at repo root now describes exactly this combined single-service
+topology (Blueprint deploy applies it directly); the independently-scalable
+5-service split is preserved in `render.split.yaml` for the Phase-2 scale-out.
+To configure the web service by hand instead, use:
 
 | Setting | Value |
 |---|---|
@@ -96,8 +95,9 @@ Two independent keep-alives (use either or both):
    pings `<url>/health` every `KOEL_KEEPALIVE_INTERVAL_SECONDS` (default 300s) —
    inbound traffic that resets the idle timer, with a fast retry after a failed
    ping so one blip can't open a >15-min gap. Keeps a **running** instance warm;
-   can't wake one already spun down (the cron does). The multi-service `render.yaml`
-   path runs `koel.voicebot.main:app` on `starter` (no spin-down), so it skips this.
+   can't wake one already spun down (the cron does). On a `starter` plan (the
+   `render.yaml` default, and the `render.split.yaml` services) there's no
+   spin-down, so this only matters on `free`.
 2. **CI cron** — `.github/workflows/keepalive.yml` pings `/health` every 10 min and
    **also wakes a cold instance**. Scheduled workflows run only from the **default
    branch**, so this must be on `main` to tick; set repo variable `KEEPALIVE_URL`
