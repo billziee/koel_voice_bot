@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 
-from koel.common.http import make_async_client
+from koel.common.http import make_async_client, warm_connection
 from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
 from koel.common.telemetry import record_nlp_usage
@@ -56,6 +56,11 @@ class NlpProvider(ABC):
     async def generate(
         self, ctx: TurnContext, retrieved: list[RetrievedChunk]
     ) -> NlpResponse: ...
+
+    async def warm(self) -> None:
+        """Prime provider connection pools at session start (O-1). No-op by
+        default; providers with a live HTTP client override it."""
+        return None
 
 
 class StubNlpProvider(NlpProvider):
@@ -487,6 +492,9 @@ class GroqNlpProvider(NlpProvider):
                 exc_info=True,
             )
             return await self._fallback.generate(ctx, retrieved)
+
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
 
     async def aclose(self) -> None:
         await self._client.aclose()

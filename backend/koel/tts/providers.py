@@ -16,7 +16,7 @@ import struct
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
-from koel.common.http import make_async_client
+from koel.common.http import make_async_client, warm_connection
 from koel.tts.mixer import mix_into_wav, to_ulaw_8k, wav_sample_rate
 from koel.tts.schemas import (
     CANONICAL_SAMPLE_RATE,
@@ -106,6 +106,11 @@ class TtsProvider(ABC):
 
     @abstractmethod
     def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]: ...
+
+    async def warm(self) -> None:
+        """Prime provider connection pools at session start (O-1). No-op by
+        default; providers with a live HTTP client override it."""
+        return None
 
     async def _stream_by_sentence(
         self, request: SynthesizeRequest
@@ -255,6 +260,9 @@ class GroqOrpheusProvider(TtsProvider):
         yield SynthesisChunk(
             session_id=request.session_id, seq=0, audio_b64=result.audio_b64, is_final=True
         )
+
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -505,6 +513,9 @@ class SarvamTtsProvider(TtsProvider):
         if seq == 0:
             raise ValueError("Sarvam WS returned no audio")
 
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -555,6 +566,11 @@ class RoutingTtsProvider(TtsProvider):
         primary, _ = self._pick(request)
         async for chunk in primary.stream(request):
             yield chunk
+
+    async def warm(self) -> None:
+        # Warm both engines' pools — a call may route to either (default vs Hindi).
+        for p in (self._default, self._hindi):
+            await p.warm()
 
     async def aclose(self) -> None:
         for p in (self._default, self._hindi):

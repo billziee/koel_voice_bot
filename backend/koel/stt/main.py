@@ -63,4 +63,12 @@ async def transcribe(request: TranscribeRequest, _: ServicePrincipal) -> Transcr
         return await _provider.transcribe(request)
 
 
+@router.post("/warmup")
+async def warmup(_: ServicePrincipal) -> dict[str, bool]:
+    """Prime provider connection pools ahead of a session's first turn (O-1).
+    VB_Svc fires this at WS accept; best-effort (warm() never raises)."""
+    await _provider.warm()
+    return {"warmed": True}
+
+
 app.include_router(router)
