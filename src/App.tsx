@@ -9,6 +9,11 @@ import {
   createKnowledgeChunk,
   uploadKnowledgeFile,
   getAllStats,
+  refreshToken,
+  saveToken,
+  loadStoredToken,
+  clearStoredToken,
+  tokenExpiresInMs,
   USE_CASE_CUSTOMER,
   LiveCall,
   KoelApiError,
@@ -496,6 +501,9 @@ export default function KoelApp() {
   // Live backend integration: token + flag. When live, bots/calls hit VB_Svc.
   const [token, setToken] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  // True while we attempt to restore a persisted session on load (Q-2) — avoids
+  // flashing the login screen before the silent refresh resolves.
+  const [restoring, setRestoring] = useState<boolean>(() => !!loadStoredToken());
   const [currentView, setCurrentView] = useState<ViewState>('dashboard');
   const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [configBotId, setConfigBotId] = useState<string | null>(null); // Item 1/30
@@ -596,34 +604,107 @@ export default function KoelApp() {
     setCurrentView('dashboard');
   }, [showToast, live, token, bots]);
 
+  // Fetch live bots + analytics after auth (fresh login or a restored session).
+  // Returns true when real bots loaded; best-effort — the caller owns the toast.
+  const hydrateLiveBots = useCallback(async (tok: string): Promise<boolean> => {
+    try {
+      const backendBots = await apiGetBots(tok);
+      if (backendBots.length) {
+        // Merge real call-log aggregates (AE) into the loaded bots.
+        let stats: BotStats[] = [];
+        try {
+          stats = await getAllStats(tok);
+        } catch {
+          /* stats are best-effort; bots still render with zeroed metrics */
+        }
+        const byId = new Map(stats.map(s => [s.bot_id, s]));
+        setBots(backendBots.map(b => mergeStats(backendBotToBot(b), byId.get(b.id))));
+        return true;
+      }
+    } catch {
+      /* fall through — caller shows the degraded-mode toast */
+    }
+    return false;
+  }, []);
+
   const handleLogin = useCallback(async (opts: { live: boolean; token: string | null }) => {
     setLive(opts.live);
     setToken(opts.token);
     setAuthed(true);
     setCurrentView('dashboard');
     if (opts.live && opts.token) {
-      try {
-        const backendBots = await apiGetBots(opts.token);
-        if (backendBots.length) {
-          // Merge real call-log aggregates (AE) into the loaded bots.
-          let stats: BotStats[] = [];
-          try {
-            stats = await getAllStats(opts.token);
-          } catch {
-            /* stats are best-effort; bots still render with zeroed metrics */
-          }
-          const byId = new Map(stats.map(s => [s.bot_id, s]));
-          setBots(backendBots.map(b => mergeStats(backendBotToBot(b), byId.get(b.id))));
-          showToast('Connected to live VB_Svc — bots + analytics loaded from the backend.');
-        }
-      } catch {
-        showToast('Logged in, but failed to load live bots — showing demo bots.');
-      }
+      saveToken(opts.token); // persist so a reload doesn't log the operator out (Q-2)
+      const ok = await hydrateLiveBots(opts.token);
+      showToast(ok
+        ? 'Connected to live VB_Svc — bots + analytics loaded from the backend.'
+        : 'Logged in, but failed to load live bots — showing demo bots.');
     } else {
       showToast('Backend offline — running in demo simulation mode.');
     }
-  }, [showToast]);
+  }, [showToast, hydrateLiveBots]);
 
+  const handleLogout = useCallback(() => {
+    clearStoredToken();
+    setToken(null);
+    setLive(false);
+    setAuthed(false);
+  }, []);
+
+  // Restore a persisted session on load (Q-2): a still-valid stored token is
+  // swapped for a fresh one via /v1/auth/refresh; an expired/invalid one is
+  // cleared so the operator simply logs in again. Runs once.
+  const restoreAttempted = useRef(false);
+  useEffect(() => {
+    if (restoreAttempted.current) return;
+    restoreAttempted.current = true;
+    const stored = loadStoredToken();
+    if (!stored) {
+      setRestoring(false);
+      return;
+    }
+    (async () => {
+      try {
+        const fresh = await refreshToken(stored);
+        saveToken(fresh);
+        setToken(fresh);
+        setLive(true);
+        setAuthed(true);
+        setCurrentView('dashboard');
+        await hydrateLiveBots(fresh);
+      } catch {
+        clearStoredToken(); // expired/invalid → require a fresh login
+      } finally {
+        setRestoring(false);
+      }
+    })();
+  }, [hydrateLiveBots]);
+
+  // Proactive silent refresh (Q-2): renew the access token at ~80% of its
+  // remaining lifetime so a live session never expires mid-shift. Reschedules on
+  // every token change; a failed refresh is left for the next 401/reload.
+  useEffect(() => {
+    if (!live || !token) return;
+    const ttl = tokenExpiresInMs(token);
+    const delay = ttl && ttl > 0 ? Math.max(ttl * 0.8, 5000) : 600_000;
+    const id = window.setTimeout(async () => {
+      try {
+        const fresh = await refreshToken(token);
+        saveToken(fresh);
+        setToken(fresh);
+      } catch {
+        /* refresh failed — a later call's 401 or a reload forces re-login */
+      }
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [live, token]);
+
+  if (restoring) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: theme.primary, fontFamily: '"DM Sans", sans-serif' }}>
+        <div className="text-sm text-white/80">Restoring session…</div>
+      </div>
+    );
+  }
   if (!authed) {
     return <LoginView onLogin={handleLogin} darkMode={darkMode} theme={theme} />;
   }
@@ -731,7 +812,7 @@ export default function KoelApp() {
             <button onClick={() => setDarkMode(!darkMode)} className="flex items-center gap-2.5 px-3 py-2.5 rounded-md text-sm" style={{ color: theme.ink }}>
               {darkMode ? <Sun size={16} /> : <Moon size={16} />} {darkMode ? 'Light Mode' : 'Dark Mode'}
             </button>
-            <button onClick={() => setAuthed(false)} className="flex items-center gap-2.5 px-3 py-2.5 rounded-md text-sm text-red-600">
+            <button onClick={handleLogout} className="flex items-center gap-2.5 px-3 py-2.5 rounded-md text-sm text-red-600">
               <LogOut size={16} /> Log Out
             </button>
           </div>
