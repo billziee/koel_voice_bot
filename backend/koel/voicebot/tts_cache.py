@@ -1,0 +1,108 @@
+"""In-process TTS clip cache (roadmap O-3).
+
+Scripted flows repeat lines — disclosures, consent asks, reprompts, common
+objection responses — and each otherwise pays full neural synthesis (~300-800ms)
+plus ocean RTT on every turn. This caches the *completed* chunk sequence for a
+synthesized line and replays it locally on a hit.
+
+Safety properties (this is the hot audio path):
+- The key covers every field that changes the produced audio and excludes
+  ``session_id``/``stream`` (delivery-only), so the same line hits across calls.
+- Only whole, fully-streamed clips are stored — a barge-in-truncated partial is
+  never cached (see ServiceClients.stream_synthesis).
+- The cache is in-process, so a deploy/restart clears it; combined with the TTL,
+  a stale clip can never outlive the process or a few hours. Synthesis for a
+  fixed (text, voice, language, prosody) is effectively deterministic, so a
+  replay is the same audio the provider would have returned.
+
+Eviction is LRU, bounded by the total cached audio size (a rough memory cap).
+For a multi-worker deployment this would move to Redis with the same key.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import time
+from collections import OrderedDict
+
+from koel.tts.schemas import SynthesizeRequest
+
+
+def tts_cache_key(request: SynthesizeRequest) -> str:
+    """Stable key over the fields that determine the synthesized audio.
+
+    Excludes ``session_id`` and ``stream`` (they do not change the bytes), so the
+    same spoken line hits regardless of which call or transport produced it.
+    """
+    parts = (
+        request.text,
+        request.language.value,
+        request.tone.value,
+        request.voice_gender,
+        f"{request.speaking_rate:.3f}",
+        "1" if request.ambient else "0",
+        request.ambient_profile or "",
+        f"{request.ambient_gain:.3f}",
+        "1" if request.telephony else "0",
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+class TtsClipCache:
+    """LRU cache of completed synthesis chunk sequences, bounded by audio bytes + TTL."""
+
+    def __init__(self, *, max_bytes: int = 64 * 1024 * 1024, ttl_s: float = 3 * 3600.0) -> None:
+        self._max_bytes = max_bytes
+        self._ttl_s = ttl_s
+        # key -> (stored_at_monotonic, chunks, byte_size)
+        self._entries: OrderedDict[str, tuple[float, list, int]] = OrderedDict()
+        self._bytes = 0
+
+    def _now(self, now: float | None) -> float:
+        return time.monotonic() if now is None else now
+
+    def get(self, key: str, *, now: float | None = None) -> list | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        stored_at, chunks, _size = entry
+        if self._now(now) - stored_at > self._ttl_s:
+            self._drop(key)
+            return None
+        self._entries.move_to_end(key)  # mark most-recently-used
+        return chunks
+
+    def put(self, key: str, chunks: list, *, now: float | None = None) -> None:
+        if not chunks:
+            return  # never cache an empty result
+        size = _chunks_bytes(chunks)
+        if size > self._max_bytes:
+            return  # a single clip bigger than the whole budget — skip it
+        if key in self._entries:
+            self._drop(key)
+        self._entries[key] = (self._now(now), chunks, size)
+        self._bytes += size
+        while self._bytes > self._max_bytes and self._entries:
+            oldest_key = next(iter(self._entries))
+            self._drop(oldest_key)
+
+    def _drop(self, key: str) -> None:
+        entry = self._entries.pop(key, None)
+        if entry is not None:
+            self._bytes -= entry[2]
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._bytes = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+def _chunks_bytes(chunks: list) -> int:
+    # Base64 payload length is a good proxy for the memory a clip holds.
+    return sum(len(getattr(c, "audio_b64", "") or "") for c in chunks)
+
+
+# Process-wide singleton so identical lines hit across concurrent sessions.
+TTS_CLIP_CACHE = TtsClipCache()
