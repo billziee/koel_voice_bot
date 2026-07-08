@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+
 from koel.common.logging import get_logger
 from koel.db.models import CallLog, CallOutcome, TranscriptTurn
 from koel.db.session import session_scope
@@ -79,3 +81,23 @@ async def persist_call(state: SessionState) -> str | None:
     except Exception:  # noqa: BLE001 — persistence failure must not crash the socket
         logger.error("call_persist_failed session_id=%s", state.session_id, exc_info=True)
         return None
+
+
+async def persist_call_summary(session_id: str, summary: dict) -> None:
+    """Merge the post-call LLM summary (interest/objection/sentiment/next_action)
+    into the call's ``metrics`` so operators see it in the history API (roadmap
+    5.3). Runs off the critical path after the row is persisted; best-effort —
+    a failure is logged, never raised.
+    """
+    try:
+        async with session_scope() as db:
+            call = (
+                await db.execute(select(CallLog).where(CallLog.session_id == session_id))
+            ).scalars().first()
+            if call is None:
+                return
+            # SQLAlchemy only tracks a JSON column change on reassignment, so build
+            # a new dict rather than mutating call.metrics in place.
+            call.metrics = {**(call.metrics or {}), "summary": summary}
+    except Exception:  # noqa: BLE001 — best-effort enrichment, never raise
+        logger.warning("call_summary_persist_failed session_id=%s", session_id, exc_info=True)

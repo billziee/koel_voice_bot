@@ -41,8 +41,20 @@ class TurnOut(BaseModel):
     interrupted: bool
 
 
+class CallInsights(BaseModel):
+    """The post-call LLM summary (PRD §06). Persisted on CallLog.metrics by the
+    summarizer at call end (5.3); null when summarization didn't run (no CRM
+    customer, Sarvam disabled, or an empty transcript)."""
+
+    interest_shown: bool
+    objection: str = ""
+    sentiment: str = "neutral"
+    next_action: str = ""
+
+
 class CallDetail(CallSummary):
     transcript: list[TurnOut]
+    summary: CallInsights | None = None
 
 
 @router.get("", response_model=list[CallSummary])
@@ -101,6 +113,10 @@ async def get_call(call_id: str, user: CurrentUser) -> CallDetail:
                 .order_by(TranscriptTurn.turn_index)
             )
         ).scalars().all()
+    # The post-call summary is stored on metrics["summary"] at call end (5.3);
+    # tolerate its absence (older calls) or a malformed blob.
+    raw_summary = (call.metrics or {}).get("summary")
+    insights = CallInsights(**raw_summary) if isinstance(raw_summary, dict) and raw_summary else None
     return CallDetail(
         id=call.id,
         session_id=call.session_id,
@@ -111,6 +127,7 @@ async def get_call(call_id: str, user: CurrentUser) -> CallDetail:
         escalated=call.escalated,
         started_at=call.started_at,
         duration_ms=call.duration_ms,
+        summary=insights,
         transcript=[
             TurnOut(
                 turn_index=t.turn_index,
