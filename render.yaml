@@ -35,7 +35,7 @@ services:
         value: http://koel-crm:8104
       - key: KOEL_STREAM_TTS
         value: "true"
-      - key: KOEL_TTS_SARVAM_TTS_WS_ENABLED
+      - key: KOEL_SARVAM_TTS_WS_ENABLED
         value: "true"
       - key: KOEL_SMART_TURN_ENABLED
         value: "true"

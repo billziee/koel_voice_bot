@@ -1,15 +1,23 @@
 # KOEL — Deploy (Render)
 
-KOEL is **two deployables**: the React **frontend** (static site) and the FastAPI
-**backend** (Docker web service + AI/CRM services). They must be deployed
-separately and pointed at each other. Region: **Ohio (US East)** so the backend
-is co-located with Groq/NVIDIA (US-local inference, not trans-Pacific).
+KOEL is **two deployables**: the React **frontend** (web service) and the FastAPI
+**backend** (Docker web service, running as a single combined process). They
+are deployed separately and pointed at each other. Region: **Ohio (US East)**
+so the backend is co-located with Groq/NVIDIA (US-local inference, not
+trans-Pacific) — Sarvam (India-hosted) is the exception, see
+[`RESIDENCY.md`](./RESIDENCY.md).
 
-> **Current state:** only the frontend is deployed
-> (`koel-voice-bot.onrender.com`), and it was built **without** `VITE_KOEL_API`,
-> so it talks to `localhost:8100` → login fails → the app runs in **offline demo
-> mode** (simulated latency, no real STT/NLP/TTS). Deploy the backend and set
-> `VITE_KOEL_API` to make it a real call.
+> **Current state (live):** both the frontend
+> (`koel-voice-bot.onrender.com`) and backend (`koel-backend-oj5p.onrender.com`)
+> are deployed and wired together — the frontend is built with `VITE_KOEL_API`
+> pointing at the real backend, and login/dashboard/calls/Knowledge Base all
+> reach it live (verified end-to-end). The backend runs `koel.combined:app` —
+> **all 5 services in one Python process**, chosen to fit the 512MB free-tier
+> memory limit — and self-migrates its DB schema on boot (`_ensure_schema()`),
+> since the free tier doesn't support pre-deploy hooks. **Note:** the backend
+> service currently deploys from `main`; the frontend service currently
+> deploys from `feat/groq-nlp-and-prd-hardening`. Merge the feature branch to
+> `main` before relying on `main` alone reflecting the live frontend's code.
 
 ## 1. Frontend (static site) — what you have, plus the one fix
 
@@ -25,40 +33,49 @@ Vite inlines `VITE_KOEL_API` at build time (`src/lib/koel.ts`), and the WebSocke
 base is derived from it (`http→ws`). **Without this var the FE points at
 localhost.** After setting it, trigger a fresh deploy so it's re-baked.
 
-## 2. Backend (the missing half)
+## 2. Backend (single combined process — what's actually deployed)
 
-Deploy the blueprint at repo root — `render.yaml` provisions all of it in Ohio:
-the `koel-voicebot` Docker **web service** (public), the `koel-stt` / `koel-nlp` /
-`koel-tts` / `koel-crm` private services, managed **Postgres** (+pgvector) and
-**Redis**. Or configure the web service by hand:
+The live backend runs `koel.combined:app` — all 5 services (voicebot, stt, nlp,
+tts, crm) in one process, needed to fit the 512MB free-tier memory limit.
+`render.yaml` at repo root still describes a 5-service split topology (each on
+a `starter` plan) that **does not match this live deployment** — reconciling
+that file with reality (or vice versa) is a tracked cleanup item in
+[`FUTURE_PROCEEDINGS.md`](./FUTURE_PROCEEDINGS.md) (**Q-6**). Until then,
+configure the web service by hand:
 
 | Setting | Value |
 |---|---|
 | Type | Web Service · Docker |
 | Dockerfile / context | `backend/Dockerfile` · `backend` |
-| Start command | `uvicorn koel.voicebot.main:app --host 0.0.0.0 --port $PORT` |
-| Health check path | `/health/ready` |
+| Start command | `uvicorn koel.combined:app --host 0.0.0.0 --port $PORT` |
+| Health check path | `/health` |
 | Region | Ohio |
 
 **Backend env (dashboard / synced group — never commit):**
 - `KOEL_ENVIRONMENT=production`
-- `KOEL_GROQ_API_KEY`, `KOEL_NVIDIA_API_KEY` — **rotate the keys shared in chat first**
+- `KOEL_GROQ_API_KEY`, `KOEL_NVIDIA_API_KEY`, `KOEL_SARVAM_API_KEY` — **rotate any keys ever shared outside a secret manager**
 - `KOEL_JWT_SECRET` — a strong secret (prod boot fails on the dev default)
 - `KOEL_CORS_ALLOW_ORIGINS=https://koel-voice-bot.onrender.com` (the FE origin; no `*` in prod)
 - `KOEL_DATABASE_URL` (from the managed Postgres), `KOEL_REDIS_URL` (from Redis — use `rediss://`)
 - `KOEL_NLP_PROVIDER=groq`, `KOEL_STT_PROVIDER=groq`, `KOEL_TTS_PROVIDER=groq`, `KOEL_NLP_EMBEDDER=nvidia`
-- `KOEL_STREAM_TTS=true` (sentence-streaming), `KOEL_TTS_HINDI_PROVIDER=nvidia`
-- Inter-service URLs (private network): `KOEL_STT_SVC_URL=http://koel-stt:8101`, etc.
+- `KOEL_TTS_HINDI_PROVIDER=nvidia` (Sarvam auto-activates over this when `KOEL_SARVAM_API_KEY` is set — see [`LLD_V2.md`](./LLD_V2.md) §8.3)
+- `KOEL_STREAM_TTS`, `KOEL_SARVAM_TTS_WS_ENABLED`, `KOEL_SMART_TURN_ENABLED` — all default to `true` in code; only set these to override
+- `KOEL_KEEPALIVE_URL` — see §4 below
+- Since everything runs in one process, the inter-service URLs point at `localhost`: `KOEL_STT_SVC_URL=http://localhost:$PORT/stt`, and likewise for `NLP_SVC_URL`/`TTS_SVC_URL`/`CRM_SVC_URL` under `/nlp`, `/tts`, `/crm`.
 
-**One-time DB setup:** enable pgvector + apply migrations —
-`alembic upgrade head` then seed with `python -m scripts.bootstrap_db` (a Render
-Pre-Deploy command or One-Off Job).
+**DB setup:** the combined app **self-migrates and self-seeds on boot**
+(`_ensure_schema()` in `koel/combined.py`) — it runs `alembic upgrade head` then
+`scripts/bootstrap_db.py` automatically if the schema is missing or the seed
+data is empty, because the free tier doesn't support pre-deploy hooks or
+one-off jobs. No manual migration step is needed for this deployment shape.
 
 ## 3. Branch
 
-Render is building **`main`**, but the latency + hardening work is on
-`feat/groq-nlp-and-prd-hardening` (PR #1). Merge it (or point the service's branch
-at it) before deploying, or you'll ship the pre-optimization build.
+The live backend tracks **`main`**; the live frontend tracks
+`feat/groq-nlp-and-prd-hardening`. Merge the feature branch into `main`
+regularly so both services are building from the same code — the two-branch
+split is a known gap (tracked in `FUTURE_PROCEEDINGS.md`), not the intended
+long-term state.
 
 ## 4. Free-tier caveats (both services)
 
@@ -93,6 +110,7 @@ Two independent keep-alives (use either or both):
 
 ## 5. Verify after deploy
 
-- Backend: `GET /health/ready` returns JSON `{"status":"ok","dependencies":{"postgres":true,"redis":true}}` (not HTML).
-- Frontend: log in with `demo / koel-demo` → it should reach the backend (not fall to demo mode); a call opens `wss://<backend>/ws/calls/…`.
-- Latency: run `backend/scripts/loadtest.py --base https://<backend-url>` for real first-audio / full-turn P95.
+- Backend: `GET /health` returns `{"status":"ok",...}` (not HTML); `GET /health/ready` additionally reports `{"dependencies":{"postgres":true,"redis":true}}`.
+- Logs: confirm `keepalive: self-ping …/health every …s` appears at boot (proves `KOEL_KEEPALIVE_URL` took effect on this deploy — a `PUT` to an env var during an in-flight deploy can miss it; trigger a fresh deploy if the log line is absent).
+- Frontend: log in with `demo / koel-demo` → it should reach the backend live (dashboard stats change between reloads, not canned numbers); a call opens `wss://<backend>/ws/calls/…` and produces real (non-silent) audio.
+- Latency: run `backend/scripts/loadtest.py --sessions 10 --turns 3 --base https://<backend-url>` for a real first-audio P50/P95/P99 — see [`SLO.md`](./SLO.md) for the last measured baseline and why &lt;300ms full-turn isn't the right bar to check it against.

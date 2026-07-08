@@ -29,9 +29,11 @@ class VoiceBotSettings(CommonSettings):
     # Semantic end-of-turn gate (smart-turn v3.2 ONNX; docs/PIPECAT_UPGRADE_PLAN
     # Phase 4). When the utterance audio says the speaker paused mid-thought,
     # hold the transcript up to smart_turn_hold_ms and merge the follow-up
-    # instead of answering half a sentence. Requires the `smart-turn` extra +
-    # scripts/fetch_smart_turn_model.sh; degrades to off if either is missing.
-    smart_turn_enabled: bool = False
+    # instead of answering half a sentence. On by default: requires the
+    # `smart-turn` extra + scripts/fetch_smart_turn_model.sh (both shipped in the
+    # Docker image); self-disables at runtime if the model/onnxruntime is missing
+    # (see pipeline/endpointing.py), so it's safe outside that image too.
+    smart_turn_enabled: bool = True
     smart_turn_model_path: str = "models/smart-turn-v3.2-cpu.onnx"
     smart_turn_threshold: float = 0.5
     smart_turn_hold_ms: int = 1500

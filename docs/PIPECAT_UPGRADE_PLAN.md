@@ -81,7 +81,7 @@ STT calls, better UX in noisy Indian call environments.
 
 | File | Change |
 |------|--------|
-| `backend/koel/tts/config.py` | `sarvam_tts_ws_enabled: bool = False` (env `KOEL_TTS_SARVAM_TTS_WS_ENABLED`) |
+| `backend/koel/tts/config.py` | `sarvam_tts_ws_enabled: bool = False` (env `KOEL_SARVAM_TTS_WS_ENABLED`) |
 | `backend/koel/tts/providers.py` | `SarvamTtsProvider.stream()` gains a WS path: connect, send text, yield audio chunks as they arrive; **any WS error → fall through to the existing `_stream_by_sentence` HTTP path** |
 | `backend/tests/` | new test with a fake WS server: chunks yielded incrementally; WS failure falls back to HTTP |
 

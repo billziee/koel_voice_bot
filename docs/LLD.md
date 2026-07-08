@@ -1,5 +1,9 @@
 # KOEL Voice Bot — Low-Level Design (LLD)
 
+> **⚠️ Superseded — see [`LLD_V2.md`](./LLD_V2.md) for the current system.**
+> This document reflects the initial MVP boilerplate and is kept for historical
+> reference only.
+
 > Code-level design for the implemented MVP. Companion: [HLD.md](./HLD.md).
 > Paths are relative to `backend/` unless noted. Line references are indicative.
 

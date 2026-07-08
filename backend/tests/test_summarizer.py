@@ -12,7 +12,10 @@ from koel.voicebot.session.models import Turn
 
 def _turns() -> list[Turn]:
     return [
-        Turn(index=0, speaker="bot", text="Namaste, interested in a Term Life Plan?", language=Language.hinglish),
+        Turn(
+            index=0, speaker="bot", text="Namaste, interested in a Term Life Plan?",
+            language=Language.hinglish,
+        ),
         Turn(index=1, speaker="customer", text="Yes tell me more", language=Language.hinglish),
     ]
 
@@ -30,7 +33,10 @@ async def test_summarize_parses_plain_json(monkeypatch):
         captured["url"] = url
         captured["headers"] = headers
         captured["json"] = json
-        content = '{"interest_shown": true, "objection": "", "sentiment": "positive", "next_action": "Follow up"}'
+        content = (
+            '{"interest_shown": true, "objection": "", '
+            '"sentiment": "positive", "next_action": "Follow up"}'
+        )
         payload = {"choices": [{"message": {"content": content}}]}
         return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
 
