@@ -68,6 +68,64 @@ export async function login(username: string, password: string): Promise<string>
   return body.access_token as string;
 }
 
+// Silent refresh (Q-2): exchange a still-valid access token for a fresh one via
+// POST /v1/auth/refresh. Throws (KoelApiError) if the token is expired/invalid —
+// the caller then forces re-login. There is no separate refresh token; the
+// short-TTL access token is the credential, so persist + refresh it directly.
+export async function refreshToken(token: string): Promise<string> {
+  const res = await fetch(`${KOEL_API}/v1/auth/refresh`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  const body = await jsonOrThrow(res);
+  return body.access_token as string;
+}
+
+// --- Access-token persistence (Q-2) -----------------------------------------
+// Stored in localStorage so a page reload doesn't log the operator out. Trade-off
+// (documented): localStorage is readable by XSS. The backend issues a short-TTL
+// (15 min) access token and we refresh silently, so the exposure window is bounded;
+// httpOnly cookies would need a backend change (login returns the token in JSON).
+const TOKEN_STORAGE_KEY = 'koel.access_token';
+
+export function saveToken(token: string): void {
+  try {
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  } catch {
+    /* private mode / storage disabled — degrade to in-memory only */
+  }
+}
+
+export function loadStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function clearStoredToken(): void {
+  try {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    /* nothing to clear */
+  }
+}
+
+// Milliseconds until the JWT's `exp`, or null if it can't be decoded. Only the
+// payload is base64-decoded (never signature-verified — that's the server's job);
+// used to schedule a proactive refresh at a fraction of the remaining lifetime.
+export function tokenExpiresInMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof claims.exp === 'number' ? claims.exp * 1000 - Date.now() : null;
+  } catch {
+    return null;
+  }
+}
+
 function authHeaders(token: string): HeadersInit {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
