@@ -991,7 +991,7 @@ function DashboardView({ bots, onLaunch, onBuilder, theme }: DashboardViewProps)
       {/* KPI strip — 4 cards matching design */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-5">
         <KpiCard label="Connected calls · today" value="1,284" meta="8.2%" metaDir="up" theme={theme} />
-        <KpiCard label="Turn latency · P95" value="276" unit="ms" meta="Within <300 ms budget" metaDir="up" theme={theme} />
+        <KpiCard label="First-audio · P95" value="2.3" unit="s" meta="perceived <300ms via filler (see SLO.md)" metaDir="flat" theme={theme} />
         <KpiCard label="Warm leads / 100 calls" value="13.4" meta="1.1" metaDir="up" theme={theme} />
         <KpiCard label="Escalation rate" value="9.7%" meta="100% with full context handoff" metaDir="flat" theme={theme} />
       </div>
@@ -1653,7 +1653,7 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
   // --- core turn engine ---
   const runBotTurn = (chip: ChipDef) => {
     setCallState('processing');
-    logEvent('Final transcript → NLP_svc (Bedrock) · intent classification + RAG');
+    logEvent('Final transcript → NLP_svc (Groq) · intent classification + RAG');
 
     const lat = randLatency(chip.nlpSlow);
 
@@ -2120,7 +2120,7 @@ function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, live = 
               <div className="absolute inset-0 flex flex-col items-center justify-center p-8" style={{ color: theme.inkMuted }}>
                 <PhoneCall size={64} className="mb-6 opacity-20" style={{ color: theme.primary }} />
                 <p className="text-xl font-bold mb-2" style={{ fontFamily: '"Lora", serif', color: theme.ink }}>Sandbox Ready</p>
-                <p className="text-sm text-center max-w-sm mb-6">Click 'Start Call' to establish the authenticated WebSocket session and stream audio through the Whisper → Bedrock → Orpheus pipeline.</p>
+                <p className="text-sm text-center max-w-sm mb-6">Click 'Start Call' to establish the authenticated WebSocket session and stream audio through the Whisper → Groq Llama → Orpheus pipeline.</p>
                 <button onClick={runGuidedDemo} className="px-6 py-2.5 rounded-full font-bold text-sm text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5" style={{ background: `linear-gradient(135deg, ${theme.primary}, ${theme.primaryLight})` }}>
                   ▶ Run Guided Demo
                 </button>
@@ -3034,7 +3034,7 @@ const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
 
 const FLOW_NODES = [
   { type: 'greet', label: 'Greeting', title: 'Personalised opener', detail: 'CRM: name, bank, product, offer' },
-  { type: 'listen', label: 'Listen', title: 'Capture & classify intent', detail: 'STT → Bedrock intent tag' },
+  { type: 'listen', label: 'Listen', title: 'Capture & classify intent', detail: 'STT → Groq intent tag' },
 ];
 
 const FLOW_BRANCHES = [
