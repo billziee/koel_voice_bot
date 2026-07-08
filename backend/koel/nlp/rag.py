@@ -100,9 +100,29 @@ class BedrockTitanEmbedder(Embedder):  # pragma: no cover - production stub
         raise NotImplementedError("Invoke Bedrock Titan Embeddings v2 (ap-south-1) here.")
 
 
+# Embedders that are selectable via config but not yet implemented. Selecting
+# one is a boot-time misconfiguration, not a runtime condition — build_embedder
+# rejects it at startup (Item Zero in docs/FUTURE_PROCEEDINGS.md) so the failure
+# surfaces immediately instead of on the first RAG turn mid-call. When one is
+# implemented (roadmap 6.8 / O-7 Track B), remove it from this set and route to
+# the real provider above.
+_UNIMPLEMENTED_EMBEDDERS = {"bedrock": "BedrockTitanEmbedder"}
+
+
 def build_embedder(settings) -> Embedder:  # noqa: ANN001 — NlpSettings (avoid import cycle)
-    """Select the embedder from config. NVIDIA if enabled + keyed, else stub."""
+    """Select the embedder from config. NVIDIA if enabled + keyed, else stub.
+
+    Raises NotImplementedError at startup if config selects a known-unimplemented
+    provider, so a misconfiguration fails loudly at boot rather than crashing the
+    first real RAG turn.
+    """
     kind = (getattr(settings, "nlp_embedder", "hash") or "hash").lower()
+    if kind in _UNIMPLEMENTED_EMBEDDERS:
+        raise NotImplementedError(
+            f"nlp_embedder={kind!r} selects {_UNIMPLEMENTED_EMBEDDERS[kind]}, which is not "
+            f"implemented yet (see koel/nlp/rag.py). Set KOEL_NLP_EMBEDDER to 'nvidia' "
+            f"(with KOEL_NVIDIA_API_KEY) or 'hash' (deterministic dev/CI stub)."
+        )
     if kind == "nvidia" and settings.nvidia_api_key:
         return NvidiaEmbedder(
             api_key=settings.nvidia_api_key,
@@ -110,8 +130,6 @@ def build_embedder(settings) -> Embedder:  # noqa: ANN001 — NlpSettings (avoid
             base_url=settings.nvidia_embed_base_url,
             timeout_s=settings.nvidia_embed_timeout_s,
         )
-    if kind == "bedrock":
-        return BedrockTitanEmbedder()
     return HashEmbedder()
 
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64  # noqa: F401 — kept parallel with sibling test imports
 from types import SimpleNamespace
 
+import pytest
+
 from koel.db.models import EMBEDDING_DIM
-from koel.nlp.rag import BedrockTitanEmbedder, HashEmbedder, NvidiaEmbedder, build_embedder
+from koel.nlp.rag import HashEmbedder, NvidiaEmbedder, build_embedder
 
 
 def _settings(**over):
@@ -23,12 +25,23 @@ def _settings(**over):
 
 def test_factory_selects_by_config():
     assert isinstance(build_embedder(_settings(nlp_embedder="hash")), HashEmbedder)
-    assert isinstance(build_embedder(_settings(nlp_embedder="bedrock")), BedrockTitanEmbedder)
     assert isinstance(
         build_embedder(_settings(nlp_embedder="nvidia", nvidia_api_key="k")), NvidiaEmbedder
     )
     # nvidia selected but no key → safe fallback to hash.
     assert isinstance(build_embedder(_settings(nlp_embedder="nvidia")), HashEmbedder)
+
+
+def test_factory_rejects_unimplemented_provider_at_startup():
+    # Item Zero (FUTURE_PROCEEDINGS): selecting a provider that isn't implemented
+    # must fail loudly at build time (startup) — not silently construct a stub
+    # whose embed() raises mid-call on the first real user.
+    with pytest.raises(NotImplementedError, match="bedrock"):
+        build_embedder(_settings(nlp_embedder="bedrock"))
+
+    # Case-insensitive: the factory lower-cases the config value.
+    with pytest.raises(NotImplementedError, match="bedrock"):
+        build_embedder(_settings(nlp_embedder="BEDROCK"))
 
 
 async def test_hash_embedder_shape_and_input_type():
