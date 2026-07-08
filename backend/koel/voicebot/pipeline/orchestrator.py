@@ -412,6 +412,9 @@ class Orchestrator:
             rag_index=state.rag_index,
             rag_top_k=state.rag_top_k,
             rag_score_threshold=state.rag_score_threshold,
+            llm_model=state.llm_model,
+            llm_temperature=state.llm_temperature,
+            prompt_preamble=state.prompt_preamble,
         )
         with span("nlp.respond", session_id=state.session_id):
             t0 = time.monotonic()

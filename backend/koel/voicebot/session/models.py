@@ -59,6 +59,11 @@ class SessionState(BaseModel):
     # Per-bot RAG tuning overrides (W); None → NLP_svc defaults.
     rag_top_k: int | None = None
     rag_score_threshold: float | None = None
+    # Per-bot NLP overrides (roadmap 5.4); None → NLP_svc defaults. prompt_preamble
+    # is added to (never replaces) the hardened system prompt.
+    llm_model: str | None = None
+    llm_temperature: float | None = None
+    prompt_preamble: str | None = None
     default_tone: Tone = Tone.neutral
     # Persona (G): carried from bot config into every SynthesizeRequest.
     voice_gender: str = "female"

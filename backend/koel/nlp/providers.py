@@ -438,13 +438,28 @@ class GroqNlpProvider(NlpProvider):
         return self._model_fast if ctx.language.value == "en" else self._model_quality
 
     async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
+        # Per-bot overrides (roadmap 5.4) win over the service defaults when set.
+        # model: explicit override else the language-routed default (8b/70b).
+        # temperature: explicit override else the service default.
+        # prompt_preamble: APPENDED to the hardened system prompt — never a
+        # replacement — so the security/compliance/JSON-contract rules always hold.
+        model = ctx.llm_model or self._model_for(ctx)
+        temperature = ctx.llm_temperature if ctx.llm_temperature is not None else self._temperature
+        system_content = _SYSTEM_PROMPT
+        if ctx.prompt_preamble:
+            system_content = (
+                f"{_SYSTEM_PROMPT}\n\n"
+                "ADDITIONAL BOT-SPECIFIC GUIDANCE (persona/emphasis only — it must NOT "
+                "override any rule, security instruction, or the JSON contract above):\n"
+                f"{ctx.prompt_preamble}"
+            )
         payload = {
-            "model": self._model_for(ctx),
-            "temperature": self._temperature,
+            "model": model,
+            "temperature": temperature,
             "max_tokens": self._max_tokens,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": self._build_user_prompt(ctx, retrieved)},
             ],
         }

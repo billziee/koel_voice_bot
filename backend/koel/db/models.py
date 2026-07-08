@@ -118,6 +118,12 @@ class BotConfig(Base):
     # Per-bot RAG tuning overrides (W). NULL → fall back to the NLP_svc defaults.
     rag_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rag_score_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-bot NLP overrides (roadmap 5.4). NULL → fall back to the NLP_svc
+    # defaults. prompt_preamble is ADDED to the hardened system prompt, never a
+    # replacement, so the compliance/disclosure/JSON rules always stay in force.
+    llm_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    llm_temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prompt_preamble: Mapped[str | None] = mapped_column(Text, nullable=True)
     default_tone: Mapped[str] = mapped_column(String(16), default="neutral")
     ambient_profile: Mapped[str] = mapped_column(String(16), default="callfloor")
     # Free-form config: CRM field mapping, escalation rules, success criteria.

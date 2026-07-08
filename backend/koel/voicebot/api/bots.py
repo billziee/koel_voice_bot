@@ -30,6 +30,11 @@ class BotConfigIn(BaseModel):
     rag_index: str | None = Field(default=None, max_length=64)
     rag_top_k: int | None = None
     rag_score_threshold: float | None = None
+    # Per-bot NLP overrides (5.4). None → NLP_svc defaults. prompt_preamble is
+    # added to (never replaces) the hardened system prompt.
+    llm_model: str | None = Field(default=None, max_length=64)
+    llm_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    prompt_preamble: str | None = Field(default=None, max_length=2000)
     default_tone: str = Field(default="neutral", max_length=16)
     ambient_profile: str = Field(default="callfloor", max_length=16)
     config: dict = Field(default_factory=dict)
@@ -47,6 +52,9 @@ class BotConfigPatch(BaseModel):
     rag_index: str | None = Field(default=None, max_length=64)
     rag_top_k: int | None = None
     rag_score_threshold: float | None = None
+    llm_model: str | None = Field(default=None, max_length=64)
+    llm_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    prompt_preamble: str | None = Field(default=None, max_length=2000)
     default_tone: str | None = Field(default=None, max_length=16)
     ambient_profile: str | None = Field(default=None, max_length=16)
     config: dict | None = None
@@ -62,6 +70,7 @@ class BotConfigOut(BotConfigIn):
 _AUDITED = (
     "name", "language", "voice_gender", "speaking_rate", "greeting_template",
     "rag_enabled", "rag_index", "rag_top_k", "rag_score_threshold",
+    "llm_model", "llm_temperature", "prompt_preamble",
     "default_tone", "ambient_profile", "config", "active",
 )
 
@@ -80,6 +89,9 @@ def _to_out(row: BotConfig) -> BotConfigOut:
         rag_index=row.rag_index,
         rag_top_k=row.rag_top_k,
         rag_score_threshold=row.rag_score_threshold,
+        llm_model=row.llm_model,
+        llm_temperature=row.llm_temperature,
+        prompt_preamble=row.prompt_preamble,
         default_tone=row.default_tone,
         ambient_profile=row.ambient_profile,
         config=row.config or {},
