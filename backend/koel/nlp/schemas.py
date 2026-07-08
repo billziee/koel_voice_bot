@@ -25,6 +25,15 @@ class Intent(str, Enum):
     unknown = "unknown"
 
 
+class Sentiment(str, Enum):
+    """Customer sentiment for the current turn (PRD §06). Drives in-call tone
+    adaptation (roadmap 4.3): a sustained negative trend softens the bot's tone."""
+
+    positive = "positive"
+    neutral = "neutral"
+    negative = "negative"
+
+
 class TurnContext(BaseModel):
     """One customer turn handed to NLP_svc, with the context VB_Svc has gathered."""
 
@@ -65,6 +74,9 @@ class NlpResponse(BaseModel):
     response_text: str
     intent: Intent
     tone: Tone
+    # The CUSTOMER's sentiment this turn (roadmap 4.3). Defaulted so stub/older
+    # responses stay valid; the orchestrator maps a rolling trend → next-turn tone.
+    customer_sentiment: Sentiment = Sentiment.neutral
     escalate: bool = False
     escalation_reason: str | None = None
     end_call: bool = False

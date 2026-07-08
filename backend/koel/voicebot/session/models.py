@@ -79,6 +79,10 @@ class SessionState(BaseModel):
     transcript: list[Turn] = Field(default_factory=list)
     # Current script position so a reconnect re-anchors to the last confirmed turn.
     last_confirmed_turn_index: int = -1
+    # Rolling window of the customer's recent per-turn sentiment (roadmap 4.3),
+    # newest last, capped by the orchestrator. A sustained negative trend softens
+    # the bot's tone on the next turn.
+    recent_sentiments: list[str] = Field(default_factory=list)
 
     # Resilience bookkeeping.
     no_input_strikes: int = 0  # 0 → re-prompt next, 1 → close next (PRD §05)

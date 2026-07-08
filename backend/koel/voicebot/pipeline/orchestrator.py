@@ -28,7 +28,7 @@ from koel.common.telemetry import (
     span,
 )
 from koel.common.text_guard import redact_pii
-from koel.nlp.schemas import Intent, NlpResponse, TurnContext
+from koel.nlp.schemas import Intent, NlpResponse, Sentiment, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.clients import ServiceClients
@@ -62,6 +62,30 @@ def _requested_language(text: str) -> Language | None:
         if pat.search(text):
             return lang
     return None
+
+
+# In-call tone adaptation (roadmap 4.3). Number of trailing customer turns that
+# must ALL read negative before the bot softens to an empathetic tone — two keeps
+# it responsive without overreacting to a single terse reply. The rolling window
+# on SessionState is capped a little wider for observability.
+_NEGATIVE_TONE_WINDOW = 2
+_SENTIMENT_HISTORY_MAX = 5
+
+
+def sentiment_adjusted_tone(recent_sentiments: list[str], llm_tone: Tone) -> Tone:
+    """Soften the bot's tone when the customer's recent sentiment trends negative.
+
+    If the last ``_NEGATIVE_TONE_WINDOW`` customer turns all read negative, force an
+    empathetic tone regardless of what NLP proposed for this turn; otherwise keep
+    the NLP-selected tone. Pure and deterministic, so it unit-tests in isolation.
+    """
+    window = recent_sentiments[-_NEGATIVE_TONE_WINDOW:]
+    if len(window) >= _NEGATIVE_TONE_WINDOW and all(
+        s == Sentiment.negative.value for s in window
+    ):
+        return Tone.empathetic
+    return llm_tone
+
 
 # Graceful unsupported-language message (PRD §06 Graceful Language Fallback).
 _FALLBACK_TEXT = (
@@ -323,6 +347,12 @@ class Orchestrator:
         # --- NLP with filler racing (PRD §05 Latency Masking) ---
         nlp = await self._respond_with_filler(state, send)
 
+        # In-call tone adaptation (roadmap 4.3): fold this turn's customer sentiment
+        # into a rolling window and soften the bot's tone when the trend is negative.
+        state.recent_sentiments.append(nlp.customer_sentiment.value)
+        state.recent_sentiments = state.recent_sentiments[-_SENTIMENT_HISTORY_MAX:]
+        tone = sentiment_adjusted_tone(state.recent_sentiments, nlp.tone)
+
         # --- Apply intent-driven control flow ---
         if nlp.intent == Intent.opt_out:
             # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
@@ -330,7 +360,7 @@ class Orchestrator:
             # the script or wait on a separate end_call signal.
             await self._flag_best_effort(state.customer_id, "opt_out", "customer opt-out")
             await self._send_bot_turn(
-                state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
+                state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
             )
             await self.end_call(state, send, outcome="declined")
             return
@@ -338,7 +368,7 @@ class Orchestrator:
             # Deferral → schedule a callback rather than treat it as a loss.
             await self._flag_best_effort(state.customer_id, "callback", "customer busy")
         await self._send_bot_turn(
-            state, send, text=nlp.response_text, tone=nlp.tone, intent=nlp.intent.value
+            state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
         )
 
         if nlp.escalate:
