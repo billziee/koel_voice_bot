@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 
 import httpx
 
+from koel.common.http import warm_connection
 from koel.common.schemas import Language
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 
@@ -45,6 +46,11 @@ _WHISPER_FORCE: dict[Language, str] = {
 class SttProvider(ABC):
     @abstractmethod
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult: ...
+
+    async def warm(self) -> None:
+        """Prime provider connection pools at session start (O-1). No-op by
+        default; providers with a live HTTP client override it."""
+        return None
 
 
 # A handful of canned utterances keyed by audio length so the demo pipeline
@@ -236,6 +242,9 @@ class GroqWhisperProvider(SttProvider):
             word_confidence=self._confidence(segments),
         )
 
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -325,6 +334,9 @@ class SarvamSttProvider(SttProvider):
             speech_duration_ms=max(120, len(text) * 60),
             word_confidence=0.9,  # Sarvam's REST response has no per-word score
         )
+
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
 
     async def aclose(self) -> None:
         await self._client.aclose()

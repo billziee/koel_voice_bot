@@ -133,6 +133,10 @@ class CallSession:
         offered = [p.strip() for p in self._ws.headers.get("sec-websocket-protocol", "").split(",")]
         subprotocol = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
         await self._ws.accept(subprotocol=subprotocol)
+        # Warm the STT/NLP/TTS provider pools in the background (O-1) so the
+        # caller's first turn skips cold cross-ocean handshakes. Fire-and-forget:
+        # it runs concurrently with the greeting and never blocks the call.
+        warmup = asyncio.create_task(self._clients.warm_up())
         if self._resumed:
             # PRD §05: emit a RECONNECTED span so resume latency is observable.
             with span(
@@ -163,6 +167,7 @@ class CallSession:
             await self._on_disconnect()
         finally:
             heartbeat.cancel()
+            warmup.cancel()  # no-op if it already finished; avoids a dangling task
 
     async def _receive_loop(self) -> None:
         while not self._closed:

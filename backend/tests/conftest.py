@@ -127,6 +127,9 @@ class FakeClients:
     async def transcribe(self, request):  # noqa: ANN001
         raise NotImplementedError
 
+    async def warm_up(self) -> None:  # O-1 session warm-up — no-op in tests
+        pass
+
     async def aclose(self) -> None:
         pass
 

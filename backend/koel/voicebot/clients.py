@@ -6,6 +6,7 @@ id so OTel traces stitch FE → VB_Svc → AI svc into one trace (PRD §08).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 
@@ -33,6 +34,7 @@ _SERVICE_PRINCIPAL = "voicebot_svc"
 # a BaseException, so the provider's own except-Exception fallback never ran).
 _TTS_STREAM_TIMEOUT_S = 40.0  # one provider attempt, no cascade on the stream path
 _TTS_SYNTHESIZE_TIMEOUT_S = 70.0  # primary + fallback cascade, worst case
+_WARMUP_TIMEOUT_S = 6.0  # session warm-up ping (O-1); short — it's best-effort
 
 
 class ServiceClients:
@@ -53,6 +55,31 @@ class ServiceClients:
         # spans stitch into the same distributed trace as this turn (PRD §08).
         inject(headers)
         return headers
+
+    async def warm_up(self) -> None:
+        """Prime the STT/NLP/TTS provider connection pools at session start (O-1)
+        so the caller's first turn skips the cold cross-ocean TCP+TLS+HTTP/2
+        handshake to Groq/Sarvam. Fire-and-forget and fully best-effort: every
+        failure is swallowed, so a warm-up miss only means a slower first turn,
+        never a broken call. The greeting synthesis already warms the TTS path;
+        this closes the STT + NLP holes before the customer speaks.
+        """
+        targets = (
+            self._settings.stt_svc_url,
+            self._settings.nlp_svc_url,
+            self._settings.tts_svc_url,
+        )
+        headers = self._headers()
+
+        async def _warm(base: str) -> None:
+            try:
+                await self._client.post(
+                    f"{base}/v1/warmup", headers=headers, timeout=_WARMUP_TIMEOUT_S
+                )
+            except Exception:  # noqa: BLE001 — warming is best-effort
+                pass
+
+        await asyncio.gather(*(_warm(b) for b in targets))
 
     # --- STT ---
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
