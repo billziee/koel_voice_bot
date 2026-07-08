@@ -21,7 +21,12 @@ COPY alembic.ini ./
 # (koel/voicebot/pipeline/endpointing.py); the model itself is fetched below —
 # it's not on PyPI, so it can't be a pip dependency.
 RUN pip install --upgrade pip && pip install ".[smart-turn]"
-RUN bash scripts/fetch_smart_turn_model.sh models/smart-turn-v3.2-cpu.onnx
+# curl isn't in the slim base image and the fetch script needs it; install it
+# just for this build step (the builder stage is discarded, so it never reaches
+# the runtime image).
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && bash scripts/fetch_smart_turn_model.sh models/smart-turn-v3.2-cpu.onnx
 
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.11-slim AS runtime
