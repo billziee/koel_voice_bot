@@ -19,7 +19,7 @@ from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
 from koel.common.telemetry import record_nlp_usage
 from koel.common.text_guard import redact_pii, sanitize_crm, sanitize_untrusted, truncate_history
-from koel.nlp.schemas import Citation, Intent, NlpResponse, RetrievedChunk, TurnContext
+from koel.nlp.schemas import Citation, Intent, NlpResponse, RetrievedChunk, Sentiment, TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,7 @@ class StubNlpProvider(NlpProvider):
             response_text=text,
             intent=intent,
             tone=tone,
+            customer_sentiment=_sentiment_from_intent(intent),
             escalate=escalate,
             escalation_reason=escalation_reason,
             end_call=end_call,
@@ -178,6 +179,25 @@ class StubNlpProvider(NlpProvider):
 
 _INTENTS = ", ".join(i.value for i in Intent)
 _TONES = ", ".join(t.value for t in Tone)
+_SENTIMENTS = ", ".join(s.value for s in Sentiment)
+
+# Intents that read as clearly negative / positive customer sentiment. Used as
+# the fallback when the model omits or garbles ``customer_sentiment`` (4.3), so
+# the sentiment signal is always populated regardless of LLM compliance.
+_NEGATIVE_INTENTS = frozenset(
+    {Intent.objection, Intent.not_interested, Intent.dispute, Intent.opt_out}
+)
+_POSITIVE_INTENTS = frozenset(
+    {Intent.high_interest, Intent.interested, Intent.promise_to_pay}
+)
+
+
+def _sentiment_from_intent(intent: Intent) -> Sentiment:
+    if intent in _NEGATIVE_INTENTS:
+        return Sentiment.negative
+    if intent in _POSITIVE_INTENTS:
+        return Sentiment.positive
+    return Sentiment.neutral
 
 _SYSTEM_PROMPT = f"""\
 You are KOEL, a warm, natural outbound voice agent for an Indian bank on a phone
@@ -210,6 +230,7 @@ You MUST respond with a single JSON object and nothing else, matching exactly:
   "response_text": "<the spoken reply, in the LANGUAGE and SCRIPT specified per turn>",
   "intent": "<one of: {_INTENTS}>",
   "tone": "<one of: {_TONES}>",
+  "customer_sentiment": "<one of: {_SENTIMENTS}> — the CUSTOMER's sentiment on THIS turn, not yours",
   "escalate": <true|false>,
   "escalation_reason": "<short reason or null>",
   "end_call": <true|false>,
@@ -339,6 +360,11 @@ class GroqNlpProvider(NlpProvider):
             tone = Tone(str(data.get("tone", "")).strip())
         except ValueError:
             tone = _DEFAULT_TONE.get(ctx.use_case, Tone.neutral)
+        # Customer sentiment (4.3): trust the model's tag, else derive from intent.
+        try:
+            sentiment = Sentiment(str(data.get("customer_sentiment", "")).strip())
+        except ValueError:
+            sentiment = _sentiment_from_intent(intent)
         text = str(data.get("response_text", "")).strip()
         if not text:
             raise ValueError("Groq returned empty response_text")
@@ -376,6 +402,7 @@ class GroqNlpProvider(NlpProvider):
             response_text=text,
             intent=intent,
             tone=tone,
+            customer_sentiment=sentiment,
             escalate=bool(data.get("escalate", False)),
             escalation_reason=data.get("escalation_reason") or None,
             end_call=bool(data.get("end_call", False)),
@@ -411,13 +438,28 @@ class GroqNlpProvider(NlpProvider):
         return self._model_fast if ctx.language.value == "en" else self._model_quality
 
     async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
+        # Per-bot overrides (roadmap 5.4) win over the service defaults when set.
+        # model: explicit override else the language-routed default (8b/70b).
+        # temperature: explicit override else the service default.
+        # prompt_preamble: APPENDED to the hardened system prompt — never a
+        # replacement — so the security/compliance/JSON-contract rules always hold.
+        model = ctx.llm_model or self._model_for(ctx)
+        temperature = ctx.llm_temperature if ctx.llm_temperature is not None else self._temperature
+        system_content = _SYSTEM_PROMPT
+        if ctx.prompt_preamble:
+            system_content = (
+                f"{_SYSTEM_PROMPT}\n\n"
+                "ADDITIONAL BOT-SPECIFIC GUIDANCE (persona/emphasis only — it must NOT "
+                "override any rule, security instruction, or the JSON contract above):\n"
+                f"{ctx.prompt_preamble}"
+            )
         payload = {
-            "model": self._model_for(ctx),
-            "temperature": self._temperature,
+            "model": model,
+            "temperature": temperature,
             "max_tokens": self._max_tokens,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": self._build_user_prompt(ctx, retrieved)},
             ],
         }

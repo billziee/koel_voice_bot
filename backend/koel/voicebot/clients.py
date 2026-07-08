@@ -19,6 +19,7 @@ from koel.crm.schemas import CustomerRecord
 from koel.nlp.schemas import NlpResponse, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
+from koel.voicebot.tts_cache import TTS_CLIP_CACHE, tts_cache_key
 
 _SERVICE_PRINCIPAL = "voicebot_svc"
 
@@ -90,8 +91,24 @@ class ServiceClients:
         The orchestrator can stop iterating on TTS_KILL to abort mid-utterance;
         the whole-clip ``synthesize`` path stays the default for engines (Orpheus/
         Magpie) that return a complete clip rather than a token stream.
+
+        Repeated scripted lines are served from an in-process cache (O-3): on a
+        hit we replay the stored chunks locally (no network, ~0ms); on a miss we
+        stream from TTS_svc, accumulate the chunks, and cache the sequence ONLY if
+        the caller drains it fully — a barge-in that stops iteration early leaves
+        the generator closed before the store, so a truncated clip is never cached.
         """
         request = request.model_copy(update={"stream": True})
+        key = tts_cache_key(request)
+        cached = TTS_CLIP_CACHE.get(key)
+        if cached is not None:
+            for chunk in cached:
+                # Stamp the current session id onto the replayed chunk (the cached
+                # copy carries the originating session's id, which is delivery-only).
+                yield chunk.model_copy(update={"session_id": request.session_id})
+            return
+
+        collected: list[SynthesisChunk] = []
         async with self._client.stream(
             "POST",
             f"{self._settings.tts_svc_url}/v1/stream",
@@ -102,7 +119,12 @@ class ServiceClients:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if line.strip():
-                    yield SynthesisChunk.model_validate_json(line)
+                    chunk = SynthesisChunk.model_validate_json(line)
+                    collected.append(chunk)
+                    yield chunk
+        # Reached only when the consumer iterated to completion (no early break /
+        # barge-in) and the stream finished without raising → cache the full clip.
+        TTS_CLIP_CACHE.put(key, collected)
 
     # --- CRM ---
     async def get_customer(self, customer_id: str) -> CustomerRecord:
