@@ -45,8 +45,8 @@ jobs:
         run: mypy koel || true  # advisory until fully annotated
       - name: Migrate
         run: alembic upgrade head
-      - name: Test + coverage gate (>=75%)
-        run: pytest --cov
+      - name: Test + coverage gate (>=85%)
+        run: pytest --cov  # fail_under=85 enforced via [tool.coverage.report] in pyproject.toml
       - name: Dependency audit
         run: pip install pip-audit && pip-audit || true  # advisory
 
@@ -66,8 +66,8 @@ jobs:
         run: npm audit --production || true  # advisory
       - name: Playwright E2E
         run: |
-          npx playwright install --with-deps chromium
-          npm run test:e2e -- --project=chromium
+          npx playwright install --with-deps chromium firefox webkit
+          npm run test:e2e   # all projects (chromium + firefox + webkit) per playwright.config.ts
 
   image:
     name: Docker build + Trivy scan
