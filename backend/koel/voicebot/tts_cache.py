@@ -106,3 +106,11 @@ def _chunks_bytes(chunks: list) -> int:
 
 # Process-wide singleton so identical lines hit across concurrent sessions.
 TTS_CLIP_CACHE = TtsClipCache()
+
+# Companion cache for the non-streaming whole-clip path (ServiceClients.synthesize,
+# used when stream_tts is off and for whole-clip engines). Kept as a SEPARATE
+# instance from TTS_CLIP_CACHE on purpose: the cache key excludes ``stream``, so a
+# chunk sequence and a whole-clip result for the same line collide on one key and
+# must not share storage. The SynthesisResult is stored as a one-item list —
+# _chunks_bytes reads ``.audio_b64``, which SynthesisResult also carries.
+TTS_RESULT_CACHE = TtsClipCache()
