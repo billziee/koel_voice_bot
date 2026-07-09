@@ -30,6 +30,9 @@ dependencies = [
 [project.optional-dependencies]
 # Semantic end-of-turn gate (smart-turn v3.2 ONNX) — see pipeline/endpointing.py.
 smart-turn = ["onnxruntime>=1.20"]
+# Local ONNX CPU embedder (O-4) — see nlp/rag.py FastEmbedEmbedder. Opt-in so the
+# default image stays lean; set KOEL_NLP_EMBEDDER=fastembed + run scripts/reembed_kb.py.
+local-embed = ["fastembed>=0.3"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

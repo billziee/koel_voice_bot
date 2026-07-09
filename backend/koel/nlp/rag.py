@@ -8,6 +8,7 @@ embeddings for production (Groq has no embedding model), or Bedrock Titan.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
@@ -95,6 +96,49 @@ class NvidiaEmbedder(Embedder):
         await self._client.aclose()
 
 
+class FastEmbedEmbedder(Embedder):
+    """Local ONNX CPU embeddings via fastembed (roadmap O-4).
+
+    Runs the embedder in-process instead of a ~250ms cross-ocean round-trip to
+    NVIDIA on every RAG turn (~10-40ms local CPU). BAAI/bge-m3 is 1024-d and
+    multilingual (Hindi/Hinglish), so it matches ``EMBEDDING_DIM`` — no schema
+    migration, only a one-off re-embed of existing KB chunks (query and document
+    vectors must share a model — see ``scripts/reembed_kb.py``). bge-m3 is
+    symmetric, so ``input_type`` doesn't change the vector.
+
+    fastembed is an OPTIONAL dependency (``pip install 'koel[local-embed]'``);
+    it's imported lazily so the default deploy is unaffected. The model is
+    downloaded/loaded once at construction. Degrades to the hash stub on any
+    failure so a bad model load never crashes a turn (RAG is best-effort).
+    """
+
+    def __init__(self, *, model: str) -> None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:  # pragma: no cover - exercised only without the extra
+            raise RuntimeError(
+                "nlp_embedder='fastembed' requires the optional dependency: "
+                "pip install 'koel[local-embed]'"
+            ) from exc
+        self._model = TextEmbedding(model_name=model)
+        self._fallback = HashEmbedder()
+        self._warned = False
+
+    async def embed(self, text: str, *, input_type: str = "query") -> list[float]:
+        try:
+            # fastembed is synchronous + CPU-bound; keep it off the event loop.
+            vecs = await asyncio.to_thread(lambda: list(self._model.embed([text])))
+            vec = [float(x) for x in vecs[0]]
+            if len(vec) != EMBEDDING_DIM:
+                raise ValueError(f"embedding dim {len(vec)} != {EMBEDDING_DIM}")
+            return vec
+        except Exception:  # noqa: BLE001 — RAG is best-effort; degrade to the stub
+            if not self._warned:
+                self._warned = True
+                logger.warning("fastembed_failed; falling back to hash embedder", exc_info=True)
+            return await self._fallback.embed(text, input_type=input_type)
+
+
 class BedrockTitanEmbedder(Embedder):  # pragma: no cover - production stub
     async def embed(self, text: str, *, input_type: str = "query") -> list[float]:
         raise NotImplementedError("Invoke Bedrock Titan Embeddings v2 (ap-south-1) here.")
@@ -123,6 +167,8 @@ def build_embedder(settings) -> Embedder:  # noqa: ANN001 — NlpSettings (avoid
             f"implemented yet (see koel/nlp/rag.py). Set KOEL_NLP_EMBEDDER to 'nvidia' "
             f"(with KOEL_NVIDIA_API_KEY) or 'hash' (deterministic dev/CI stub)."
         )
+    if kind == "fastembed":
+        return FastEmbedEmbedder(model=settings.fastembed_model)
     if kind == "nvidia" and settings.nvidia_api_key:
         return NvidiaEmbedder(
             api_key=settings.nvidia_api_key,
