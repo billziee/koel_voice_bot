@@ -355,8 +355,17 @@ class Orchestrator:
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.processing))
         state.status = CallStatus.processing
 
-        # --- NLP with filler racing (PRD §05 Latency Masking) ---
-        nlp = await self._respond_with_filler(state, send)
+        # --- NLP → bot turn ---
+        # O-2: with NLP first-token streaming on (and sentence-streaming TTS), stream
+        # reply sentences straight into TTS as they generate — the turn is spoken
+        # DURING generation, so first-audio is token-bound not completion-bound.
+        # Otherwise NLP runs to completion (filler racing the first token) and the
+        # turn is spoken by the _send_bot_turn calls below. Batch is the fallback.
+        stream_turn = self._settings.stream_nlp and self._settings.stream_tts
+        if stream_turn:
+            nlp = await self._stream_bot_turn(state, send, self._build_turn_context(state))
+        else:
+            nlp = await self._respond_with_filler(state, send)
 
         # In-call tone adaptation (roadmap 4.3): fold this turn's customer sentiment
         # into a rolling window and soften the bot's tone when the trend is negative.
@@ -371,22 +380,26 @@ class Orchestrator:
         )
 
         # --- Apply intent-driven control flow ---
+        # When the turn was streamed (O-2), response_text is already spoken — apply
+        # the same control flow WITHOUT re-speaking it.
         if nlp.intent == Intent.opt_out:
             # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
             # speak one acknowledgement, and END the call now. Do not continue
             # the script or wait on a separate end_call signal.
             await self._flag_best_effort(state.customer_id, "opt_out", "customer opt-out")
-            await self._send_bot_turn(
-                state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
-            )
+            if not stream_turn:
+                await self._send_bot_turn(
+                    state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
+                )
             await self.end_call(state, send, outcome="declined")
             return
         if nlp.intent == Intent.busy:
             # Deferral → schedule a callback rather than treat it as a loss.
             await self._flag_best_effort(state.customer_id, "callback", "customer busy")
-        await self._send_bot_turn(
-            state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
-        )
+        if not stream_turn:
+            await self._send_bot_turn(
+                state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
+            )
 
         if nlp.escalate:
             await self._escalate(state, send, reason=nlp.escalation_reason or "intent")
@@ -427,9 +440,9 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — best-effort; the turn proceeds regardless
             logger.warning("crm_flag_failed flag=%s customer=%s", flag, customer_id, exc_info=True)
 
-    async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
-        """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
-        ctx = TurnContext(
+    def _build_turn_context(self, state: SessionState) -> TurnContext:
+        """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
+        return TurnContext(
             session_id=state.session_id,
             bot_id=state.bot_id,
             org_id=state.org_id,
@@ -446,6 +459,10 @@ class Orchestrator:
             llm_temperature=state.llm_temperature,
             prompt_preamble=state.prompt_preamble,
         )
+
+    async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
+        """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
+        ctx = self._build_turn_context(state)
         with span("nlp.respond", session_id=state.session_id):
             t0 = time.monotonic()
             nlp_task = asyncio.create_task(self._clients.respond(ctx))
@@ -457,6 +474,123 @@ class Orchestrator:
                 result = await nlp_task
             record_hop_latency("nlp", (time.monotonic() - t0) * 1000)
             return result
+
+    async def _stream_bot_turn(
+        self, state: SessionState, send: Sender, ctx: TurnContext
+    ) -> NlpResponse:
+        """Speak the bot turn WHILE NLP generates it (O-2 first-token streaming).
+
+        Consumes ``clients.respond_stream(ctx)``: each reply sentence is synthesized
+        and streamed to the client the moment it lands, so first-audio is token-bound
+        rather than whole-completion-bound. The terminal frame carries the full
+        ``NlpResponse`` for the caller's control flow. One bot turn, one transcript
+        entry. Sentence-streaming TTS prosody uses the bot's default tone — the
+        sentiment-adjusted tone isn't known until the reply completes (a documented
+        first-cut simplification; batch mode keeps the adjustment). Never drops a
+        turn: a stream failure before any audio degrades to batch ``respond()``.
+        """
+        idx = state.next_turn_index()
+        tone = state.default_tone
+        use_ambient = state.ambient_profile.strip().lower() not in _AMBIENT_OFF
+        await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.bot_speaking))
+
+        spoken: list[str] = []
+        final: NlpResponse | None = None
+        seq = 0
+        first_ms: float | None = None
+
+        with span("nlp.stream_turn", session_id=state.session_id) as turn_span:
+            if state.trace_id is None:
+                state.trace_id = current_trace_id()
+            t0 = time.monotonic()
+
+            async def _speak(sentence: str) -> None:
+                nonlocal seq, first_ms
+                req = SynthesizeRequest(
+                    session_id=state.session_id,
+                    text=sentence,
+                    language=state.language,
+                    tone=tone,
+                    voice_gender=state.voice_gender,
+                    speaking_rate=state.speaking_rate,
+                    ambient=use_ambient,
+                    ambient_profile=state.ambient_profile if use_ambient else None,
+                    telephony=self._settings.telephony_mode,
+                )
+                async for chunk in self._clients.stream_synthesis(req):
+                    if first_ms is None:
+                        first_ms = (time.monotonic() - t0) * 1000
+                        record_hop_latency("tts_first_audio", first_ms)
+                    await send(
+                        ServerMessage.of(
+                            ServerMessageType.audio_chunk,
+                            audio_b64=chunk.audio_b64,
+                            duration_ms=chunk.duration_ms,
+                            index=idx,
+                            seq=seq,
+                            sample_rate=chunk.sample_rate,
+                            audio_format=chunk.audio_format,
+                        )
+                    )
+                    seq += 1
+
+            try:
+                async for frame in self._clients.respond_stream(ctx):
+                    if frame.type == "sentence" and frame.text:
+                        sentence = redact_pii(frame.text)
+                        if sentence:
+                            spoken.append(sentence)
+                            await _speak(sentence)
+                    elif frame.type == "final":
+                        final = frame.response
+            except Exception:  # noqa: BLE001 — never drop a live turn (CancelledError/barge-in still propagates)
+                logger.warning(
+                    "nlp_stream_failed; degrading to batch", extra={"session_id": state.session_id},
+                    exc_info=True,
+                )
+                if not spoken:
+                    final = await self._clients.respond(ctx)
+                    sentence = redact_pii(final.response_text)
+                    if sentence:
+                        spoken.append(sentence)
+                        await _speak(sentence)
+            turn_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
+
+        if final is None:
+            # The provider always emits a terminal frame; reconstruct defensively.
+            final = NlpResponse(
+                session_id=state.session_id,
+                response_text=" ".join(spoken) or "…",
+                intent=Intent.unknown,
+                tone=tone,
+            )
+        elif not spoken and final.response_text:
+            # Degenerate: a final with text but no sentence frames — still speak it.
+            sentence = redact_pii(final.response_text)
+            spoken.append(sentence)
+            await _speak(sentence)
+
+        full_text = " ".join(spoken)
+        turn = Turn(
+            index=idx,
+            speaker="bot",
+            text=full_text,
+            language=state.language,
+            tone=tone,
+            intent=final.intent.value,
+        )
+        state.add_turn(turn)
+        state.last_confirmed_turn_index = turn.index
+        await send(
+            ServerMessage.of(
+                ServerMessageType.transcript,
+                speaker="bot",
+                text=full_text,
+                tone=tone.value,
+                index=turn.index,
+            )
+        )
+        return final
 
     async def _inject_filler(self, state: SessionState, send: Sender) -> None:
         clip = self._filler.next_clip(state.session_id, state.language)
