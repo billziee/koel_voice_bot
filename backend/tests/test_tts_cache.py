@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import httpx
 
-from koel.common.config import CommonSettings
+from koel.common.config import CommonSettings, get_common_settings
 from koel.common.schemas import Language, Tone
 from koel.tts.schemas import Prosody, SynthesisChunk, SynthesisResult, SynthesizeRequest
 from koel.voicebot.clients import ServiceClients
@@ -64,6 +64,23 @@ def test_ttl_expiry_drops_entry_on_access():
     assert cache.get("k", now=50.0) is not None
     assert cache.get("k", now=101.0) is None  # past TTL
     assert len(cache) == 0
+
+
+def test_module_singletons_honour_configured_ttl():
+    # DPDP §11: a cached clip's text can carry a customer name, so retention on the
+    # process-wide singletons must be bounded by the configured (short) TTL — well
+    # under the former 3h window — not left open for hours cross-session.
+    ttl = get_common_settings().tts_cache_ttl_s
+    assert ttl <= 1800  # data-minimisation: at most 30 min, not multi-hour
+
+    for cache in (TTS_CLIP_CACHE, TTS_RESULT_CACHE):
+        cache.clear()
+        assert cache._ttl_s == ttl  # singleton built from the configured TTL
+        cache.put("rahul-ji-clip", [_chunk(0)], now=0.0)
+        assert cache.get("rahul-ji-clip", now=ttl - 1.0) is not None  # inside window
+        assert cache.get("rahul-ji-clip", now=ttl + 1.0) is None  # dropped past TTL
+        assert len(cache) == 0
+        cache.clear()
 
 
 def test_lru_eviction_by_byte_budget():

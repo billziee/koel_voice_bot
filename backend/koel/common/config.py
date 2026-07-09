@@ -88,6 +88,17 @@ class CommonSettings(BaseSettings):
     s3_region: str = "ap-south-1"
     recording_retention_days: int = 30
 
+    # --- TTS clip cache retention (O-3, DPDP §11 data-minimisation) ---
+    # The TTS caches key on the RENDERED spoken line, which can embed a customer's
+    # CRM name (e.g. "Rahul ji, ..."), so a cached clip and its text are derived
+    # personal data. A short TTL bounds how long that PII can sit in process memory
+    # cross-session; a process restart clears it entirely. Kept short by default
+    # (30 min, not hours) so retention stays minimal, trading a little hit-rate on
+    # rarely-repeated lines for a tighter window. ``tts_cache_max_bytes`` is the
+    # rough per-cache memory cap enforced by LRU eviction.
+    tts_cache_ttl_s: int = 1800  # 30 min
+    tts_cache_max_bytes: int = 64 * 1024 * 1024
+
     # --- Inter-service base URLs (the orchestrator fans out to these) ---
     stt_svc_url: str = "http://localhost:8101"
     nlp_svc_url: str = "http://localhost:8102"
