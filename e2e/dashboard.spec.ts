@@ -49,3 +49,25 @@ test('no console errors on initial load', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'KOEL' })).toBeVisible();
   expect(errors, errors.join('\n')).toHaveLength(0);
 });
+
+test('the bot builder walks through every step and deploys', async ({ page }) => {
+  await signIn(page);
+  await expect(page.getByText(/Bot Dashboard|Dashboard/i).first()).toBeVisible({ timeout: 15_000 });
+
+  // BotBuilderView is a React.lazy chunk — wait for its heading after launching.
+  await page.getByRole('button', { name: /New bot/i }).first().click();
+  await expect(page.getByRole('heading', { name: /Build a new bot/i })).toBeVisible({ timeout: 10_000 });
+
+  await page.getByPlaceholder(/HDFC Regalia/).fill('E2E Test Bot');
+
+  // The stepper is ungated: Continue advances step 1→5, then the primary action
+  // becomes Deploy. Walk all four transitions to the review step.
+  for (let i = 0; i < 4; i++) {
+    await page.getByRole('button', { name: /Continue/i }).click();
+  }
+  // On the review step the primary action flips from Continue to Deploy.
+  const deploy = page.getByRole('button', { name: /Deploy bot/i });
+  await expect(deploy).toBeVisible();
+  await deploy.click();
+  await expect(page.getByText(/Bot deployed/i)).toBeVisible({ timeout: 10_000 });
+});
