@@ -8,5 +8,8 @@ DEST="${1:-$(dirname "$0")/../models/smart-turn-v3.2-cpu.onnx}"
 URL="https://raw.githubusercontent.com/pipecat-ai/pipecat/main/src/pipecat/audio/turn/smart_turn/data/smart-turn-v3.2-cpu.onnx"
 mkdir -p "$(dirname "$DEST")"
 echo "Downloading smart-turn-v3.2 → $DEST"
-curl -fsSL "$URL" -o "$DEST"
+# Retry on transient failures. raw.githubusercontent.com rate-limits (HTTP 429)
+# under CI load, which was intermittently failing the Docker build; --retry-all-
+# errors makes curl back off and retry 429/5xx/network errors instead of dying.
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "$URL" -o "$DEST"
 echo "Done: $(du -h "$DEST" | cut -f1)"
