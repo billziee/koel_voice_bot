@@ -97,6 +97,12 @@ class VoiceBotSettings(CommonSettings):
     # bot starts speaking on the first sentence, not the whole clip. Reversible.
     stream_tts: bool = True
 
+    # First-token NLP streaming (O-2): consume NLP_svc /v1/respond/stream and feed
+    # each reply sentence into sentence-streaming TTS as it's generated, instead of
+    # waiting for the whole completion. Requires stream_tts. Off by default — the
+    # orchestrator turn-loop activation is gated on this flag. Reversible.
+    stream_nlp: bool = False
+
     # Sarvam AI: transliteration (derives Hinglish operational copy from its
     # Devanagari source at startup — see pipeline/localization.py) and chat
     # completions (post-call CRM summarizer). Shares KOEL_SARVAM_API_KEY with

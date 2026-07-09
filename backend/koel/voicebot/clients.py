@@ -17,7 +17,7 @@ from koel.common.config import CommonSettings
 from koel.common.http import make_async_client
 from koel.common.logging import get_correlation_id
 from koel.crm.schemas import CustomerRecord
-from koel.nlp.schemas import NlpResponse, TurnContext
+from koel.nlp.schemas import NlpResponse, NlpStreamFrame, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
 from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE, tts_cache_key
@@ -35,6 +35,7 @@ _SERVICE_PRINCIPAL = "voicebot_svc"
 _TTS_STREAM_TIMEOUT_S = 40.0  # one provider attempt, no cascade on the stream path
 _TTS_SYNTHESIZE_TIMEOUT_S = 70.0  # primary + fallback cascade, worst case
 _WARMUP_TIMEOUT_S = 6.0  # session warm-up ping (O-1); short — it's best-effort
+_NLP_STREAM_TIMEOUT_S = 15.0  # first-token NLP stream (O-2): generation ≲1s + margin
 
 
 class ServiceClients:
@@ -100,6 +101,27 @@ class ServiceClients:
         )
         resp.raise_for_status()
         return NlpResponse.model_validate(resp.json())
+
+    async def respond_stream(self, ctx: TurnContext) -> AsyncIterator[NlpStreamFrame]:
+        """Consume NLP_svc /v1/respond/stream (NDJSON) so the orchestrator can feed
+        each reply sentence into sentence-streaming TTS as it's generated (O-2).
+
+        Yields ``sentence`` frames as they arrive, then a terminal ``final`` frame
+        carrying the full ``NlpResponse`` (intent/escalation/state). The batch
+        ``respond()`` stays the fallback for the stub/non-streaming path and when
+        ``stream_nlp`` is off.
+        """
+        async with self._client.stream(
+            "POST",
+            f"{self._settings.nlp_svc_url}/v1/respond/stream",
+            json=ctx.model_dump(mode="json"),
+            headers=self._headers(),
+            timeout=_NLP_STREAM_TIMEOUT_S,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.strip():
+                    yield NlpStreamFrame.model_validate_json(line)
 
     # --- TTS ---
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
