@@ -62,6 +62,10 @@ class CommonSettings(BaseSettings):
 
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
+    # Rate-limiter backend (O-8): "memory" is per-process (fine for a single
+    # worker / dev / tests); "redis" shares the window across workers + instances
+    # so limits don't multiply by worker count. Enable in multi-worker deploys.
+    rate_limit_backend: str = "memory"
 
     # --- PostgreSQL + pgvector ---
     database_url: str = "postgresql+asyncpg://koel:koel@localhost:5432/koel"

@@ -51,6 +51,10 @@ services:
         fromDatabase: { name: koel-postgres, property: connectionString }
       - key: KOEL_REDIS_URL
         fromService: { name: koel-redis, type: keyvalue, property: connectionString }
+      # O-8: share the auth/session rate-limit window across workers + instances
+      # via Redis (in-memory would multiply the limit by process count).
+      - key: KOEL_RATE_LIMIT_BACKEND
+        value: "redis"
 
   - type: keyvalue        # managed Redis (session store)
     name: koel-redis
