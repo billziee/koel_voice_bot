@@ -28,7 +28,7 @@ from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
-_session_limit = rate_limit(max_requests=20, window_s=60)  # M: cap session spam per IP
+_session_limit = rate_limit(max_requests=20, window_s=60, name="session")  # M: cap session spam per IP
 
 # DPDP Act §11 data minimisation: load only the CRM attributes each use case
 # actually needs into the session. Use cases not listed here load all attributes.

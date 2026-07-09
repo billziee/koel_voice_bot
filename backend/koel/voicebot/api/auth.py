@@ -16,9 +16,12 @@ from koel.common.ratelimit import rate_limit
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
-# Per-IP throttles (M): brute-force login and token-minting spam.
-_login_limit = rate_limit(max_requests=8, window_s=60)
-_token_limit = rate_limit(max_requests=30, window_s=60)
+# Per-IP throttles (M): brute-force login and token-minting spam. Distinct names
+# keep each quota in its own Redis namespace. Login is pre-auth and brute-force
+# sensitive, so it fails CLOSED — a Redis outage rejects rather than silently
+# dropping login throttling; token minting is post-auth and stays fail-open.
+_login_limit = rate_limit(max_requests=8, window_s=60, name="login", fail_open=False)
+_token_limit = rate_limit(max_requests=30, window_s=60, name="token")
 
 
 def _hash(password: str) -> bytes:

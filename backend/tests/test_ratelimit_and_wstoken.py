@@ -119,6 +119,42 @@ async def test_redis_limiter_fails_open_when_redis_unavailable():
     assert await rl.check("1.2.3.4") is True  # still allowed — never blocks on error
 
 
+async def test_redis_limiter_namespaces_isolate_per_route_quota():
+    # Bug #2: two routes sharing one Redis must NOT share a counter per IP.
+    # Distinct namespaces keep each route's quota independent for the same client.
+    fake = _FakeRedis()
+    login = RedisRateLimiter(max_requests=1, window_s=60, client=fake, namespace="koel:rl:login:")
+    token = RedisRateLimiter(max_requests=1, window_s=60, client=fake, namespace="koel:rl:token:")
+
+    # Exhaust the login quota for this IP.
+    assert await login.check("1.2.3.4") is True
+    assert await login.check("1.2.3.4") is False  # login now blocked
+
+    # The token route's quota for the SAME IP is untouched (separate bucket).
+    assert await token.check("1.2.3.4") is True
+    assert await token.check("1.2.3.4") is False  # its own independent counter
+
+    # Buckets are physically distinct keys in Redis.
+    assert fake.counts["koel:rl:login:1.2.3.4"] == 2  # 2 hits (1 allowed, 1 rejected)
+    assert fake.counts["koel:rl:token:1.2.3.4"] == 2
+
+
+async def test_redis_limiter_fails_closed_when_configured():
+    # Bug #4: a pre-auth (login) limiter with fail_open=False must REJECT on a
+    # Redis error, so an outage can't silently remove brute-force throttling.
+    closed = RedisRateLimiter(
+        max_requests=1, window_s=60, client=_BrokenRedis(), fail_open=False
+    )
+    assert await closed.check("1.2.3.4") is False
+    assert await closed.check("1.2.3.4") is False  # keeps rejecting while Redis is down
+
+    # A fail_open=True limiter on the same broken client still allows (contrast).
+    open_ = RedisRateLimiter(
+        max_requests=1, window_s=60, client=_BrokenRedis(), fail_open=True
+    )
+    assert await open_.check("1.2.3.4") is True
+
+
 def _ws(headers: dict[str, str], query: dict[str, str] | None = None):
     return SimpleNamespace(headers=headers, query_params=query or {})
 
