@@ -20,7 +20,7 @@ from koel.crm.schemas import CustomerRecord
 from koel.nlp.schemas import NlpResponse, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
-from koel.voicebot.tts_cache import TTS_CLIP_CACHE, tts_cache_key
+from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE, tts_cache_key
 
 _SERVICE_PRINCIPAL = "voicebot_svc"
 
@@ -103,6 +103,18 @@ class ServiceClients:
 
     # --- TTS ---
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        """Synthesize a whole clip (non-streaming path).
+
+        Repeated scripted lines are served from an in-process cache (O-3), the
+        whole-clip analogue of the stream_synthesis cache: on a hit we return the
+        stored clip (no network, ~0ms) stamped for the current session; on a miss
+        we synthesize and cache the result. session_id is delivery-only and
+        excluded from the key, so the same line hits across calls and sessions.
+        """
+        key = tts_cache_key(request)
+        cached = TTS_RESULT_CACHE.get(key)
+        if cached is not None:
+            return cached[0].model_copy(update={"session_id": request.session_id})
         resp = await self._client.post(
             f"{self._settings.tts_svc_url}/v1/synthesize",
             json=request.model_dump(mode="json"),
@@ -110,7 +122,9 @@ class ServiceClients:
             timeout=_TTS_SYNTHESIZE_TIMEOUT_S,
         )
         resp.raise_for_status()
-        return SynthesisResult.model_validate(resp.json())
+        result = SynthesisResult.model_validate(resp.json())
+        TTS_RESULT_CACHE.put(key, [result])
+        return result
 
     async def stream_synthesis(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
         """Consume TTS_svc /v1/stream (NDJSON chunks) so a turn is cancellable (D).

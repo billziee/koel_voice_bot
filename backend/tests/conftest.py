@@ -31,16 +31,19 @@ from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.filler import FillerCache
 from koel.voicebot.pipeline.orchestrator import Orchestrator
-from koel.voicebot.tts_cache import TTS_CLIP_CACHE
+from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE
 
 
 @pytest.fixture(autouse=True)
 def _clear_tts_cache():
-    """The TTS clip cache (O-3) is a process-wide singleton; clear it around every
-    test so a clip cached by one test can't produce a surprise hit in another."""
+    """The TTS caches (O-3) are process-wide singletons — the streaming chunk cache
+    and the whole-clip synthesize cache; clear both around every test so a clip
+    cached by one test can't produce a surprise hit in another."""
     TTS_CLIP_CACHE.clear()
+    TTS_RESULT_CACHE.clear()
     yield
     TTS_CLIP_CACHE.clear()
+    TTS_RESULT_CACHE.clear()
 
 # Tables we can create on SQLite (excludes KnowledgeChunk — pgvector Vector type).
 _SQLITE_TABLES = [

@@ -1,6 +1,6 @@
-"""TTS response cache (roadmap O-3): key correctness, eviction, and the
+"""TTS response cache (roadmap O-3): key correctness, eviction, the
 stream_synthesis cache/replay path (miss → stream+store, hit → local replay,
-barge-in partial → never cached)."""
+barge-in partial → never cached), and the whole-clip synthesize cache."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ import httpx
 
 from koel.common.config import CommonSettings
 from koel.common.schemas import Language, Tone
-from koel.tts.schemas import SynthesisChunk, SynthesizeRequest
+from koel.tts.schemas import Prosody, SynthesisChunk, SynthesisResult, SynthesizeRequest
 from koel.voicebot.clients import ServiceClients
-from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TtsClipCache, tts_cache_key
+from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE, TtsClipCache, tts_cache_key
 
 
 def _req(**over) -> SynthesizeRequest:
@@ -128,3 +128,50 @@ async def test_barge_in_partial_stream_is_not_cached():
     _ = [ch async for ch in c.stream_synthesis(req)]
     assert calls["n"] == 2
     await c.aclose()
+
+
+# --- synthesize (whole-clip) integration -------------------------------------
+
+def _result_handler(calls: dict, audio: str = "RESULT"):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] = calls.get("n", 0) + 1
+        result = SynthesisResult(
+            session_id="orig", audio_b64=audio, duration_ms=120, prosody=Prosody()
+        )
+        return httpx.Response(200, json=result.model_dump(mode="json"))
+
+    return handler
+
+
+async def test_synthesize_miss_then_identical_line_hits_cache():
+    TTS_RESULT_CACHE.clear()
+    calls: dict = {}
+    c = _clients(_result_handler(calls))
+
+    first = await c.synthesize(_req(session_id="s1", text="whole-clip disclosure"))
+    assert calls["n"] == 1 and first.audio_b64 == "RESULT"  # miss → one network call
+
+    # Same spoken line, DIFFERENT session → served from cache, no second call.
+    second = await c.synthesize(_req(session_id="s2", text="whole-clip disclosure"))
+    assert calls["n"] == 1  # still 1 → cache hit
+    assert second.audio_b64 == "RESULT"
+    assert second.session_id == "s2"  # replay stamped to the requesting session
+    await c.aclose()
+
+
+async def test_synthesize_and_stream_caches_do_not_collide():
+    # The key excludes ``stream``, so a whole-clip result and a chunk sequence for
+    # the same line share a key — they must live in separate caches. Priming one
+    # path must NOT satisfy the other.
+    TTS_RESULT_CACHE.clear()
+    TTS_CLIP_CACHE.clear()
+    rcalls: dict = {}
+    cr = _clients(_result_handler(rcalls))
+    await cr.synthesize(_req(text="shared line"))
+    await cr.aclose()
+
+    scalls: dict = {}
+    cs = _clients(_two_chunk_handler(scalls))
+    _ = [ch async for ch in cs.stream_synthesis(_req(text="shared line"))]
+    assert scalls["n"] == 1  # streaming path not served by the result cache
+    await cs.aclose()
