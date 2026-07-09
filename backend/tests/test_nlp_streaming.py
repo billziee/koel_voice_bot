@@ -65,6 +65,16 @@ def test_malformed_unicode_escape_fails_safe():
     assert s.failed  # caller falls back to the full parse
 
 
+def test_lone_surrogate_escape_fails_safe():
+    # A UTF-16 surrogate half can't be recombined escape-by-escape and is
+    # unencodable; the streamer bails to the full-parse fallback rather than
+    # emit an unencodable lone surrogate (would crash NDJSON serialization).
+    raw = '{"response_text": "oops \\uD83D more."}'
+    emitted, s = _feed_all(raw)
+    assert emitted == []
+    assert s.failed
+
+
 def test_key_absent_emits_nothing_without_failing():
     raw = '{"intent": "x", "tone": "neutral"}'
     emitted, s = _feed_all(raw)
