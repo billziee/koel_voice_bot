@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 
-import { startSession as apiStartSession, LiveCall, KoelApiError } from '../lib/koel';
+import { startSession as apiStartSession, LiveCall, KoelApiError, type LiveCallHandlers } from '../lib/koel';
 import { MicCapture } from '../lib/audio';
 import { formatTime } from '../lib/format';
 import type {
@@ -414,7 +414,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
       setSessionId(result.session_id);
       logEvent(`Session ${result.session_id.slice(0, 8)} created · CRM record loaded · use_case=${result.use_case}`, 'ok');
 
-      const handlers = {
+      const handlers: LiveCallHandlers = {
         onOpen: () => logEvent('WebSocket upgraded — JWT accepted by VB_Svc', 'ok'),
         onCallState: (status) => setCallState(status as CallState),
         onTranscript: (speaker, text, d) =>
