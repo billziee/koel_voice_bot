@@ -484,10 +484,21 @@ class Orchestrator:
         and streamed to the client the moment it lands, so first-audio is token-bound
         rather than whole-completion-bound. The terminal frame carries the full
         ``NlpResponse`` for the caller's control flow. One bot turn, one transcript
-        entry. Sentence-streaming TTS prosody uses the bot's default tone — the
-        sentiment-adjusted tone isn't known until the reply completes (a documented
-        first-cut simplification; batch mode keeps the adjustment). Never drops a
-        turn: a stream failure before any audio degrades to batch ``respond()``.
+        entry. Sentence-streaming TTS *prosody* uses the bot's default tone (the
+        sentiment-adjusted tone isn't known until the reply completes — a documented
+        first-cut simplification; batch mode keeps the adjustment), but the persisted
+        ``Turn``/transcript carry the resolved ``final.tone``/intent so history matches
+        batch mode.
+
+        Fail-safe (never drops or silently mishandles a live turn):
+        - stream error before any audio → batch ``respond()`` speaks the turn;
+        - empty/degenerate stream (no sentences) → batch ``respond()`` (loud, not a
+          silent bot_speaking→listening flip);
+        - stream error AFTER partial audio (lost terminal frame) → reconcile the
+          structured fields via batch ``respond()`` so a dropped opt-out/escalate
+          isn't ignored; if that also fails, escalate to a human;
+        - cancellation (barge-in propagates; server shutdown) → the partial turn is
+          still recorded for the audit trail.
         """
         idx = state.next_turn_index()
         tone = state.default_tone
@@ -499,98 +510,136 @@ class Orchestrator:
         seq = 0
         first_ms: float | None = None
 
-        with span("nlp.stream_turn", session_id=state.session_id) as turn_span:
-            if state.trace_id is None:
-                state.trace_id = current_trace_id()
-            t0 = time.monotonic()
+        recorded = False
+        try:
+            with span("nlp.stream_turn", session_id=state.session_id) as turn_span:
+                if state.trace_id is None:
+                    state.trace_id = current_trace_id()
+                t0 = time.monotonic()
 
-            async def _speak(sentence: str) -> None:
-                nonlocal seq, first_ms
-                req = SynthesizeRequest(
-                    session_id=state.session_id,
-                    text=sentence,
-                    language=state.language,
-                    tone=tone,
-                    voice_gender=state.voice_gender,
-                    speaking_rate=state.speaking_rate,
-                    ambient=use_ambient,
-                    ambient_profile=state.ambient_profile if use_ambient else None,
-                    telephony=self._settings.telephony_mode,
-                )
-                async for chunk in self._clients.stream_synthesis(req):
-                    if first_ms is None:
-                        first_ms = (time.monotonic() - t0) * 1000
-                        record_hop_latency("tts_first_audio", first_ms)
-                    await send(
-                        ServerMessage.of(
-                            ServerMessageType.audio_chunk,
-                            audio_b64=chunk.audio_b64,
-                            duration_ms=chunk.duration_ms,
-                            index=idx,
-                            seq=seq,
-                            sample_rate=chunk.sample_rate,
-                            audio_format=chunk.audio_format,
-                        )
+                async def _speak(sentence: str) -> None:
+                    nonlocal seq, first_ms
+                    req = SynthesizeRequest(
+                        session_id=state.session_id,
+                        text=sentence,
+                        language=state.language,
+                        tone=tone,
+                        voice_gender=state.voice_gender,
+                        speaking_rate=state.speaking_rate,
+                        ambient=use_ambient,
+                        ambient_profile=state.ambient_profile if use_ambient else None,
+                        telephony=self._settings.telephony_mode,
                     )
-                    seq += 1
+                    async for chunk in self._clients.stream_synthesis(req):
+                        if first_ms is None:
+                            first_ms = (time.monotonic() - t0) * 1000
+                            record_hop_latency("tts_first_audio", first_ms)
+                        await send(
+                            ServerMessage.of(
+                                ServerMessageType.audio_chunk,
+                                audio_b64=chunk.audio_b64,
+                                duration_ms=chunk.duration_ms,
+                                index=idx,
+                                seq=seq,
+                                sample_rate=chunk.sample_rate,
+                                audio_format=chunk.audio_format,
+                            )
+                        )
+                        seq += 1
 
-            try:
-                async for frame in self._clients.respond_stream(ctx):
-                    if frame.type == "sentence" and frame.text:
-                        sentence = redact_pii(frame.text)
+                try:
+                    async for frame in self._clients.respond_stream(ctx):
+                        if frame.type == "sentence" and frame.text:
+                            sentence = redact_pii(frame.text)
+                            if sentence:
+                                spoken.append(sentence)
+                                await _speak(sentence)
+                        elif frame.type == "final":
+                            final = frame.response
+                except Exception:  # noqa: BLE001 — never drop a live turn (CancelledError/barge-in still propagates)
+                    logger.warning(
+                        "nlp_stream_failed; degrading to batch", extra={"session_id": state.session_id},
+                        exc_info=True,
+                    )
+                    if not spoken:
+                        final = await self._clients.respond(ctx)
+                        sentence = redact_pii(final.response_text)
                         if sentence:
                             spoken.append(sentence)
                             await _speak(sentence)
-                    elif frame.type == "final":
-                        final = frame.response
-            except Exception:  # noqa: BLE001 — never drop a live turn (CancelledError/barge-in still propagates)
-                logger.warning(
-                    "nlp_stream_failed; degrading to batch", extra={"session_id": state.session_id},
-                    exc_info=True,
-                )
-                if not spoken:
+                turn_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
+
+            if not spoken:
+                # Empty / degenerate stream produced no audio. Speak a real turn via
+                # batch — loud like batch mode, never a silent bot_speaking→listening
+                # flip. A genuinely broken NLP raises here and is surfaced by the
+                # receive loop exactly as in batch mode.
+                if final is None or not final.response_text.strip():
                     final = await self._clients.respond(ctx)
-                    sentence = redact_pii(final.response_text)
-                    if sentence:
-                        spoken.append(sentence)
-                        await _speak(sentence)
-            turn_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
+                sentence = redact_pii(final.response_text)
+                if sentence:
+                    spoken.append(sentence)
+                    await _speak(sentence)
+            elif final is None:
+                # Spoke ≥1 sentence but lost the terminal frame mid-transport (reset /
+                # read-timeout / truncated body). Recover intent/escalate/end_call so a
+                # dropped opt-out is never silently ignored (TRAI §11); if the reconcile
+                # also fails, hand off to a human rather than continue on unknown intent.
+                try:
+                    final = await self._clients.respond(ctx)
+                except Exception:  # noqa: BLE001 — reconcile failed; escalate, don't continue
+                    logger.warning(
+                        "nlp_stream_final_lost; escalating", extra={"session_id": state.session_id}
+                    )
+                    final = NlpResponse(
+                        session_id=state.session_id,
+                        response_text=" ".join(spoken),
+                        intent=Intent.unknown,
+                        tone=state.default_tone,
+                        escalate=True,
+                        escalation_reason="nlp stream lost before final frame",
+                    )
 
-        if final is None:
-            # The provider always emits a terminal frame; reconstruct defensively.
-            final = NlpResponse(
-                session_id=state.session_id,
-                response_text=" ".join(spoken) or "…",
-                intent=Intent.unknown,
-                tone=tone,
-            )
-        elif not spoken and final.response_text:
-            # Degenerate: a final with text but no sentence frames — still speak it.
-            sentence = redact_pii(final.response_text)
-            spoken.append(sentence)
-            await _speak(sentence)
-
-        full_text = " ".join(spoken)
-        turn = Turn(
-            index=idx,
-            speaker="bot",
-            text=full_text,
-            language=state.language,
-            tone=tone,
-            intent=final.intent.value,
-        )
-        state.add_turn(turn)
-        state.last_confirmed_turn_index = turn.index
-        await send(
-            ServerMessage.of(
-                ServerMessageType.transcript,
+            # Persist the RESOLVED tone/intent from the final frame (not the provisional
+            # streaming-prosody tone) so history/analytics match batch mode. The audio
+            # prosody already streamed on the default tone.
+            turn = Turn(
+                index=idx,
                 speaker="bot",
-                text=full_text,
-                tone=tone.value,
-                index=turn.index,
+                text=" ".join(spoken),
+                language=state.language,
+                tone=final.tone,
+                intent=final.intent.value,
             )
-        )
-        return final
+            state.add_turn(turn)
+            state.last_confirmed_turn_index = turn.index
+            recorded = True
+            await send(
+                ServerMessage.of(
+                    ServerMessageType.transcript,
+                    speaker="bot",
+                    text=turn.text,
+                    tone=final.tone.value,
+                    index=turn.index,
+                )
+            )
+            return final
+        finally:
+            # If cancelled (e.g. server shutdown) after speaking but before recording,
+            # still persist the partial bot turn so the §11 audit trail + reconnect
+            # anchoring don't lose it.
+            if not recorded and spoken:
+                state.add_turn(
+                    Turn(
+                        index=idx,
+                        speaker="bot",
+                        text=" ".join(spoken),
+                        language=state.language,
+                        tone=tone,
+                        intent="unknown",
+                    )
+                )
+                state.last_confirmed_turn_index = idx
 
     async def _inject_filler(self, state: SessionState, send: Sender) -> None:
         clip = self._filler.next_clip(state.session_id, state.language)

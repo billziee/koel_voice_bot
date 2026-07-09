@@ -6,6 +6,10 @@ and a stream failure degrades to the batch path (never drops the turn)."""
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from koel.common.schemas import Language, Tone
 from koel.common.text import split_sentences
 from koel.nlp.schemas import Intent, NlpResponse, NlpStreamFrame
@@ -21,17 +25,35 @@ from koel.voicebot.ws.protocol import ServerMessageType
 class _StreamClients:
     """Yields the reply as sentence frames + a final frame; records batch fallback."""
 
-    def __init__(self, nlp: NlpResponse, *, stream_raises: bool = False) -> None:
+    def __init__(
+        self,
+        nlp: NlpResponse,
+        *,
+        stream_raises: bool = False,
+        raise_after: int | None = None,
+        raise_exc: type[BaseException] = RuntimeError,
+        empty: bool = False,
+    ) -> None:
         self._nlp = nlp
         self._stream_raises = stream_raises
+        self._raise_after = raise_after  # break after N sentence frames, before final
+        self._raise_exc = raise_exc
+        self._empty = empty  # normal completion, zero sentences, empty-text final
         self.batch_respond_calls = 0
 
     async def respond_stream(self, ctx):  # noqa: ANN001
         if self._stream_raises:
-            raise RuntimeError("nlp stream transport error")
+            raise self._raise_exc("nlp stream transport error")
             yield  # pragma: no cover — makes this an async generator
+        if self._empty:
+            yield NlpStreamFrame(type="final", response=self._nlp.model_copy(update={"response_text": ""}))
+            return
+        n = 0
         for sentence in split_sentences(self._nlp.response_text):
             yield NlpStreamFrame(type="sentence", text=sentence)
+            n += 1
+            if self._raise_after is not None and n >= self._raise_after:
+                raise self._raise_exc("stream broke before the final frame")
         yield NlpStreamFrame(type="final", response=self._nlp)
 
     async def respond(self, ctx):  # noqa: ANN001 — batch fallback
@@ -132,3 +154,48 @@ async def test_streaming_turn_degrades_to_batch_on_stream_error():
     assert [m for m in sent if m.type == ServerMessageType.audio_chunk]
     bot_transcripts = _bot_transcripts(sent)
     assert bot_transcripts and bot_transcripts[-1].data["text"] == text
+
+
+async def test_lost_final_after_partial_audio_recovers_intent_from_batch():
+    # Review #1: the stream speaks a sentence then breaks BEFORE the final frame.
+    # The structured fields (here opt_out) must be recovered via batch respond(),
+    # not silently dropped — a lost opt-out would be a TRAI violation.
+    reply = _reply("Bilkul, main aapka number remove kar deti hoon.", intent=Intent.opt_out)
+    clients = _StreamClients(reply, raise_after=1)
+    state = _state()
+    await _drive(clients, state)
+    assert clients.batch_respond_calls == 1  # reconciled the lost final frame
+    assert state.status == CallStatus.ended and state.outcome == "declined"  # opt-out honoured
+
+
+async def test_empty_stream_speaks_via_batch_not_silence():
+    # Review #2: a stream that completes with no sentence frames must not leave a
+    # silent bot_speaking→listening flip — it falls back to batch and speaks.
+    text = "Aapka din shubh ho. Main baad mein call karti hoon."
+    clients = _StreamClients(_reply(text), empty=True)
+    state = _state()
+    sent = await _drive(clients, state)
+    assert clients.batch_respond_calls == 1
+    assert [m for m in sent if m.type == ServerMessageType.audio_chunk]  # audio, not silence
+    assert _bot_transcripts(sent)[-1].data["text"] == text
+
+
+async def test_streamed_turn_persists_resolved_tone_not_default():
+    # Review #3: the persisted transcript carries final.tone (empathetic here),
+    # not the default streaming-prosody tone (credit_card default is cheerful).
+    clients = _StreamClients(_reply("Main samajh sakti hoon.", tone=Tone.empathetic))
+    state = _state()
+    sent = await _drive(clients, state)
+    assert _bot_transcripts(sent)[-1].data["tone"] == Tone.empathetic.value
+
+
+async def test_cancellation_mid_stream_still_records_partial_turn():
+    # Review #4: a CancelledError mid-stream (server shutdown) propagates, but the
+    # partial bot turn is still recorded so the audit trail isn't missing it.
+    reply = _reply("Pehli baat ho gayi. Doosri aa rahi.")
+    clients = _StreamClients(reply, raise_after=1, raise_exc=asyncio.CancelledError)
+    state = _state()
+    with pytest.raises(asyncio.CancelledError):
+        await _drive(clients, state)
+    bot_turns = [t for t in state.transcript if t.speaker == "bot"]
+    assert bot_turns and bot_turns[-1].text  # the partial turn was persisted
