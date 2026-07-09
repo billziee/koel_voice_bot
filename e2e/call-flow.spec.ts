@@ -59,13 +59,26 @@ test('launching a bot opens the call view with call controls', async ({ page }) 
 test('guided demo drives the scripted call: greeting bubble + live state', async ({ page }) => {
   await signIn(page);
   await page.getByText('ICICI Pre-Due Collections').first().click();
+
+  // ActiveCallView is a React.lazy chunk — wait for its idle controls to render
+  // before driving the demo (avoids racing the Suspense resolution).
+  const demoButton = page.getByRole('button', { name: /Run Guided Demo/i });
+  await expect(demoButton).toBeVisible({ timeout: 15_000 });
+
   // The idle placeholder's demo button sits under the sticky bottom control bar
-  // at this viewport, so a real mouse click lands on the bar. Dispatch the click
-  // straight to the button to exercise its handler regardless of overlap.
-  await page.getByRole('button', { name: /Run Guided Demo/i }).dispatchEvent('click');
+  // at this viewport, so a real mouse click lands on the bar — dispatch the click
+  // straight to the button to exercise its handler regardless of overlap. On
+  // webkit the first dispatch can land before the lazily-loaded view settles, so
+  // retry until the scripted call actually starts.
+  const greeting = page.getByText(/KOEL BOT/i).first();
+  await expect(async () => {
+    if (await greeting.isVisible().catch(() => false)) return;
+    await demoButton.dispatchEvent('click', {}, { timeout: 2_000 }).catch(() => {});
+    await expect(greeting).toBeVisible({ timeout: 2_500 });
+  }).toPass({ timeout: 30_000 });
 
   // The bot greeting streams into the transcript and the session goes live.
-  await expect(page.getByText(/KOEL BOT/i).first()).toBeVisible({ timeout: 15_000 });
+  await expect(greeting).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText(/main ICICI Bank ki taraf se KOEL/i)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('button', { name: /End Call/i })).toBeVisible({ timeout: 15_000 });
 });
