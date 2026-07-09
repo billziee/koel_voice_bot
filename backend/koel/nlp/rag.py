@@ -14,8 +14,9 @@ import logging
 import math
 from abc import ABC, abstractmethod
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from koel.common.config import get_common_settings
 from koel.common.http import make_async_client
 from koel.db.models import EMBEDDING_DIM, KnowledgeChunk
 from koel.db.session import session_scope
@@ -189,7 +190,19 @@ async def retrieve(
     org_id: str | None = None,
 ) -> list[RetrievedChunk]:
     embedding = await embedder.embed(query, input_type="query")
+    ef_search = get_common_settings().pgvector_hnsw_ef_search
     async with session_scope() as db:
+        # HNSW recall/latency knob (O-10): raise ef_search to trade query latency
+        # for recall. SET LOCAL is transaction-scoped, so it applies only to this
+        # session_scope() transaction and reverts on commit/rollback. No-op at 0
+        # (leave the server default) and best-effort — a failure here must never
+        # break retrieval (RAG is degrade-safe). int() hardens the interpolation
+        # (SET rejects bind params) against a bad config value.
+        if ef_search > 0:
+            try:
+                await db.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
+            except Exception:  # noqa: BLE001 — best-effort; fall back to server default
+                logger.debug("hnsw_ef_search_set_local_failed", exc_info=True)
         # pgvector cosine distance operator (<=>); smaller distance == closer.
         stmt = (
             select(

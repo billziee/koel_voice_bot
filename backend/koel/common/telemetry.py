@@ -38,6 +38,8 @@ _hop_latency = None  # per STT/NLP/TTS hop, ms
 _errors = None  # pipeline errors by hop
 _nlp_tokens = None  # Groq tokens consumed
 _nlp_cost = None  # Groq cost, USD
+_db_pool_in_use = None  # DB connections checked out of the pool (pool pressure)
+_db_pool_held = None  # per-checkout connection hold time (checkout→checkin), ms
 
 
 def configure_telemetry(service_name: str, settings: CommonSettings) -> None:
@@ -87,6 +89,7 @@ def configure_metrics(service_name: str, settings: CommonSettings) -> None:
     """
     global _meter_provider_set
     global _turn_latency, _first_audio_latency, _hop_latency, _errors, _nlp_tokens, _nlp_cost
+    global _db_pool_in_use, _db_pool_held
 
     if settings.otel_enabled and not _meter_provider_set:
         from opentelemetry.sdk.metrics import MeterProvider
@@ -125,6 +128,17 @@ def configure_metrics(service_name: str, settings: CommonSettings) -> None:
     _nlp_cost = meter.create_counter(
         "koel.nlp.cost_usd", unit="USD", description="Estimated Groq spend"
     )
+    # DB connection-pool pressure (O-10): the in-use count sampled at each checkout
+    # and how long each connection stayed checked out. Together they show whether
+    # the pool is a bottleneck at target concurrency before it starts timing out.
+    _db_pool_in_use = meter.create_histogram(
+        "koel.db.pool.in_use", unit="connections",
+        description="DB connections checked out of the pool, sampled at checkout",
+    )
+    _db_pool_held = meter.create_histogram(
+        "koel.db.pool.held", unit="ms",
+        description="How long a pooled DB connection stayed checked out (checkout→checkin)",
+    )
 
 
 def record_turn_latency(ms: float) -> None:
@@ -152,6 +166,16 @@ def record_nlp_usage(tokens: int, cost_usd: float) -> None:
         _nlp_tokens.add(tokens)
     if _nlp_cost is not None:
         _nlp_cost.add(cost_usd)
+
+
+def record_db_pool_in_use(count: int) -> None:
+    if _db_pool_in_use is not None:
+        _db_pool_in_use.record(count)
+
+
+def record_db_pool_held(ms: float) -> None:
+    if _db_pool_held is not None:
+        _db_pool_held.record(ms)
 
 
 def get_tracer() -> Tracer:

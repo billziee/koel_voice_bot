@@ -75,6 +75,13 @@ class CommonSettings(BaseSettings):
     db_max_overflow: int = 5
     db_pool_recycle_s: int = 1800  # recycle before RDS/proxy idle timeout
     db_pool_timeout_s: int = 30
+    # pgvector HNSW query-time recall/latency knob (roadmap O-10). ``hnsw.ef_search``
+    # sizes the candidate list the index walks per query: higher ⇒ better recall,
+    # slower; lower ⇒ faster, may miss neighbours. 0 leaves the Postgres server
+    # default (typically 40) untouched; >0 makes RAG retrieve() issue a transaction-
+    # scoped ``SET LOCAL hnsw.ef_search`` before the nearest-neighbour query, so
+    # recall/latency can be validated at target concurrency without a server restart.
+    pgvector_hnsw_ef_search: int = 0
 
     # --- Call recording + retention (K, PRD §11 audit / 30-day retention) ---
     s3_recording_bucket: str = ""  # empty = recording disabled (dev); set in prod

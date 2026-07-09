@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from koel.common.telemetry import (
+    record_db_pool_held,
+    record_db_pool_in_use,
     record_error,
     record_hop_latency,
     record_nlp_usage,
@@ -33,3 +35,5 @@ def test_metric_helpers_are_safe_before_configure():
     record_hop_latency("nlp", 50.0)
     record_error("tts")
     record_nlp_usage(1000, 0.0007)
+    record_db_pool_in_use(3)  # O-10 pool observability helpers, same no-op guard
+    record_db_pool_held(12.5)
