@@ -41,10 +41,14 @@ class NlpSettings(CommonSettings):
     groq_timeout_s: float = 8.0
 
     # --- RAG embeddings (Groq has NO embedding model) ---
-    # "hash"    → deterministic stub (CI/offline; semantically weak)
-    # "nvidia"  → NVIDIA NIM multilingual embedder (handles Hindi/Hinglish)
-    # "bedrock" → AWS Bedrock Titan v2 in ap-south-1 (in-region; stub for now)
+    # "hash"      → deterministic stub (CI/offline; semantically weak)
+    # "fastembed" → local ONNX CPU embedder (O-4; no US round-trip). Needs the
+    #               'local-embed' extra + a one-off KB re-embed (scripts/reembed_kb.py)
+    # "nvidia"    → NVIDIA NIM multilingual embedder (handles Hindi/Hinglish)
+    # "bedrock"   → AWS Bedrock Titan v2 in ap-south-1 (in-region; stub for now)
     nlp_embedder: str = "hash"
+    # Local embedder model (O-4); bge-m3 is 1024-d multilingual → matches EMBEDDING_DIM.
+    fastembed_model: str = "BAAI/bge-m3"
     nvidia_api_key: str | None = None  # shared KOEL_NVIDIA_API_KEY (also used by Magpie TTS)
     nvidia_embed_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_embed_model: str = "nvidia/nv-embedqa-e5-v5"  # 1024-d, matches EMBEDDING_DIM
