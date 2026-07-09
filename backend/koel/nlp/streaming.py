@@ -73,10 +73,18 @@ class ResponseTextSentenceStreamer:
                     if i + 6 > n:
                         break  # incomplete \uXXXX — wait for more
                     try:
-                        out.append(chr(int(raw[i + 2 : i + 6], 16)))
+                        cp = int(raw[i + 2 : i + 6], 16)
                     except ValueError:
                         self.failed = True
                         return "", False
+                    if 0xD800 <= cp <= 0xDFFF:
+                        # A UTF-16 surrogate half. We decode escape-by-escape and
+                        # can't safely recombine an astral pair, and a lone
+                        # surrogate is unencodable (would crash the NDJSON frame),
+                        # so bail to the full-parse fallback rather than emit it.
+                        self.failed = True
+                        return "", False
+                    out.append(chr(cp))
                     i += 6
                     continue
                 out.append(_ESCAPES.get(e, e))

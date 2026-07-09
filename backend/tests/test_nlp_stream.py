@@ -77,3 +77,28 @@ async def test_stub_generate_stream_default_emits_sentences_then_final():
     assert len(finals) == 1 and finals[0].response is not None
     # The default (non-streaming) path still splits the reply into sentence frames.
     assert sentences == split_sentences(finals[0].response.response_text)
+
+
+async def test_respond_stream_route_always_emits_a_terminal_final(monkeypatch):
+    # Review #6: even if generate_stream raises mid-stream, the /v1/respond/stream
+    # route must still emit a terminal `final` frame (VB_Svc's contract), and mark
+    # it escalate so a degraded turn hands off rather than continuing on unknown.
+    from koel.nlp import main as nlp_main
+    from koel.nlp.schemas import NlpStreamFrame
+
+    class _BoomProvider:
+        async def generate_stream(self, ctx, retrieved):  # noqa: ANN001
+            yield NlpStreamFrame(type="sentence", text="Namaste ji.")
+            raise RuntimeError("groq stream died before final")
+
+    monkeypatch.setattr(nlp_main, "_provider", _BoomProvider())
+    ctx = TurnContext(
+        session_id="s", bot_id="b", use_case="credit_card", language=Language.hinglish,
+        customer_text="haan", rag_enabled=False,  # no RAG → no DB in _retrieve_for
+    )
+    resp = await nlp_main.respond_stream(ctx, None)  # principal unused by the body
+    body = "".join([chunk async for chunk in resp.body_iterator])
+    frames = [NlpStreamFrame.model_validate_json(ln) for ln in body.splitlines() if ln.strip()]
+
+    assert frames[-1].type == "final"  # terminal frame guaranteed despite the raise
+    assert frames[-1].response is not None and frames[-1].response.escalate is True

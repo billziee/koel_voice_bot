@@ -9,11 +9,15 @@ from fastapi.responses import StreamingResponse
 
 from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
+from koel.common.logging import get_logger
+from koel.common.schemas import Tone
 from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
 from koel.nlp.rag import build_embedder, retrieve
-from koel.nlp.schemas import NlpResponse, RetrievedChunk, TurnContext
+from koel.nlp.schemas import Intent, NlpResponse, NlpStreamFrame, RetrievedChunk, TurnContext
+
+logger = get_logger("koel.nlp_svc")
 
 
 @asynccontextmanager
@@ -100,8 +104,31 @@ async def respond_stream(ctx: TurnContext, _: ServicePrincipal) -> StreamingResp
 
     async def _gen():
         with span("nlp.generate_stream", session_id=ctx.session_id):
-            async for frame in _provider.generate_stream(ctx, retrieved):
-                yield frame.model_dump_json() + "\n"
+            emitted_final = False
+            try:
+                async for frame in _provider.generate_stream(ctx, retrieved):
+                    emitted_final = emitted_final or frame.type == "final"
+                    yield frame.model_dump_json() + "\n"
+            except Exception:  # noqa: BLE001 — the consumer's contract needs a terminal frame
+                logger.warning(
+                    "respond_stream_failed", extra={"session_id": ctx.session_id}, exc_info=True
+                )
+            if not emitted_final:
+                # Guarantee a terminal frame so VB_Svc never hangs waiting for one.
+                # Mark it escalate so a genuinely-degraded turn hands off to a human
+                # rather than continuing on an unknown intent (mirrors the orchestrator's
+                # reconcile-failure path; a dropped opt-out must never be silent).
+                yield NlpStreamFrame(
+                    type="final",
+                    response=NlpResponse(
+                        session_id=ctx.session_id,
+                        response_text="",
+                        intent=Intent.unknown,
+                        tone=Tone.neutral,
+                        escalate=True,
+                        escalation_reason="nlp stream degraded — no terminal frame",
+                    ),
+                ).model_dump_json() + "\n"
 
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
