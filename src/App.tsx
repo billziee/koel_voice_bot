@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import {
   getBots as apiGetBots,
   createBot,
@@ -26,11 +26,15 @@ import { getTheme } from './lib/theme';
 import { formatRelativeTime } from './lib/format';
 import { LoginView } from './views/LoginView';
 import { DashboardView } from './views/DashboardView';
-import { HistoryView } from './views/HistoryView';
-import { ConfigView } from './views/ConfigView';
-import { BotBuilderView } from './views/BotBuilderView';
-import { KnowledgeBaseView } from './views/KnowledgeBaseView';
-import { ActiveCallView } from './views/ActiveCallView';
+
+// Login + Dashboard are the entry/landing screens — kept eager so first paint
+// has no loading flash. The rest are code-split (React.lazy): dashboard-only
+// users never download the call view / builder / KB bundles (roadmap Q-1).
+const HistoryView = lazy(() => import('./views/HistoryView').then(m => ({ default: m.HistoryView })));
+const ConfigView = lazy(() => import('./views/ConfigView').then(m => ({ default: m.ConfigView })));
+const BotBuilderView = lazy(() => import('./views/BotBuilderView').then(m => ({ default: m.BotBuilderView })));
+const KnowledgeBaseView = lazy(() => import('./views/KnowledgeBaseView').then(m => ({ default: m.KnowledgeBaseView })));
+const ActiveCallView = lazy(() => import('./views/ActiveCallView').then(m => ({ default: m.ActiveCallView })));
 
 // Shared domain types now live in ./types; getTheme in ./lib/theme (Q-1 decomposition).
 
@@ -509,8 +513,14 @@ export default function KoelApp() {
           </div>
         )}
 
-        {/* Screen content */}
+        {/* Screen content — lazy views resolve inside the Suspense boundary */}
         <main className="flex-1 overflow-y-auto">
+          <Suspense fallback={
+            <div className="flex flex-col items-center justify-center h-[60vh] gap-3" role="status" aria-live="polite">
+              <div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: theme.primary, borderTopColor: 'transparent' }} />
+              <span className="text-[13px] font-medium" style={{ color: theme.inkMuted }}>Loading…</span>
+            </div>
+          }>
           {currentView === 'dashboard' && <DashboardView bots={bots} onLaunch={navigateToCall} onConfig={navigateToConfig} onBuilder={() => setCurrentView('builder')} theme={theme} />}
           {currentView === 'call' && (
             activeBotId ? (
@@ -545,6 +555,7 @@ export default function KoelApp() {
           {currentView === 'history' && <HistoryView calls={completedCalls} onExported={() => showToast('CSV exported for QA workflows.')} theme={theme} darkMode={darkMode} />}
           {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} />}
           {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} token={token} onToast={showToast} />}
+          </Suspense>
         </main>
       </div>
 
