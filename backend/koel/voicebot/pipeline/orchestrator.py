@@ -34,6 +34,7 @@ from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline import localization
+from koel.voicebot.pipeline.cost import estimate_turn_cost_usd
 from koel.voicebot.pipeline.filler import FillerCache, filler_tone_for
 from koel.voicebot.session.models import CallStatus, SessionState, Turn
 from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
@@ -118,6 +119,16 @@ _CONSENT_ASK = localization.register(localization.Localized(
     en="Do you have two minutes to talk?",
     hi="क्या आप दो मिनट बात कर सकते हैं?",
     hinglish_fallback="Do minute baat kar sakte hain?",
+))
+# Polite close when a per-session cost budget is hit (O-9). Never mentions the
+# budget — a natural "I'll follow up" close, script-safe in each language.
+_BUDGET_WRAPUP = localization.register(localization.Localized(
+    en="I don't want to take more of your time — I'll follow up with the details shortly. Thank you!",
+    hi="मैं आपका और समय नहीं लेना चाहती — मैं जल्द ही आपको पूरी जानकारी भेज दूँगी। धन्यवाद!",
+    hinglish_fallback=(
+        "Main aapka aur time nahi lena chahti — main jaldi hi aapko poori detail "
+        "bhej deti hoon. Dhanyavaad!"
+    ),
 ))
 
 
@@ -353,6 +364,12 @@ class Orchestrator:
         state.recent_sentiments = state.recent_sentiments[-_SENTIMENT_HISTORY_MAX:]
         tone = sentiment_adjusted_tone(state.recent_sentiments, nlp.tone)
 
+        # Per-call cost signal (roadmap O-9): every turn adds its estimated
+        # STT+NLP+TTS spend to the session running total (enforced below).
+        state.running_cost_usd += estimate_turn_cost_usd(
+            customer_text=stt.text, bot_text=nlp.response_text
+        )
+
         # --- Apply intent-driven control flow ---
         if nlp.intent == Intent.opt_out:
             # TRAI (PRD §11): honour the opt-out immediately — flag the CRM,
@@ -379,6 +396,19 @@ class Orchestrator:
             positive = nlp.intent in (Intent.interested, Intent.high_interest, Intent.promise_to_pay)
             outcome = "converted" if positive else "declined"
             await self.end_call(state, send, outcome=outcome)
+            return
+
+        # Per-session budget guard (roadmap O-9): if estimated spend has reached
+        # the configured ceiling, wrap up politely rather than continue an
+        # unbounded (and unboundedly-costed) conversation. Off when budget <= 0.
+        budget = self._settings.session_budget_usd
+        if budget > 0 and state.running_cost_usd >= budget:
+            await self._send_bot_turn(
+                state, send,
+                text=_by_language(_BUDGET_WRAPUP, state.language),
+                tone=Tone.empathetic, intent="budget_reached",
+            )
+            await self.end_call(state, send, outcome="declined")
             return
 
         state.status = CallStatus.listening

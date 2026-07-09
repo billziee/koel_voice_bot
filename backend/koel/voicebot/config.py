@@ -15,6 +15,12 @@ class VoiceBotSettings(CommonSettings):
     # Latency budget (PRD §01/§05/§14).
     turn_latency_budget_ms: int = 300
 
+    # Per-session spend ceiling in USD (roadmap O-9). 0 disables the guard (the
+    # default — no behaviour change). When >0, once a session's estimated running
+    # cost reaches it the bot wraps up politely via end_call instead of letting an
+    # unbounded conversation run up provider spend.
+    session_budget_usd: float = 0.0
+
     # Barge-in (PRD §05 Dual-Gated Interruption Engine).
     backchannel_max_speech_ms: int = 300  # utterances shorter than this are ignored
     barge_in_stop_target_ms: int = 150  # confirmed interrupt → audible silence
