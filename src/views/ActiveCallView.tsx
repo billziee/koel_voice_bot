@@ -345,12 +345,17 @@ export function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, 
         {/* Center: transcript + visualizer + simulation deck */}
         <div className="flex-1 flex flex-col relative min-w-0" style={{ backgroundColor: theme.transcriptBg }}>
           <div className="flex-1 p-4 md:p-8 overflow-y-auto flex flex-col gap-5 pb-72 relative" aria-live="polite">
+            {/* Idle placeholder: pb-72 keeps the centered content clear of the
+                sticky bottom bar, and z-20 + pointer-events-none/auto guarantees
+                the demo button receives clicks (never intercepted by the bar)
+                without the transparent placeholder swallowing pointer events over
+                the bar controls. */}
             {transcript.length === 0 && callState === 'idle' && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-8" style={{ color: theme.inkMuted }}>
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center p-8 pb-72 pointer-events-none" style={{ color: theme.inkMuted }}>
                 <PhoneCall size={64} className="mb-6 opacity-20" style={{ color: theme.primary }} />
                 <p className="text-xl font-bold mb-2" style={{ fontFamily: '"Lora", serif', color: theme.ink }}>Sandbox Ready</p>
                 <p className="text-sm text-center max-w-sm mb-6">Click 'Start Call' to establish the authenticated WebSocket session and stream audio through the Whisper → Groq Llama → Orpheus pipeline.</p>
-                <button onClick={runGuidedDemo} className="px-6 py-2.5 rounded-full font-bold text-sm text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5" style={{ background: `linear-gradient(135deg, ${theme.primary}, ${theme.primaryLight})` }}>
+                <button onClick={runGuidedDemo} className="pointer-events-auto px-6 py-2.5 rounded-full font-bold text-sm text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5" style={{ background: `linear-gradient(135deg, ${theme.primary}, ${theme.primaryLight})` }}>
                   ▶ Run Guided Demo
                 </button>
               </div>
