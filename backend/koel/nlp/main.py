@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
+from fastapi.responses import StreamingResponse
 
 from koel.common.app_factory import create_app
 from koel.common.auth import ServicePrincipal
@@ -12,7 +13,7 @@ from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
 from koel.nlp.rag import build_embedder, retrieve
-from koel.nlp.schemas import NlpResponse, TurnContext
+from koel.nlp.schemas import NlpResponse, RetrievedChunk, TurnContext
 
 
 @asynccontextmanager
@@ -56,32 +57,53 @@ _embedder = build_embedder(_settings)
 router = APIRouter(prefix="/v1", tags=["nlp"])
 
 
+async def _retrieve_for(ctx: TurnContext) -> list[RetrievedChunk]:
+    """Best-effort RAG retrieval for a turn (shared by the batch + stream routes)."""
+    if not (ctx.rag_enabled and ctx.rag_index):
+        return []
+    with span("nlp.rag_retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
+        try:
+            # Per-bot overrides (W) win over the service defaults when set.
+            top_k = ctx.rag_top_k if ctx.rag_top_k is not None else _settings.rag_top_k
+            threshold = (
+                ctx.rag_score_threshold
+                if ctx.rag_score_threshold is not None
+                else _settings.rag_score_threshold
+            )
+            return await retrieve(
+                ctx.customer_text,
+                rag_index=ctx.rag_index,
+                embedder=_embedder,
+                top_k=top_k,
+                score_threshold=threshold,
+                org_id=ctx.org_id,
+            )
+        except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
+            return []
+
+
 @router.post("/respond", response_model=NlpResponse)
 async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
     """Classify intent, retrieve RAG context, generate the next bot turn."""
-    retrieved = []
-    if ctx.rag_enabled and ctx.rag_index:
-        with span("nlp.rag_retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
-            try:
-                # Per-bot overrides (W) win over the service defaults when set.
-                top_k = ctx.rag_top_k if ctx.rag_top_k is not None else _settings.rag_top_k
-                threshold = (
-                    ctx.rag_score_threshold
-                    if ctx.rag_score_threshold is not None
-                    else _settings.rag_score_threshold
-                )
-                retrieved = await retrieve(
-                    ctx.customer_text,
-                    rag_index=ctx.rag_index,
-                    embedder=_embedder,
-                    top_k=top_k,
-                    score_threshold=threshold,
-                    org_id=ctx.org_id,
-                )
-            except Exception:  # noqa: BLE001 — RAG is best-effort; degrade gracefully
-                retrieved = []
+    retrieved = await _retrieve_for(ctx)
     with span("nlp.generate", session_id=ctx.session_id, intent_known=bool(ctx.customer_text)):
         return await _provider.generate(ctx, retrieved)
+
+
+@router.post("/respond/stream")
+async def respond_stream(ctx: TurnContext, _: ServicePrincipal) -> StreamingResponse:
+    """First-token streaming (O-2): NDJSON of sentence frames as the reply forms,
+    then a terminal ``final`` frame with the full NlpResponse. VB_Svc feeds each
+    sentence into sentence-streaming TTS as it arrives instead of waiting for the
+    whole completion; the batch /respond route stays the fallback."""
+    retrieved = await _retrieve_for(ctx)
+
+    async def _gen():
+        with span("nlp.generate_stream", session_id=ctx.session_id):
+            async for frame in _provider.generate_stream(ctx, retrieved):
+                yield frame.model_dump_json() + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 
 @router.post("/warmup")

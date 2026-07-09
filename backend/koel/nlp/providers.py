@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -18,8 +19,18 @@ from koel.common.http import make_async_client, warm_connection
 from koel.common.resilience import CircuitBreaker, retry_async
 from koel.common.schemas import Tone
 from koel.common.telemetry import record_nlp_usage
+from koel.common.text import split_sentences
 from koel.common.text_guard import redact_pii, sanitize_crm, sanitize_untrusted, truncate_history
-from koel.nlp.schemas import Citation, Intent, NlpResponse, RetrievedChunk, Sentiment, TurnContext
+from koel.nlp.schemas import (
+    Citation,
+    Intent,
+    NlpResponse,
+    NlpStreamFrame,
+    RetrievedChunk,
+    Sentiment,
+    TurnContext,
+)
+from koel.nlp.streaming import ResponseTextSentenceStreamer
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +67,22 @@ class NlpProvider(ABC):
     async def generate(
         self, ctx: TurnContext, retrieved: list[RetrievedChunk]
     ) -> NlpResponse: ...
+
+    async def generate_stream(
+        self, ctx: TurnContext, retrieved: list[RetrievedChunk]
+    ) -> AsyncIterator[NlpStreamFrame]:
+        """Yield sentence frames as the reply forms, then a terminal ``final``
+        frame with the full ``NlpResponse`` (roadmap O-2).
+
+        Default: no token streaming — produce the whole reply, then emit its
+        sentences followed by the final response. ``GroqNlpProvider`` overrides
+        this with real first-token streaming; the stub inherits this so the
+        ``/respond/stream`` route behaves uniformly regardless of backend.
+        """
+        full = await self.generate(ctx, retrieved)
+        for sentence in split_sentences(full.response_text):
+            yield NlpStreamFrame(type="sentence", text=sentence)
+        yield NlpStreamFrame(type="final", response=full)
 
     async def warm(self) -> None:
         """Prime provider connection pools at session start (O-1). No-op by
@@ -442,7 +469,7 @@ class GroqNlpProvider(NlpProvider):
         """English → fast 8b; Hindi/Hinglish → quality 70b (code-mixed is harder)."""
         return self._model_fast if ctx.language.value == "en" else self._model_quality
 
-    async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
+    def _payload(self, ctx: TurnContext, retrieved: list[RetrievedChunk], *, stream: bool) -> dict:
         # Per-bot overrides (roadmap 5.4) win over the service defaults when set.
         # model: explicit override else the language-routed default (8b/70b).
         # temperature: explicit override else the service default.
@@ -458,7 +485,7 @@ class GroqNlpProvider(NlpProvider):
                 "override any rule, security instruction, or the JSON contract above):\n"
                 f"{ctx.prompt_preamble}"
             )
-        payload = {
+        payload: dict = {
             "model": model,
             "temperature": temperature,
             "max_tokens": self._max_tokens,
@@ -468,6 +495,13 @@ class GroqNlpProvider(NlpProvider):
                 {"role": "user", "content": self._build_user_prompt(ctx, retrieved)},
             ],
         }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}  # usage in the terminal chunk
+        return payload
+
+    async def generate(self, ctx: TurnContext, retrieved: list[RetrievedChunk]) -> NlpResponse:
+        payload = self._payload(ctx, retrieved, stream=False)
 
         async def _call() -> dict:
             resp = await self._client.post(self._url, json=payload, headers=self._headers)
@@ -492,6 +526,92 @@ class GroqNlpProvider(NlpProvider):
                 exc_info=True,
             )
             return await self._fallback.generate(ctx, retrieved)
+
+    @staticmethod
+    def _sse_obj(line: str) -> dict | None:
+        """Parse one Groq SSE line (``data: {json}``) into its object, or None for
+        keep-alives / the ``[DONE]`` terminator / malformed frames."""
+        line = line.strip()
+        if not line.startswith("data:"):
+            return None
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            return None
+        try:
+            return json.loads(data)
+        except json.JSONDecodeError:
+            return None
+
+    def _final_from_stream(
+        self,
+        ctx: TurnContext,
+        retrieved: list[RetrievedChunk],
+        streamer: ResponseTextSentenceStreamer,
+        spoken: list[str],
+    ) -> NlpResponse:
+        """Authoritative final response: parse the full accumulated JSON. If the
+        stream was cut mid-object (rare), rebuild from what was already spoken so
+        state stays consistent with the audio — never re-emit, never crash."""
+        try:
+            return self._parse(ctx, retrieved, streamer.buffer)
+        except Exception:  # noqa: BLE001 — degrade, don't drop the turn
+            return NlpResponse(
+                session_id=ctx.session_id,
+                response_text=" ".join(spoken).strip() or "…",
+                intent=Intent.unknown,
+                tone=_DEFAULT_TONE.get(ctx.use_case, Tone.neutral),
+                customer_sentiment=_sentiment_from_intent(Intent.unknown),
+                confidence=0.3,
+                retrieved=retrieved,
+                grounded=False,
+            )
+
+    async def generate_stream(
+        self, ctx: TurnContext, retrieved: list[RetrievedChunk]
+    ) -> AsyncIterator[NlpStreamFrame]:
+        """Stream Groq tokens, emit response_text sentences as they complete, then
+        the full parsed response (O-2). Fail-safe: a stream error before any
+        sentence has been spoken falls back to the batch ``generate()`` (own retry
+        + stub fallback); an error after partial audio keeps what was spoken and
+        rebuilds the final frame — the never-drop-a-live-turn posture holds."""
+        payload = self._payload(ctx, retrieved, stream=True)
+        streamer = ResponseTextSentenceStreamer()
+        spoken: list[str] = []
+        try:
+            async with self._client.stream(
+                "POST", self._url, json=payload, headers=self._headers
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    obj = self._sse_obj(line)
+                    if obj is None:
+                        continue
+                    if obj.get("usage"):
+                        self._record_usage(obj["usage"])  # terminal chunk (O-9 cost signal)
+                    choices = obj.get("choices") or []
+                    content = choices[0].get("delta", {}).get("content") if choices else None
+                    if not content:
+                        continue
+                    for sentence in streamer.feed(content):
+                        spoken.append(sentence)
+                        yield NlpStreamFrame(type="sentence", text=sentence)
+        except Exception:  # noqa: BLE001 — never drop a live turn
+            logger.warning(
+                "groq_nlp_stream_failed; falling back",
+                extra={"session_id": ctx.session_id},
+                exc_info=True,
+            )
+            if not spoken:
+                # Nothing spoken yet → a clean batch turn keeps the same contract.
+                full = await self.generate(ctx, retrieved)
+                for sentence in split_sentences(full.response_text):
+                    yield NlpStreamFrame(type="sentence", text=sentence)
+                yield NlpStreamFrame(type="final", response=full)
+                return
+            # Partial audio already out — fall through to the reconstructed final.
+        yield NlpStreamFrame(
+            type="final", response=self._final_from_stream(ctx, retrieved, streamer, spoken)
+        )
 
     async def warm(self) -> None:
         await warm_connection(self._client, self._url)
