@@ -167,5 +167,11 @@ htmlcov/
 *.rar
 *.7z
 
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Claude / Tool configs
 .claude/
