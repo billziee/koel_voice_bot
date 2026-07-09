@@ -47,10 +47,11 @@ async function signIn(page: Page): Promise<void> {
 }
 
 // Launch the ICICI bot and drive the guided demo until the greeting appears.
-// ActiveCallView is a React.lazy chunk, and the idle demo button sits under the
-// sticky bottom control bar, so: wait for the lazy view to render, then dispatch
-// the click straight to the button and retry until the scripted call starts
-// (webkit under CI load can drop the first dispatch before the view settles).
+// ActiveCallView is a React.lazy chunk, so: wait for the lazy view to render,
+// then click the demo button and retry until the scripted call starts (webkit
+// under CI load can drop the first click before the view settles). The idle demo
+// button used to sit under the sticky bottom control bar; that overlap is fixed
+// in ActiveCallView, so a normal click now lands on the button.
 async function launchDemoCall(page: Page): Promise<void> {
   await page.getByText('ICICI Pre-Due Collections').first().click();
   const demoButton = page.getByRole('button', { name: /Run Guided Demo/i });
@@ -58,7 +59,7 @@ async function launchDemoCall(page: Page): Promise<void> {
   const greeting = page.getByText(/KOEL BOT/i).first();
   await expect(async () => {
     if (await greeting.isVisible().catch(() => false)) return;
-    await demoButton.dispatchEvent('click', {}, { timeout: 2_000 }).catch(() => {});
+    await demoButton.click({ timeout: 2_000 });
     await expect(greeting).toBeVisible({ timeout: 2_500 });
   }).toPass({ timeout: 30_000 });
 }
