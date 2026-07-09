@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -92,3 +93,17 @@ class NlpResponse(BaseModel):
     # False when a product-fact assertion could not be tied to a citation — the
     # orchestrator/eval can treat this as a soft grounding failure (never hard-drop).
     grounded: bool = True
+
+
+class NlpStreamFrame(BaseModel):
+    """One NDJSON frame from ``POST /v1/respond/stream`` (roadmap O-2).
+
+    ``sentence`` frames carry a complete reply sentence for immediate TTS as it's
+    generated; the terminal ``final`` frame carries the full ``NlpResponse`` for
+    intent/escalation/state. Concatenating the ``sentence`` frames always equals
+    the final ``response_text`` — the stream never diverges from the batch parse.
+    """
+
+    type: Literal["sentence", "final"]
+    text: str | None = None
+    response: NlpResponse | None = None
