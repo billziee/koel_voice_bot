@@ -11,7 +11,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -88,16 +87,10 @@ def _silent_pcm(duration_ms: int) -> bytes:
     return b"\x00\x00" * samples  # 16-bit silence
 
 
-# Sentence boundary incl. the Devanagari danda — matches nlp/chunking's splitter.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?।])\s+")
-
-
-def split_sentences(text: str) -> list[str]:
-    """Split a reply into sentences for per-sentence streaming (latency)."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    return [s.strip() for s in _SENTENCE_BOUNDARY.split(text) if s.strip()] or [text]
+# split_sentences moved to koel.common.text (O-2) so TTS + NLP streaming share one
+# boundary definition. Re-exported here so existing `from koel.tts.providers import
+# split_sentences` call sites keep working.
+from koel.common.text import split_sentences  # noqa: E402 — re-export after module docstring/consts
 
 
 class TtsProvider(ABC):
