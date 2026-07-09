@@ -10,8 +10,10 @@ Two interchangeable backends behind one FastAPI dependency (O-8):
   instances via an atomic Redis ``INCR`` + ``EXPIRE NX``. Selected by
   ``CommonSettings.rate_limit_backend == "redis"``.
 
-The ``rate_limit()`` dependency signature and call sites are unchanged; the
-backend is chosen from settings at first use, with in-memory as the fallback.
+The FastAPI dependency shape (``dependencies=[Depends(rate_limit(...))]``) is
+unchanged; the backend is chosen from settings at first use, with in-memory as
+the fallback. Each route passes a distinct ``name`` so its quota lives in its own
+Redis namespace, and pre-auth routes can opt into fail-closed behaviour.
 """
 
 from __future__ import annotations
@@ -81,16 +83,33 @@ class RedisRateLimiter:
     means there is no window where the counter exists without a TTL, so a mid-op
     crash can't orphan a key and permanently block an IP.
 
-    Fails **open**: if Redis is unreachable the hit is allowed (a rate limiter is
-    defence-in-depth on already-authenticated endpoints, so an infra blip must not
-    turn into a login outage). The event is logged.
+    Failure mode is controlled by ``fail_open`` (default ``True``): if Redis is
+    unreachable the hit is allowed. A rate limiter is defence-in-depth on already
+    authenticated endpoints, so an infra blip must not turn those into an outage.
+    Pre-auth, brute-force-sensitive endpoints (login) pass ``fail_open=False`` so a
+    Redis outage rejects the request rather than silently removing throttling. The
+    event is logged either way.
+
+    ``namespace`` discriminates one route's quota from another when several
+    limiters share the same Redis: the key is ``namespace + client_ip``, so a
+    per-route namespace (e.g. ``koel:rl:login:``) keeps each endpoint's counter
+    independent instead of cross-contaminating one bucket per IP.
     """
 
-    def __init__(self, *, max_requests: int, window_s: float, client, namespace: str = "koel:rl:") -> None:  # noqa: ANN001 — redis client type varies
+    def __init__(
+        self,
+        *,
+        max_requests: int,
+        window_s: float,
+        client,  # noqa: ANN001 — redis client type varies
+        namespace: str = "koel:rl:",
+        fail_open: bool = True,
+    ) -> None:
         self._max = max_requests
         self._window = max(1, int(window_s))
         self._redis = client
         self._ns = namespace
+        self._fail_open = fail_open
 
     async def check(self, key: str) -> bool:
         rk = f"{self._ns}{key}"
@@ -99,40 +118,71 @@ class RedisRateLimiter:
                 pipe.incr(rk)
                 pipe.expire(rk, self._window, nx=True)
                 count, _ = await pipe.execute()
-        except Exception:  # noqa: BLE001 — Redis unreachable: fail open, never block auth on infra
-            logger.warning("rate limiter: redis unavailable, allowing request (fail-open)")
-            return True
+        except Exception:  # noqa: BLE001 — Redis unreachable: honor the fail_open policy
+            logger.warning(
+                "rate limiter: redis unavailable, %s request (fail-%s)",
+                "allowing" if self._fail_open else "rejecting",
+                "open" if self._fail_open else "closed",
+            )
+            return self._fail_open
         return int(count) <= self._max
 
 
-def _build_limiter(max_requests: int, window_s: float):  # noqa: ANN202 — union of two limiter types
+def _build_limiter(
+    max_requests: int,
+    window_s: float,
+    name: str,
+    fail_open: bool,
+):  # noqa: ANN202 — union of two limiter types
     """Pick the limiter backend from settings (O-8). Redis when configured and
-    reachable-at-construction; otherwise the in-process fallback."""
+    reachable-at-construction; otherwise the in-process fallback.
+
+    ``name`` becomes a per-route Redis namespace so each endpoint's quota is
+    independent. The in-memory ``RateLimiter`` is already per-instance isolated, so
+    ``name``/``fail_open`` only affect the Redis backend."""
     settings = CommonSettings()
     if settings.rate_limit_backend == "redis":
         try:
             import redis.asyncio as redis
 
             client = redis.from_url(settings.redis_url)
-            return RedisRateLimiter(max_requests=max_requests, window_s=window_s, client=client)
+            return RedisRateLimiter(
+                max_requests=max_requests,
+                window_s=window_s,
+                client=client,
+                namespace=f"koel:rl:{name}:",
+                fail_open=fail_open,
+            )
         except Exception:  # noqa: BLE001 — bad url / missing driver: degrade to in-memory
             logger.warning("rate limiter: redis backend requested but unavailable, using in-memory")
     return RateLimiter(max_requests=max_requests, window_s=window_s)
 
 
-def rate_limit(max_requests: int, window_s: float) -> Callable[[Request], Awaitable[None]]:
+def rate_limit(
+    max_requests: int,
+    window_s: float,
+    name: str = "default",
+    fail_open: bool = True,
+) -> Callable[[Request], Awaitable[None]]:
     """Build a FastAPI dependency enforcing ``max_requests`` per ``window_s`` per IP.
 
     Attach via ``dependencies=[Depends(rate_limit(...))]`` so endpoint signatures
     stay unchanged. The backend limiter is built lazily on first request (so no
     Redis connection is opened at import time) and reused for the route's lifetime.
+
+    ``name`` isolates this route's quota from others sharing a Redis backend
+    (distinct names → distinct key namespaces, so login/token/session counters
+    never cross-contaminate). ``fail_open`` controls the Redis-error behaviour:
+    ``True`` (default) allows the request on a Redis outage; set ``False`` on
+    pre-auth, brute-force-sensitive routes so an outage rejects (429) instead of
+    silently removing throttling. Both only affect the Redis backend.
     """
     holder: dict[str, object] = {}
 
     async def _dep(request: Request) -> None:
         limiter = holder.get("limiter")
         if limiter is None:
-            limiter = _build_limiter(max_requests, window_s)
+            limiter = _build_limiter(max_requests, window_s, name, fail_open)
             holder["limiter"] = limiter
         key = request.client.host if request.client else "unknown"
         verdict = limiter.check(key)  # type: ignore[attr-defined]
