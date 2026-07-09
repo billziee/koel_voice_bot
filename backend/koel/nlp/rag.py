@@ -121,11 +121,26 @@ class FastEmbedEmbedder(Embedder):
                 "nlp_embedder='fastembed' requires the optional dependency: "
                 "pip install 'koel[local-embed]'"
             ) from exc
-        self._model = TextEmbedding(model_name=model)
         self._fallback = HashEmbedder()
         self._warned = False
+        # Load the ONNX model resiliently. Unlike a missing package (a boot-time
+        # misconfiguration that should fail loudly above), a runtime load failure
+        # — network fetch of the weights, a bad model name, an onnxruntime init
+        # error, a corrupt cache — must NOT propagate: build_embedder() runs at
+        # import time, so an unguarded raise here takes down the whole nlp_svc
+        # (every route). Degrade to the hash stub instead, mirroring the runtime
+        # embed() fallback, so a bad load never crashes startup (RAG is best-effort).
+        try:
+            self._model = TextEmbedding(model_name=model)
+        except Exception:  # noqa: BLE001 — degrade to the stub instead of crashing startup
+            self._model = None
+            self._warned = True
+            logger.warning("fastembed_load_failed; falling back to hash embedder", exc_info=True)
 
     async def embed(self, text: str, *, input_type: str = "query") -> list[float]:
+        # Model failed to load at construction (see __init__): stay on the stub.
+        if self._model is None:
+            return await self._fallback.embed(text, input_type=input_type)
         try:
             # fastembed is synchronous + CPU-bound; keep it off the event loop.
             vecs = await asyncio.to_thread(lambda: list(self._model.embed([text])))

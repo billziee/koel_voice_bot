@@ -48,13 +48,19 @@ async def test_nvidia_embedder_falls_back_on_bad_shape(monkeypatch):
     await e.aclose()
 
 
-def _install_fake_fastembed(monkeypatch, *, dim: int) -> None:
+def _install_fake_fastembed(monkeypatch, *, dim: int, raise_on_init: bool = False) -> None:
     """Inject a fake ``fastembed`` module so FastEmbedEmbedder (which lazy-imports
-    it) works without the optional dependency or a model download."""
+    it) works without the optional dependency or a model download.
+
+    ``raise_on_init=True`` makes the fake ``TextEmbedding`` constructor raise, to
+    simulate a real load failure (network weight fetch, bad model name,
+    onnxruntime init error, corrupt cache)."""
     fake = types.ModuleType("fastembed")
 
     class _TextEmbedding:
         def __init__(self, model_name: str) -> None:
+            if raise_on_init:
+                raise RuntimeError("simulated model load failure (weights fetch/onnxruntime)")
             self.model_name = model_name
 
         def embed(self, texts):  # noqa: ANN001, ANN202 — mirrors fastembed's API
@@ -76,6 +82,24 @@ async def test_fastembed_embedder_falls_back_on_bad_shape(monkeypatch):
     e = FastEmbedEmbedder(model="BAAI/bge-m3")
     out = await e.embed("x", input_type="passage")
     assert len(out) == EMBEDDING_DIM  # degraded to the hash embedder, never wrong-dim
+
+
+async def test_fastembed_embedder_survives_load_failure(monkeypatch):
+    # A model load failure (weights fetch, bad name, onnxruntime, cache) must NOT
+    # propagate: build_embedder runs at import time, so a raise here would take
+    # down the whole nlp_svc. Construction degrades to the hash stub instead.
+    _install_fake_fastembed(monkeypatch, dim=EMBEDDING_DIM, raise_on_init=True)
+    e = FastEmbedEmbedder(model="BAAI/bge-m3")  # does not raise
+    assert e._model is None  # load failed → degraded
+    out = await e.embed("x", input_type="query")
+    assert len(out) == EMBEDDING_DIM  # served by the hash fallback
+
+
+def test_build_embedder_survives_fastembed_load_failure(monkeypatch):
+    # The startup path (build_embedder) must also stay up when the load fails.
+    _install_fake_fastembed(monkeypatch, dim=EMBEDDING_DIM, raise_on_init=True)
+    settings = SimpleNamespace(nlp_embedder="fastembed", fastembed_model="BAAI/bge-m3")
+    assert isinstance(build_embedder(settings), FastEmbedEmbedder)
 
 
 def test_build_embedder_selects_fastembed(monkeypatch):
