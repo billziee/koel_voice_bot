@@ -30,152 +30,15 @@ import {
   Download, Search, LogOut, Lock, WifiOff, Languages, Timer, Volume2, Radio, Pause,
   Sun, Moon, Menu, XCircle, Edit3, BookOpen, AlertTriangle
 } from 'lucide-react';
+import type {
+  ViewState, CallState, Tone, UseCase, AmbientProfile, Bot, BotConfig,
+  CRMProfile, LatencyBreakdown, TranscriptMessageData, CallHistory,
+  PastInteraction, ChipDef, Scenario, SessionEvent,
+} from './types';
+import { getTheme } from './lib/theme';
 
-// ============================================================================
-// Types
-// ============================================================================
-type ViewState = 'dashboard' | 'call' | 'config' | 'history' | 'builder' | 'knowledge';
-type CallState =
-  | 'idle' | 'connecting' | 'bot_speaking' | 'listening' | 'user_speaking'
-  | 'processing' | 'reconnecting' | 'escalating' | 'ended';
-type Tone = 'cheerful' | 'empathetic' | 'firm' | 'neutral';
-type UseCase = 'Credit Card' | 'Collections' | 'Insurance' | 'Personal Loan';
-type AmbientProfile = 'callfloor' | 'office' | 'comfort' | 'silent';
+// Shared domain types now live in ./types; getTheme in ./lib/theme (Q-1 decomposition).
 
-interface Bot {
-  id: string;
-  name: string;
-  useCase: UseCase;
-  language: string;
-  status: 'Active' | 'Paused';
-  calls: number;
-  conversionNum: number;
-  conversion: string;
-  avgDuration: string;
-  escalationRate: string;
-  lastActive: string;
-  lastActiveTs: number; // epoch for live aging
-  backendId?: string; // real VB_Svc bot id when connected to the live backend
-  backendCustomerId?: string; // seed CRM customer to dial for this bot
-}
-
-// Item 5 — per-bot configuration that persists across views
-interface BotConfig {
-  name: string;
-  useCase: string;
-  language: string;
-  persona: string;
-  speed: number;
-  ambientVolume: number;
-  ambientProfile: AmbientProfile;
-  backchannels: string[];
-  ragEnabled: boolean;
-  ragIndex: string;
-  greeting: string;
-  tone: Tone;
-}
-
-interface CRMField { label: string; value: string; highlight?: 'green' | 'orange' }
-interface CRMProfile {
-  name: string;
-  customerId: string;
-  phone: string;
-  segment: string;
-  fields: CRMField[];
-}
-
-interface LatencyBreakdown { stt: number; nlp: number; tts: number; total: number }
-
-interface TranscriptMessageData {
-  id: number;
-  kind: 'bot' | 'user' | 'meta' | 'filler';
-  text: string;
-  tone?: Tone;
-  latency?: LatencyBreakdown;
-  interrupted?: boolean;
-  timestamp?: number; // Item 58 — offset seconds from call start
-}
-
-interface CallHistory {
-  id: string;
-  bot: string;
-  language: string;
-  durationStr: string;
-  durationSec: number;
-  outcome: string;
-  dateStr: string;
-  timestamp: number;
-  status: 'green' | 'orange' | 'red' | 'gray';
-  customer: string;
-  customerId: string; // Item 16
-  phone: string;
-  avgLatencyMs: number;
-  transcript: TranscriptMessageData[];
-  events?: SessionEvent[]; // Item 35
-}
-
-interface PastInteraction {
-  id: string;
-  date: string;
-  topic: string;
-  duration: string;
-  transcript: { speaker: 'bot' | 'user'; text: string }[];
-}
-
-interface ChipDef {
-  label: string;
-  userText: string;
-  botReply: string;
-  tone: Tone;
-  ragContext?: string;
-  nlpSlow?: boolean;
-  action?: 'ESCALATE' | 'END_POLITE';
-  outcome?: { label: string; status: CallHistory['status'] };
-  consentCapture?: string; // Item 17 — IRDAI consent event
-}
-
-interface Scenario {
-  greeting: string;
-  greetingTone: Tone;
-  rePrompt: string;
-  politeClose: string;
-  bargeInUserText: string;
-  bargeInReply: string;
-  chips: ChipDef[];
-}
-
-interface SessionEvent { id: number; t: string; label: string; level: 'info' | 'warn' | 'ok' }
-
-// ============================================================================
-// Theme — CSS variables for light/dark (Item 61)
-// ============================================================================
-const getTheme = (dark: boolean) => ({
-  primary: dark ? '#7DA2FF' : '#053BEE',
-  primaryDark: dark ? '#A3BFFF' : '#032CB8',
-  primaryLight: dark ? '#1E2D5E' : '#E8EDFF',
-  primarySubtle: dark ? '#0F1A3A' : '#F2F5FF',
-  surface: dark ? '#0B1120' : '#F5F7FA',
-  surfaceCard: dark ? '#111827' : '#FFFFFF',
-  ink: dark ? '#E5E7EB' : '#000A1B',
-  ink2: dark ? '#D1D5DB' : '#3A4150',
-  inkMuted: dark ? '#9CA3AF' : '#67707F',
-  faint: dark ? '#6B7280' : '#98A0AD',
-  rule: dark ? '#374151' : '#E2E6ED',
-  ruleSubtle: dark ? '#1F2937' : '#ECEFF4',
-  accent: dark ? '#F97316' : '#EB5324',
-  accentLight: dark ? '#431407' : '#FFF0EB',
-  green: dark ? '#34D399' : '#05604F',
-  greenLight: dark ? '#064E3B' : '#EDFAF4',
-  greenMid: dark ? '#10B981' : '#2DBD74',
-  destructive: dark ? '#EF4444' : '#D93520',
-  destructiveLight: dark ? '#450A0A' : '#FEF2F0',
-  warning: dark ? '#F59E0B' : '#8A5800',
-  warningLight: dark ? '#451A03' : '#FFF7E6',
-  sidebarBg: dark ? '#0F172A' : '#FFFFFF',
-  inset: dark ? '#0F172A' : '#F8FAFC',
-  otelBg: dark ? '#020617' : '#000A1B',
-  transcriptBg: dark ? '#0F172A' : '#F5F7FA',
-});
 
 const TONE_STYLES: Record<Tone, string> = {
   cheerful: 'bg-[#FFF7E6] text-[#9A6700] border-[#F5D789]',
