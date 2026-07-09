@@ -89,6 +89,11 @@ class SessionState(BaseModel):
     # the bot's tone on the next turn.
     recent_sentiments: list[str] = Field(default_factory=list)
 
+    # Estimated running provider spend for this session in USD (roadmap O-9);
+    # accumulated per turn, enforced against session_budget_usd. Defaulted so
+    # existing serialized Redis states stay valid.
+    running_cost_usd: float = 0.0
+
     # Resilience bookkeeping.
     no_input_strikes: int = 0  # 0 → re-prompt next, 1 → close next (PRD §05)
     escalated: bool = False
