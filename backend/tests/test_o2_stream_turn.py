@@ -33,13 +33,16 @@ class _StreamClients:
         raise_after: int | None = None,
         raise_exc: type[BaseException] = RuntimeError,
         empty: bool = False,
+        first_delay_s: float = 0.0,
     ) -> None:
         self._nlp = nlp
         self._stream_raises = stream_raises
         self._raise_after = raise_after  # break after N sentence frames, before final
         self._raise_exc = raise_exc
         self._empty = empty  # normal completion, zero sentences, empty-text final
+        self._first_delay_s = first_delay_s  # delay before the first sentence (filler race)
         self.batch_respond_calls = 0
+        self.synth_tones: list = []  # prosody tone of each synthesized sentence
 
     async def respond_stream(self, ctx):  # noqa: ANN001
         if self._stream_raises:
@@ -50,6 +53,8 @@ class _StreamClients:
             return
         n = 0
         for sentence in split_sentences(self._nlp.response_text):
+            if n == 0 and self._first_delay_s:
+                await asyncio.sleep(self._first_delay_s)
             yield NlpStreamFrame(type="sentence", text=sentence)
             n += 1
             if self._raise_after is not None and n >= self._raise_after:
@@ -61,6 +66,7 @@ class _StreamClients:
         return self._nlp
 
     async def stream_synthesis(self, request):  # noqa: ANN001
+        self.synth_tones.append(request.tone)
         async for chunk in StubOrpheusProvider()._stream_by_sentence(request):  # noqa: SLF001
             yield chunk
 
@@ -199,3 +205,56 @@ async def test_cancellation_mid_stream_still_records_partial_turn():
         await _drive(clients, state)
     bot_turns = [t for t in state.transcript if t.speaker == "bot"]
     assert bot_turns and bot_turns[-1].text  # the partial turn was persisted
+
+
+async def test_streamed_prosody_follows_prior_sentiment_trend_but_persists_final_tone():
+    # O-2 polish B: this turn's sentiment isn't known before speaking, but a
+    # prior negative trend softens the streamed PROSODY to empathetic — while the
+    # persisted transcript still carries the resolved final.tone.
+    from koel.nlp.schemas import Sentiment
+
+    clients = _StreamClients(_reply("Yeh raha aapka update. Sab theek hai.", tone=Tone.cheerful))
+    state = _state()
+    state.recent_sentiments = [Sentiment.negative.value, Sentiment.negative.value]
+    sent = await _drive(clients, state)
+
+    assert clients.synth_tones and all(t == Tone.empathetic for t in clients.synth_tones)  # prosody softened
+    assert _bot_transcripts(sent)[-1].data["tone"] == Tone.cheerful.value  # persisted = final.tone
+
+
+def _stream_orch(clients, **settings_over):
+    return Orchestrator(
+        settings=VoiceBotSettings(stream_nlp=True, stream_tts=True, **settings_over),
+        clients=clients, filler_cache=FillerCache(),
+    )
+
+
+async def test_filler_fires_in_stream_mode_when_first_sentence_is_slow():
+    # O-2 polish A: streaming used to skip the filler race. Now, if no bot audio
+    # has streamed by the filler trigger, a filler masks the wait.
+    clients = _StreamClients(_reply("Ek baat. Doosri baat."), first_delay_s=0.1)
+    orch = _stream_orch(clients, filler_trigger_ms=0)
+    fired: list = []
+
+    async def _rec(state, send):  # noqa: ANN001
+        fired.append(True)
+
+    orch._inject_filler = _rec  # type: ignore[method-assign]
+    sent: list = []
+    await orch.handle_final_transcript(_state(), lambda m: sent.append(m) or _noop(), _stt())
+    assert fired  # filler injected because the first sentence was slow
+
+
+async def test_filler_does_not_fire_when_first_audio_is_prompt():
+    # A fast first sentence cancels the pending filler before it can fire.
+    clients = _StreamClients(_reply("Ek baat. Doosri baat."))
+    orch = _stream_orch(clients, filler_trigger_ms=10_000)
+    fired: list = []
+
+    async def _rec(state, send):  # noqa: ANN001
+        fired.append(True)
+
+    orch._inject_filler = _rec  # type: ignore[method-assign]
+    sent: list = []
+    await orch.handle_final_transcript(_state(), lambda m: sent.append(m) or _noop(), _stt())
+    assert not fired  # audio arrived before the trigger → filler cancelled
