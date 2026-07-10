@@ -29,7 +29,8 @@ from koel.stt.schemas import TranscribeRequest
 
 
 def _req(audio: bytes = b"\x00\x01" * 4000, **kw) -> TranscribeRequest:
-    base = dict(session_id="s", audio_b64=base64.b64encode(audio).decode(), is_final=True)
+    base = dict(session_id="s", audio_b64=base64.b64encode(audio).decode(),
+                is_final=True, audio_format="wav")  # WS STT ingests WAV
     return TranscribeRequest(**{**base, **kw})
 
 
@@ -72,27 +73,23 @@ async def test_default_wrapper_forces_final_even_when_request_is_partial():
 # --- 2. Sarvam WS happy path: partials then a final over a real local server --
 
 
-async def test_sarvam_ws_streams_partials_then_final():
+async def test_sarvam_ws_transcribes_over_verified_protocol():
+    # Protocol verified live against api.sarvam.ai (2026-07): a top-level `audio`
+    # object (base64 WAV, WAV-only encoding) + `{"type":"flush"}` → a `data` frame.
     received: list[dict] = []
 
     async def handler(ws):
-        for _ in range(3):  # config, audio, flush
-            received.append(json.loads(await ws.recv()))
+        received.append(json.loads(await ws.recv()))  # audio frame
+        received.append(json.loads(await ws.recv()))  # flush
         await ws.send(
             json.dumps(
                 {
                     "type": "data",
-                    "data": {"transcript": "namaste", "is_final": False,
-                             "language_code": "hi-IN", "language_probability": 0.9},
-                }
-            )
-        )
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "data",
-                    "data": {"transcript": "namaste ji mujhe interest hai", "is_final": True,
-                             "language_code": "hi-IN", "language_probability": 0.95},
+                    "data": {
+                        "transcript": "namaste ji mujhe interest hai",
+                        "language_code": "hi-IN",
+                        "language_probability": 0.95,
+                    },
                 }
             )
         )
@@ -100,23 +97,22 @@ async def test_sarvam_ws_streams_partials_then_final():
     async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         p = _provider()
-        p._ws_url = f"ws://127.0.0.1:{port}/speech-to-text/ws?model=saaras:v3"
+        p._ws_url = f"ws://127.0.0.1:{port}/speech-to-text/ws?model=saaras:v3&language_code=unknown"
 
         results = [r async for r in p.stream_transcribe(_req())]
         await p.aclose()
 
-    # Outbound protocol: config (auto-detect), one audio frame, then flush.
-    assert [m["type"] for m in received] == ["config", "audio", "flush"]
-    assert received[0]["data"]["language_code"] == "unknown"
-    assert received[0]["data"]["model"] == "saaras:v3"
-    assert received[1]["data"]["audio"]  # base64 audio payload was streamed in
+    # Outbound: a top-level `audio` object then a flush (no config frame).
+    assert received[0]["audio"]["encoding"] == "audio/wav"
+    assert received[0]["audio"]["data"]  # base64 audio payload streamed in
+    assert received[0]["audio"]["sample_rate"] == 16000
+    assert received[1] == {"type": "flush"}
 
-    # Inbound: a non-final partial followed by the authoritative final transcript.
-    assert [r.is_final for r in results] == [False, True]
-    assert results[0].text == "namaste"
-    assert results[-1].text == "namaste ji mujhe interest hai"
-    assert results[-1].language_id == Language.hi
-    assert results[-1].language_confidence == 0.95
+    # Inbound: one authoritative final transcript.
+    assert len(results) == 1 and results[0].is_final is True
+    assert results[0].text == "namaste ji mujhe interest hai"
+    assert results[0].language_id == Language.hi
+    assert results[0].language_confidence == 0.95
 
 
 # --- 3. Sarvam WS failure → degrade to the batch path, never raising ----------
