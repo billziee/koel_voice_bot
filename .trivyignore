@@ -1,0 +1,12 @@
+# Trivy accepted-findings allowlist (Q-5).
+#
+# The image scan (CRITICAL/HIGH, fixable-only) is a BLOCKING CI gate. When a
+# finding is a genuine false positive or an accepted, time-boxed risk, add its
+# CVE id here — ONE per line — with a comment stating WHY and a review date.
+# Keep this list short and revisit every finding at its review date; an empty
+# file means "block on everything fixable", which is the intended default.
+#
+# Format:
+#   CVE-2024-XXXXX  # <why accepted> — review by YYYY-MM-DD
+#
+# (no accepted findings yet)

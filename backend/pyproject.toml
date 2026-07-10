@@ -59,6 +59,30 @@ select = ["E", "F", "I", "B", "UP", "W"]
 # rather than 3.11 StrEnum. B008: FastAPI Depends() in defaults is idiomatic.
 ignore = ["UP042", "B008"]
 
+[tool.mypy]
+python_version = "3.11"
+# Optional/native deps ship no type stubs (fastembed, onnxruntime, riva) — treat
+# their imports as Any rather than failing the whole check on a missing stub.
+ignore_missing_imports = true
+
+# Graduation allowlist (Q-5): mypy is a BLOCKING gate in CI, but these modules
+# still carry pre-existing type errors (a Localized|LocalizedList union in the
+# localization stack; audioop.binascii attr access; a FastAPI lifespan variance).
+# They're silenced here so the gate protects every OTHER module today; the list
+# is only allowed to SHRINK — never add a module to buy silence for new code.
+[[tool.mypy.overrides]]
+module = [
+    "koel.common.app_factory",
+    "koel.stt.providers",
+    "koel.voicebot.main",
+    "koel.voicebot.ws.handler",
+    "koel.voicebot.pipeline.orchestrator",
+    "koel.voicebot.pipeline.silence",
+    "koel.voicebot.pipeline.filler",
+    "koel.voicebot.pipeline.endpointing",
+]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
