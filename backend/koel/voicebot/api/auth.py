@@ -11,9 +11,13 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
 from koel.common.auth import CurrentUser, issue_token
+from koel.common.config import get_common_settings
 from koel.common.errors import ApiError
+from koel.common.http import make_async_client
+from koel.common.logging import get_logger
 from koel.common.ratelimit import rate_limit
 
+logger = get_logger("koel.voicebot.auth")
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 # Per-IP throttles (M): brute-force login and token-minting spam. Distinct names
@@ -43,6 +47,34 @@ _DEMO_USERS: dict[str, bytes] = {"demo": _hash("koel-demo")}
 class LoginRequest(BaseModel):
     username: str = Field(max_length=64)
     password: str = Field(max_length=256)
+    # Cloudflare Turnstile token from the login widget (6.7). Only consulted when
+    # KOEL_TURNSTILE_SECRET_KEY is configured; ignored (optional) otherwise so the
+    # dev/demo/CI login path is unchanged. Capped to Turnstile's documented max.
+    turnstile_token: str | None = Field(default=None, max_length=2048)
+
+
+async def _verify_turnstile(token: str | None) -> bool:
+    """Verify a Turnstile token with Cloudflare's siteverify API (6.7).
+
+    Fails CLOSED: a missing/empty token, a non-success verdict, or any error
+    reaching Cloudflare all return False, so a spoofed or absent challenge is
+    rejected rather than waved through (mirrors the login limiter's fail-closed
+    posture). Only called when a secret is configured.
+    """
+    settings = get_common_settings()
+    if not token:
+        return False
+    try:
+        async with make_async_client(timeout_s=settings.turnstile_timeout_s) as client:
+            resp = await client.post(
+                settings.turnstile_verify_url,
+                data={"secret": settings.turnstile_secret_key, "response": token},
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("success") is True)
+    except Exception:  # noqa: BLE001 — any verification failure ⇒ reject (fail closed)
+        logger.warning("turnstile_verify_failed", exc_info=True)
+        return False
 
 
 class TokenResponse(BaseModel):
@@ -57,6 +89,16 @@ class WsTokenResponse(BaseModel):
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(_login_limit)])
 async def login(payload: LoginRequest) -> TokenResponse:
+    # Bot-challenge (6.7): when a Turnstile secret is configured, a valid token is
+    # required BEFORE the credential check, so brute-force attempts can't even reach
+    # bcrypt without first clearing the challenge. Skipped when unconfigured (demo).
+    if get_common_settings().turnstile_secret_key:
+        if not await _verify_turnstile(payload.turnstile_token):
+            raise ApiError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="turnstile_failed",
+                message="Human verification failed. Please retry the challenge.",
+            )
     hashed = _DEMO_USERS.get(payload.username)
     if not hashed or not _verify(payload.password, hashed):
         raise ApiError(
