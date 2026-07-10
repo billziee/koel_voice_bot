@@ -8,5 +8,14 @@
 #
 # Format:
 #   CVE-2024-XXXXX  # <why accepted> — review by YYYY-MM-DD
-#
-# (no accepted findings yet)
+
+# jaraco.context 5.3.0 (path traversal) and wheel 0.45.1 (priv-esc) are
+# BUILD-TIME packaging deps vendored inside setuptools/_vendor — not part of the
+# app's runtime request path, and both HIGH (no CRITICAL). The proper fix is to
+# strip pip/setuptools/wheel from the runtime image (they're only needed in the
+# builder stage); that Dockerfile change needs a container build to verify and is
+# tracked as a separate follow-up. Time-boxed accept until then.
+CVE-2026-23949
+# review by 2026-08-09 — jaraco.context, vendored in setuptools
+CVE-2026-24049
+# review by 2026-08-09 — wheel, vendored in setuptools (+ top-level)
