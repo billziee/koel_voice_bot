@@ -69,12 +69,39 @@ class CommonSettings(BaseSettings):
 
     # --- PostgreSQL + pgvector ---
     database_url: str = "postgresql+asyncpg://koel:koel@localhost:5432/koel"
-    # Connection pool (Postgres only; PRD §14 stability under load). Sized for a
-    # per-service uvicorn worker — tune with worker count against RDS max_connections.
+    # Connection pool (Postgres only; PRD §14 stability under load). Sizing math
+    # (validate with scripts/loadtest_pool.py — see docs/LOADTEST.md): the peak
+    # live connections a single service instance can open is
+    # ``(db_pool_size + db_max_overflow) * uvicorn_workers``. That product, summed
+    # across every service instance, MUST stay under RDS ``max_connections`` (minus
+    # a headroom margin for migrations/psql/other clients). Defaults 10+5=15 give a
+    # 1-worker instance 15 peak connections; e.g. 4 services × 1 worker = 60, well
+    # under a t3 RDS's ~80–100 cap. Each request holds a connection only for the
+    # brief ``session_scope`` around its query (not the whole request), so 10 steady
+    # + 5 burst comfortably covers the PRD's 10-concurrent-session target. Bump
+    # db_pool_size when koel.db.pool.in_use sits at the ceiling and latency shows
+    # checkout-wait; raise RDS max_connections (or add pgbouncer) before scaling
+    # workers × instances past the connection budget.
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_pool_recycle_s: int = 1800  # recycle before RDS/proxy idle timeout
+    # Seconds a request waits for a free connection before erroring (SQLAlchemy
+    # ``pool_timeout``). 30s is SQLAlchemy's default and is intentionally kept: it
+    # is a last-resort backstop, not a latency knob — a real-time turn is long dead
+    # before 30s, so under genuine pool exhaustion the useful signal is the rising
+    # koel.db.pool.in_use + checkout-wait tail (alert on those), and a shorter
+    # timeout would only convert brief bursts into user-facing 5xx. Lower it for a
+    # deployment that would rather fail-fast than queue; it is env-overridable.
     db_pool_timeout_s: int = 30
+    # LIFO connection checkout (SQLAlchemy ``pool_use_lifo``). LIFO reuses the
+    # most-recently-returned connection, so during non-peak periods the pool's
+    # excess connections stay idle and age out via ``db_pool_recycle_s`` /
+    # server-side idle timeouts instead of being round-robined and kept alive.
+    # This shrinks the live-connection footprint against RDS max_connections
+    # between bursts. Safe here because ``pool_pre_ping`` (get_engine) already
+    # reaps any connection the server closed underneath us. Default on; set
+    # KOEL_DB_POOL_USE_LIFO=false to restore FIFO round-robin behaviour.
+    db_pool_use_lifo: bool = True
     # pgvector HNSW query-time recall/latency knob (roadmap O-10). ``hnsw.ef_search``
     # sizes the candidate list the index walks per query: higher ⇒ better recall,
     # slower; lower ⇒ faster, may miss neighbours. 0 leaves the Postgres server
