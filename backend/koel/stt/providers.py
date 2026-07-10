@@ -284,6 +284,10 @@ _SARVAM_LANG: dict[str, Language] = {
     "en-in": Language.en,
 }
 
+# Sarvam WS STT ingests 16 kHz WAV (KOEL's mic-capture rate); the `encoding`
+# field is a WAV-only enum (verified live).
+_SARVAM_WS_SAMPLE_RATE = 16000
+
 
 class SarvamSttProvider(SttProvider):
     """Live STT via Sarvam Saaras (multipart ``/speech-to-text``), primary for
@@ -418,17 +422,20 @@ class SarvamSttProvider(SttProvider):
     async def _stream_ws(
         self, request: TranscribeRequest, raw: bytes
     ) -> AsyncIterator[TranscriptResult]:
-        """True streaming via Sarvam's ``/speech-to-text/ws``: audio frames are
-        streamed in and interim + final transcripts stream back out, mirroring
-        the TTS ``_stream_ws`` protocol (config → data frames → flush in; typed
-        messages out). Partials are yielded ``is_final=False`` and the terminal
-        transcript ``is_final=True``.
+        """Transcribe over Sarvam's ``/speech-to-text/ws`` (protocol verified live,
+        2026-07): send one ``{"audio": {"data": <base64 wav>, "encoding":
+        "audio/wav", "sample_rate": 16000}}`` frame, then ``{"type": "flush"}``;
+        Sarvam replies with ``{"type": "data", "data": {"transcript": ...,
+        "language_code": ..., "language_probability": ...}}``. We send the buffered
+        utterance as one WAV, so this yields a single final transcript over a
+        persistent socket (lower per-turn overhead than the multipart REST POST).
 
-        NOTE (O-6 activation): this path is exercised over the seam with mocked
-        WS in tests but is NOT yet fed live mic frames — the WS handler ingest
-        rewrite (streaming audio chunks in place of the batch buffer) is the
-        remaining activation step and needs a live Sarvam WS STT endpoint to
-        verify. Until then the protocol shape here is provisional.
+        NOTE (O-6 scope): Sarvam's ``encoding`` is a WAV-only enum, so true
+        token-level partials (which O-5 speculative RAG would consume) aren't
+        cleanly available — that needs incremental-WAV chunking or a partial-
+        emitting provider. The WS-handler ingest rewrite (feeding mic chunks in
+        place of the batch buffer) remains the activation step; this method is the
+        verified transport it would build on. Any WS error degrades to batch.
         """
         from websockets.asyncio.client import connect as ws_connect
 
@@ -439,16 +446,22 @@ class SarvamSttProvider(SttProvider):
             open_timeout=self._timeout_s,
             close_timeout=2.0,
         ) as ws:
-            config = {
-                "language_code": "unknown",  # auto-detect → genuine language_probability
-                "model": self._model,
-                "mode": self._mode,
-                "input_audio_codec": fmt,
-            }
-            await ws.send(json.dumps({"type": "config", "data": config}))
+            # Verified live against Sarvam's WS STT (2026-07): audio rides as a
+            # TOP-LEVEL `audio` object whose base64 `data` is a WAV (the `encoding`
+            # field is a WAV-only enum), and `{"type": "flush"}` triggers the
+            # transcript. Model/language ride the URL query — there is no config
+            # frame. Non-WAV audio can't use this path, so degrade to batch.
+            if fmt != "wav":
+                raise ValueError("sarvam ws stt requires wav audio")
             await ws.send(
                 json.dumps(
-                    {"type": "audio", "data": {"audio": base64.b64encode(raw).decode()}}
+                    {
+                        "audio": {
+                            "data": base64.b64encode(raw).decode(),
+                            "encoding": "audio/wav",
+                            "sample_rate": _SARVAM_WS_SAMPLE_RATE,
+                        }
+                    }
                 )
             )
             await ws.send(json.dumps({"type": "flush"}))
@@ -456,15 +469,13 @@ class SarvamSttProvider(SttProvider):
                 frame = await asyncio.wait_for(ws.recv(), timeout=self._timeout_s)
                 msg = json.loads(frame)
                 mtype = msg.get("type")
-                if mtype in ("data", "transcript", "partial", "final"):
-                    data = msg.get("data", {})
-                    is_final = bool(data.get("is_final")) or mtype == "final"
-                    yield self._result_from_ws(request, data, is_final=is_final)
-                    if is_final:
-                        break
-                elif mtype == "event" and msg.get("data", {}).get("event_type") == "final":
-                    break
-                elif mtype == "error":
+                if mtype == "data":
+                    # One utterance + flush → this transcript is the final. (Interim
+                    # "data" frames from a chunked stream would be partials with
+                    # is_final=False; unused on this single-shot path.)
+                    yield self._result_from_ws(request, msg.get("data", {}), is_final=True)
+                    return
+                if mtype == "error":
                     raise ValueError(f"sarvam stt ws error: {msg.get('data')}")
 
     def _result_from_ws(
