@@ -65,4 +65,38 @@ every non-trivial decision made during that autonomous block. (System clock read
 
 ## Outcomes
 
-(Appended as PRs land — see the PR list / git log for #34+.)
+All landed on `main`, each CI-green + locally verified before merge. Final integration
+check on the composed `main`: backend **334 passed, 90.6% coverage, ruff clean**; frontend
+**tsc + build clean**.
+
+| PR | What | Verify |
+|----|------|--------|
+| #34 | This decision log | docs |
+| #35 | Q-7 deterministic nav/dark-mode/reload e2e (suite ~11 → ~17) | 18/18 local × 3 browsers + CI |
+| #36 | Demo-button overlap fix; e2e reverted to a normal click | 9/9 call-flow × 3 browsers + CI |
+| #37 | **O-2 activation** — orchestrator streams NLP sentences → TTS behind `stream_nlp` | adversarial review + 7 turn tests + CI |
+| #38 | O-10 DB pool checkout observability + pgvector `ef_search` knob | full suite + CI |
+| #39 | Guard `FastEmbedEmbedder` load so a bad model can't crash nlp_svc | full suite + CI |
+| #40 | Rate-limiter per-route namespace + fail-closed login throttle | full suite + CI |
+| #41 | Bound TTS-cache PII retention (configurable, 3h → 30 min default) | full suite + CI |
+
+**Multi-agent execution:** two `Workflow` runs of worktree-isolated parallel agents produced
+#35/#36/#38 and #39/#40/#41; a security-reviewer agent swept the session's recent backend
+surface (NLP streaming, rate limiter, embedder, TTS cache) and a second adversarial reviewer
+scrutinised the O-2 turn loop. Both reviews found real defects that were fixed before merge:
+
+- **O-2 turn-loop review (all fixed in #37):** a lost terminal frame after partial audio no
+  longer silently drops `opt_out`/`escalate` (reconciles via batch `respond()`, else escalates
+  to a human — TRAI §11); an empty stream falls back to batch (no silent turn); the persisted
+  Turn/transcript carry the resolved tone/intent; a cancelled turn is still recorded for the
+  audit trail; the route always emits a terminal frame; the sentence streamer fails safe on a
+  UTF-16 surrogate escape.
+- **Backend security sweep (fixed in #39/#40/#41):** fastembed startup crash; rate-limiter
+  cross-endpoint quota contamination + login fail-open; TTS-cache PII retention window.
+
+**O-2 status:** fully activated end-to-end behind `KOEL_STREAM_NLP` (default off). Enabling it
+on VB_Svc turns on token-bound first-audio; the batch path remains the fallback.
+
+**Follow-ups noted (not done this block):** combine the filler race with streaming; apply the
+sentiment-adjusted tone to streamed prosody; O-5/O-6 (build on O-2, sequence after profiling);
+O-7 (legal-gated); O-10 load-test harness (Phase 2); Part C product themes (need planning).
