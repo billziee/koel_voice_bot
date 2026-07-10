@@ -484,11 +484,11 @@ class Orchestrator:
         and streamed to the client the moment it lands, so first-audio is token-bound
         rather than whole-completion-bound. The terminal frame carries the full
         ``NlpResponse`` for the caller's control flow. One bot turn, one transcript
-        entry. Sentence-streaming TTS *prosody* uses the bot's default tone (the
-        sentiment-adjusted tone isn't known until the reply completes — a documented
-        first-cut simplification; batch mode keeps the adjustment), but the persisted
-        ``Turn``/transcript carry the resolved ``final.tone``/intent so history matches
-        batch mode.
+        entry. Sentence-streaming TTS *prosody* uses the sentiment-adjusted tone from
+        the trend SO FAR (this turn's sentiment isn't known until the reply completes),
+        while the persisted ``Turn``/transcript carry the resolved ``final.tone``/intent
+        so history matches batch mode. A filler clip masks the wait if the first
+        sentence is slower than the filler trigger (same guard the batch path gets).
 
         Fail-safe (never drops or silently mishandles a live turn):
         - stream error before any audio → batch ``respond()`` speaks the turn;
@@ -501,7 +501,11 @@ class Orchestrator:
           still recorded for the audit trail.
         """
         idx = state.next_turn_index()
-        tone = state.default_tone
+        # Streamed prosody can't use THIS turn's sentiment (not known until the reply
+        # completes), but it can honour the trend so far: soften to empathetic if the
+        # prior window already read negative. The persisted Turn uses the resolved
+        # final.tone below.
+        tone = sentiment_adjusted_tone(state.recent_sentiments, state.default_tone)
         use_ambient = state.ambient_profile.strip().lower() not in _AMBIENT_OFF
         await send(ServerMessage.of(ServerMessageType.call_state, status=CallStatus.bot_speaking))
 
@@ -547,6 +551,19 @@ class Orchestrator:
                         )
                         seq += 1
 
+                async def _delayed_filler() -> None:
+                    # Filler race for the streaming path (O-2 + PRD §05 latency mask):
+                    # if no bot audio has streamed by the filler trigger, mask the wait
+                    # with a filler clip — the same guard _respond_with_filler gives the
+                    # batch path, which stream mode otherwise skipped.
+                    try:
+                        await asyncio.sleep(self._settings.filler_trigger_ms / 1000)
+                    except asyncio.CancelledError:
+                        return
+                    if first_ms is None:
+                        await self._inject_filler(state, send)
+
+                filler_task = asyncio.create_task(_delayed_filler())
                 try:
                     async for frame in self._clients.respond_stream(ctx):
                         if frame.type == "sentence" and frame.text:
@@ -567,6 +584,8 @@ class Orchestrator:
                         if sentence:
                             spoken.append(sentence)
                             await _speak(sentence)
+                finally:
+                    filler_task.cancel()
                 turn_span.set_attribute("first_audio_ms", round(first_ms or 0.0, 1))
 
             if not spoken:
