@@ -60,6 +60,16 @@ class CommonSettings(BaseSettings):
     # Comma-separated, or "*" in dev. Bearer-token auth (not cookies) so "*" is safe.
     cors_allow_origins: str = "*"
 
+    # --- Cloudflare Turnstile (6.7): bot-challenge on the login form ---
+    # Empty ⇒ verification is DISABLED (dev/demo/CI log in without a challenge, as
+    # before). Set the secret in production to require a valid Turnstile token on
+    # /v1/auth/login; the frontend renders the widget when its VITE_TURNSTILE_SITE_KEY
+    # is set. Verification fails CLOSED (like the login rate-limiter) so a spoofed or
+    # missing token is rejected rather than waved through.
+    turnstile_secret_key: str = ""
+    turnstile_verify_url: str = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    turnstile_timeout_s: float = 5.0
+
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
     # Rate-limiter backend (O-8): "memory" is per-process (fine for a single

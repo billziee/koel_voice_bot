@@ -58,11 +58,17 @@ export class KoelApiError extends Error {
   }
 }
 
-export async function login(username: string, password: string): Promise<string> {
+export async function login(
+  username: string,
+  password: string,
+  turnstileToken?: string | null,
+): Promise<string> {
   const res = await fetch(`${KOEL_API}/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    // turnstile_token is only enforced by the backend when it has a secret key
+    // configured (6.7); harmless to send null otherwise.
+    body: JSON.stringify({ username, password, turnstile_token: turnstileToken ?? null }),
   });
   const body = await jsonOrThrow(res);
   return body.access_token as string;
