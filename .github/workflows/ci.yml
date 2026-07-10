@@ -42,7 +42,7 @@ jobs:
       - name: Lint (ruff)
         run: ruff check koel tests scripts
       - name: Type check (mypy)
-        run: mypy koel || true  # advisory until fully annotated
+        run: mypy koel  # blocking (Q-5); a graduation allowlist in pyproject scopes it
       - name: Migrate
         run: alembic upgrade head
       - name: Test + coverage gate (>=85%)
@@ -81,4 +81,6 @@ jobs:
         with:
           image-ref: koel-backend:ci
           severity: CRITICAL,HIGH
-          exit-code: "0"  # advisory; flip to 1 to block on CRITICAL/HIGH
+          ignore-unfixed: true      # only fail on vulns that HAVE a fix (actionable) — Q-5
+          exit-code: "1"            # block the build on fixable CRITICAL/HIGH
+          trivyignores: .trivyignore  # documented, time-boxed accepted findings

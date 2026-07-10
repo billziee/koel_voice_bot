@@ -79,7 +79,7 @@ def format_inr(amount: float) -> str:
     else:
         head, tail = digits[:-3], digits[-3:]
         # Indian grouping: last 3 digits, then pairs (12,34,567).
-        parts = []
+        parts: list[str] = []
         while len(head) > 2:
             parts.insert(0, head[-2:])
             head = head[:-2]
