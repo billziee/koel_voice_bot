@@ -102,6 +102,9 @@ class SmartTurnAnalyzer:
             else:
                 audio = np.pad(audio, (max_samples - len(audio), 0))
             features = compute_whisper_log_mel_features(audio, do_normalize=True)
+            # _ensure_session() (checked by the caller before we reach here) has
+            # populated the session; assert it so the type-checker narrows away None.
+            assert self._session is not None
             outputs = self._session.run(None, {"input_features": np.expand_dims(features, 0)})
             probability = float(outputs[0][0].item())
             complete = probability > self._threshold

@@ -61,27 +61,31 @@ ignore = ["UP042", "B008"]
 
 [tool.mypy]
 python_version = "3.11"
-# Optional/native deps ship no type stubs (fastembed, onnxruntime, riva) — treat
-# their imports as Any rather than failing the whole check on a missing stub.
-ignore_missing_imports = true
+# NOTE: ignore_missing_imports is deliberately NOT set globally — a global flag
+# also hides missing FIRST-PARTY koel.* modules (a stale/renamed internal import
+# silently becomes Any and the blocking gate passes on broken code). It is scoped
+# per-library below to ONLY the optional native deps that ship no type stubs.
 
-# Graduation allowlist (Q-5): mypy is a BLOCKING gate in CI, but these modules
-# still carry pre-existing type errors (a Localized|LocalizedList union in the
-# localization stack; audioop.binascii attr access; a FastAPI lifespan variance).
-# They're silenced here so the gate protects every OTHER module today; the list
-# is only allowed to SHRINK — never add a module to buy silence for new code.
+# Optional/native third-party deps without type stubs. Scoped so a real
+# unresolvable koel.* import still fails the gate.
 [[tool.mypy.overrides]]
 module = [
-    "koel.common.app_factory",
-    "koel.stt.providers",
-    "koel.voicebot.main",
-    "koel.voicebot.ws.handler",
-    "koel.voicebot.pipeline.orchestrator",
-    "koel.voicebot.pipeline.silence",
-    "koel.voicebot.pipeline.filler",
-    "koel.voicebot.pipeline.endpointing",
+    "fastembed.*",
+    "onnxruntime", "onnxruntime.*",
+    "riva.*",
+    "pgvector.*",
+    "boto3", "boto3.*", "botocore.*",
+    "jose", "jose.*",
 ]
-ignore_errors = true
+ignore_missing_imports = true
+
+# Graduation allowlist (Q-5): mypy is a BLOCKING gate. Every pre-existing
+# first-party type error has been FIXED (localization is now generically typed
+# via register(); binascii.Error is imported directly; the smart-turn session is
+# narrowed) rather than blanket-silenced, so this list is EMPTY — the gate now
+# type-checks every module, new code included. If a genuinely-hard error ever
+# needs silencing, prefer a line-level `# type: ignore[code]` over re-adding a
+# whole module here.
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import math
@@ -127,7 +128,7 @@ class StubWhisperProvider(SttProvider):
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
         try:
             raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
-        except (ValueError, base64.binascii.Error):
+        except (ValueError, binascii.Error):
             raw = b""
 
         # Approx speech duration from byte length (16-bit PCM @ sample_rate).
@@ -218,7 +219,7 @@ class GroqWhisperProvider(SttProvider):
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
         try:
             raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
-        except (ValueError, base64.binascii.Error):
+        except (ValueError, binascii.Error):
             raw = b""
         # Type-to-talk passthrough keeps the keyboard-driven demo working.
         if raw.startswith(_TEXT_SENTINEL) or not raw:
@@ -333,7 +334,7 @@ class SarvamSttProvider(SttProvider):
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
         try:
             raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
-        except (ValueError, base64.binascii.Error):
+        except (ValueError, binascii.Error):
             raw = b""
         # Type-to-talk passthrough / empty audio → skip the network call entirely.
         if raw.startswith(_TEXT_SENTINEL) or not raw:
@@ -387,7 +388,7 @@ class SarvamSttProvider(SttProvider):
         """
         try:
             raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
-        except (ValueError, base64.binascii.Error):
+        except (ValueError, binascii.Error):
             raw = b""
 
         # Seam off, type-to-talk sentinel, or empty audio → skip the WS entirely.
