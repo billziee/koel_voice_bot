@@ -154,3 +154,24 @@ async def test_valid_token_but_wrong_password_still_401(app_client, monkeypatch)
         json={"username": "demo", "password": "WRONG", "turnstile_token": "good"},
     )
     assert r.status_code == 401
+
+
+# --- Production startup guard (6.7 review finding #3) ---
+
+def _cfg(*, production: bool, secret: str):
+    return types.SimpleNamespace(is_production=production, turnstile_secret_key=secret)
+
+
+def test_prod_without_turnstile_secret_warns():
+    from koel.voicebot.main import warn_if_turnstile_unenforced
+    assert warn_if_turnstile_unenforced(_cfg(production=True, secret="")) is True
+
+
+def test_prod_with_secret_is_silent():
+    from koel.voicebot.main import warn_if_turnstile_unenforced
+    assert warn_if_turnstile_unenforced(_cfg(production=True, secret="sk_live")) is False
+
+
+def test_non_prod_never_warns():
+    from koel.voicebot.main import warn_if_turnstile_unenforced
+    assert warn_if_turnstile_unenforced(_cfg(production=False, secret="")) is False

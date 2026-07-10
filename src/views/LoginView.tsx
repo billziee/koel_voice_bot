@@ -116,6 +116,15 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
       return;
     }
     setAuthing(true);
+    // The backend verifies the Turnstile token BEFORE the credential check, so a
+    // token is single-use-CONSUMED even on a wrong-password 401. Any failed
+    // attempt must therefore mint a fresh challenge — otherwise the corrected
+    // retry re-sends the already-redeemed token and Cloudflare rejects it as a
+    // duplicate (spurious 403 for a valid-credential user).
+    const resetChallenge = () => {
+      setTurnstileToken(null);
+      if (usingRealTurnstile && window.turnstile) window.turnstile.reset();
+    };
     // Try the real VB_Svc /v1/auth/login. On 401 → bad creds; on 403 → the
     // Turnstile check was rejected by the backend. On a network error (backend
     // down) → fall back to the offline demo simulation so the showcase still runs.
@@ -125,13 +134,13 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
     } catch (err) {
       if (err instanceof KoelApiError && err.status === 401) {
         setError('401 — Invalid credentials. Use the seeded demo credentials below.');
+        resetChallenge();  // token was already redeemed by siteverify — get a fresh one
         setAuthing(false);
         return;
       }
       if (err instanceof KoelApiError && err.status === 403) {
         setError('403 — Human verification failed. Please retry the challenge.');
-        setTurnstileToken(null);
-        if (usingRealTurnstile && window.turnstile) window.turnstile.reset();
+        resetChallenge();
         setAuthing(false);
         return;
       }

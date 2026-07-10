@@ -89,6 +89,27 @@ async def _warm_localization() -> None:
 _DRAIN_TIMEOUT_S = 12.0
 
 
+def warn_if_turnstile_unenforced(cfg) -> bool:  # noqa: ANN001 — CommonSettings subclass
+    """Warn (once, at startup) when production runs with no Turnstile secret (6.7).
+
+    The login challenge is enforced only when KOEL_TURNSTILE_SECRET_KEY is set,
+    but the frontend widget is gated on a SEPARATE build-time key — so a prod
+    deploy can present a solved challenge while the backend verifies nothing.
+    This surfaces that split loudly rather than silently. NOT a hard fail:
+    Turnstile is optional by design (unlike the jwt_secret/CORS prod guards).
+    Returns whether the warning fired (for tests).
+    """
+    if cfg.is_production and not cfg.turnstile_secret_key:
+        logger.warning(
+            "turnstile_disabled_in_production: KOEL_TURNSTILE_SECRET_KEY is unset — "
+            "/v1/auth/login accepts any request without a bot-challenge. If the "
+            "frontend was built with VITE_TURNSTILE_SITE_KEY, users see a challenge "
+            "the backend does NOT verify."
+        )
+        return True
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     runtime = build_runtime(settings)
@@ -96,6 +117,7 @@ async def lifespan(app: FastAPI):
     app.state.active_calls = 0
     app.state.active_sessions = set()  # session_ids with a live socket (concurrency guard)
     logger.info("voicebot_svc starting; redis_ok=%s", await runtime.store.ping())
+    warn_if_turnstile_unenforced(settings)
     await _warm_localization()
     await _warm_filler_cache(runtime)
     yield
