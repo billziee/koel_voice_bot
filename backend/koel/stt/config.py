@@ -29,6 +29,11 @@ class SttSettings(CommonSettings):
     sarvam_stt_model: str = "saaras:v3"
     sarvam_mode: str = "transcribe"
     sarvam_timeout_s: float = 20.0
+    # Streaming STT seam (O-6): when True, SarvamSttProvider.stream_transcribe
+    # attempts the /speech-to-text/ws path (partial + final transcripts) before
+    # degrading to batch transcribe(). OFF by default — the seam is dormant until
+    # the WS handler ingest is rewired against a live Sarvam WS STT endpoint.
+    stream_stt: bool = False
 
     @property
     def groq_enabled(self) -> bool:

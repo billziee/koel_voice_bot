@@ -33,6 +33,7 @@ def _build_provider() -> SttProvider:
             mode=settings.sarvam_mode,
             timeout_s=settings.sarvam_timeout_s,
             fallback=provider,
+            stream_stt=settings.stream_stt,
         )
     return provider
 
