@@ -7,10 +7,13 @@ system is built against, so swapping the body is a config change, not a rewrite.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import logging
 import math
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -46,6 +49,25 @@ _WHISPER_FORCE: dict[Language, str] = {
 class SttProvider(ABC):
     @abstractmethod
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult: ...
+
+    async def stream_transcribe(
+        self, request: TranscribeRequest
+    ) -> AsyncIterator[TranscriptResult]:
+        """Streaming STT seam (O-6): yield transcripts as they resolve, marking
+        interim results ``is_final=False`` and the last ``is_final=True``.
+
+        The default wraps the batch :meth:`transcribe` and yields exactly one
+        final result, so every provider satisfies the seam out of the box —
+        partials are a per-provider optimization (see
+        :meth:`SarvamSttProvider.stream_transcribe`). The consumer treats
+        iterator termination as end-of-utterance.
+        """
+        result = await self.transcribe(request)
+        # Batch honours request.is_final; force the terminal flag so the single
+        # yielded result is unambiguously final regardless of the request.
+        if not result.is_final:
+            result = result.model_copy(update={"is_final": True})
+        yield result
 
     async def warm(self) -> None:
         """Prime provider connection pools at session start (O-1). No-op by
@@ -270,6 +292,12 @@ class SarvamSttProvider(SttProvider):
     Any failure (or the ``TEXT:`` type-to-talk sentinel) falls through to
     ``fallback`` (Groq Whisper), which itself falls to the deterministic stub —
     a live call never drops.
+
+    When ``stream_stt`` is enabled, :meth:`stream_transcribe` upgrades the seam
+    to Sarvam's ``/speech-to-text/ws`` (partial + final transcripts stream out
+    while audio frames stream in), mirroring the TTS WS path. Any WS error
+    degrades to the batch :meth:`transcribe` (which itself cascades to the
+    fallback → stub), so the streaming path never raises on a live call.
     """
 
     def __init__(
@@ -281,14 +309,22 @@ class SarvamSttProvider(SttProvider):
         mode: str = "transcribe",
         timeout_s: float = 20.0,
         fallback: SttProvider,
+        stream_stt: bool = False,
     ) -> None:
         self._model = model
         self._mode = mode
         self._url = f"{base_url.rstrip('/')}/speech-to-text"
         self._headers = {"api-subscription-key": api_key}
+        self._api_key = api_key
         self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._timeout_s = timeout_s
         self._fallback = fallback
         self._warned = False
+        self._stream_stt = stream_stt
+        self._ws_warned = False
+        # https:// → wss:// on the same host; model + mode ride as query params.
+        ws_base = base_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+        self._ws_url = f"{ws_base}/speech-to-text/ws?model={model}&language_code=unknown"
 
     async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
         try:
@@ -333,6 +369,120 @@ class SarvamSttProvider(SttProvider):
             language_confidence=confidence if confidence is not None else 0.5,
             speech_duration_ms=max(120, len(text) * 60),
             word_confidence=0.9,  # Sarvam's REST response has no per-word score
+        )
+
+    async def stream_transcribe(
+        self, request: TranscribeRequest
+    ) -> AsyncIterator[TranscriptResult]:
+        """Stream partials + a final over ``/speech-to-text/ws`` when the seam is
+        enabled; otherwise (or on any WS error) degrade to the batch path.
+
+        Degradation reuses the base default (batch :meth:`transcribe`, which
+        cascades to the fallback → stub), so a live call is never dropped and
+        the seam stays dormant when ``stream_stt`` is off.
+        """
+        try:
+            raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
+        except (ValueError, base64.binascii.Error):
+            raw = b""
+
+        # Seam off, type-to-talk sentinel, or empty audio → skip the WS entirely.
+        if self._stream_stt and raw and not raw.startswith(_TEXT_SENTINEL):
+            produced_final = False
+            try:
+                async for result in self._stream_ws(request, raw):
+                    produced_final = produced_final or result.is_final
+                    yield result
+            except Exception:  # noqa: BLE001 — never raise on the live path; degrade
+                if not self._ws_warned:
+                    self._ws_warned = True
+                    logger.warning(
+                        "sarvam_stt_ws_failed; degrading to batch transcribe",
+                        extra={"extra_fields": {"session_id": request.session_id}},
+                        exc_info=True,
+                    )
+            else:
+                if produced_final:
+                    return
+                # WS closed without a final transcript → treat as incomplete and
+                # fall through to the batch path for an authoritative result.
+                logger.warning(
+                    "sarvam_stt_ws_no_final; degrading to batch transcribe",
+                    extra={"extra_fields": {"session_id": request.session_id}},
+                )
+
+        # Batch path (base default): one final result from transcribe() → fallback.
+        async for result in SttProvider.stream_transcribe(self, request):
+            yield result
+
+    async def _stream_ws(
+        self, request: TranscribeRequest, raw: bytes
+    ) -> AsyncIterator[TranscriptResult]:
+        """True streaming via Sarvam's ``/speech-to-text/ws``: audio frames are
+        streamed in and interim + final transcripts stream back out, mirroring
+        the TTS ``_stream_ws`` protocol (config → data frames → flush in; typed
+        messages out). Partials are yielded ``is_final=False`` and the terminal
+        transcript ``is_final=True``.
+
+        NOTE (O-6 activation): this path is exercised over the seam with mocked
+        WS in tests but is NOT yet fed live mic frames — the WS handler ingest
+        rewrite (streaming audio chunks in place of the batch buffer) is the
+        remaining activation step and needs a live Sarvam WS STT endpoint to
+        verify. Until then the protocol shape here is provisional.
+        """
+        from websockets.asyncio.client import connect as ws_connect
+
+        fmt = (request.audio_format or "wav").lower()
+        async with ws_connect(
+            self._ws_url,
+            additional_headers={"api-subscription-key": self._api_key},
+            open_timeout=self._timeout_s,
+            close_timeout=2.0,
+        ) as ws:
+            config = {
+                "language_code": "unknown",  # auto-detect → genuine language_probability
+                "model": self._model,
+                "mode": self._mode,
+                "input_audio_codec": fmt,
+            }
+            await ws.send(json.dumps({"type": "config", "data": config}))
+            await ws.send(
+                json.dumps(
+                    {"type": "audio", "data": {"audio": base64.b64encode(raw).decode()}}
+                )
+            )
+            await ws.send(json.dumps({"type": "flush"}))
+            while True:
+                frame = await asyncio.wait_for(ws.recv(), timeout=self._timeout_s)
+                msg = json.loads(frame)
+                mtype = msg.get("type")
+                if mtype in ("data", "transcript", "partial", "final"):
+                    data = msg.get("data", {})
+                    is_final = bool(data.get("is_final")) or mtype == "final"
+                    yield self._result_from_ws(request, data, is_final=is_final)
+                    if is_final:
+                        break
+                elif mtype == "event" and msg.get("data", {}).get("event_type") == "final":
+                    break
+                elif mtype == "error":
+                    raise ValueError(f"sarvam stt ws error: {msg.get('data')}")
+
+    def _result_from_ws(
+        self, request: TranscribeRequest, data: dict, *, is_final: bool
+    ) -> TranscriptResult:
+        text = (data.get("transcript") or data.get("text") or "").strip()
+        lang = _SARVAM_LANG.get(str(data.get("language_code", "")).lower(), Language.other)
+        if request.language_hint and lang is Language.other:
+            lang = request.language_hint
+        confidence = data.get("language_probability")
+        return TranscriptResult(
+            session_id=request.session_id,
+            text=text,
+            is_final=is_final,
+            language_id=lang,
+            language_confidence=confidence if confidence is not None else 0.5,
+            speech_duration_ms=max(120, len(text) * 60),
+            word_confidence=0.9,  # Sarvam's WS response has no per-word score
         )
 
     async def warm(self) -> None:
