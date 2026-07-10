@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import time
 
 import httpx
@@ -124,7 +125,7 @@ class CallSession:
             if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
                 try:
                     self._audio_buffer.append(base64.b64decode(message.data.get("audio_b64", "")))
-                except (ValueError, base64.binascii.Error):
+                except (ValueError, binascii.Error):
                     pass
 
     async def run(self) -> None:

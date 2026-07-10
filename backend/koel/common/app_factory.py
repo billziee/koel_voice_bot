@@ -92,7 +92,10 @@ def create_app(
         title=title,
         version=__version__,
         description=description,
-        lifespan=lifespan or _default_lifespan,
+        # FastAPI's lifespan param is typed invariantly over the yielded state
+        # type; our custom lifespans yield None but the annotation doesn't line up.
+        # Targeted ignore (not a module-wide silence) — behaviourally correct.
+        lifespan=lifespan or _default_lifespan,  # type: ignore[arg-type]
         # Richardson L2: proper docs surface per service (PRD §08).
         docs_url="/docs",
         redoc_url="/redoc",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, ItemsView
+from typing import TypeVar
 
 from koel.common.schemas import Language
 
@@ -78,8 +79,15 @@ class LocalizedList:
 
 _REGISTRY: list[Localized | LocalizedList] = []
 
+# Constrained TypeVar so register() is identity-typed: register(Localized(...))
+# returns Localized and register(LocalizedList(...)) returns LocalizedList, rather
+# than widening every module-level table to the union (which forced callers like
+# orchestrator._by_language and filler.FILLER_PHRASES.items() through a union that
+# mypy couldn't resolve).
+_Entry = TypeVar("_Entry", "Localized", "LocalizedList")
 
-def register(entry: Localized | LocalizedList) -> Localized | LocalizedList:
+
+def register(entry: _Entry) -> _Entry:
     """Register a table so ``warm()`` can refresh its Hinglish entry."""
     _REGISTRY.append(entry)
     return entry
