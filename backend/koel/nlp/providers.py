@@ -31,6 +31,7 @@ from koel.nlp.schemas import (
     TurnContext,
 )
 from koel.nlp.streaming import ResponseTextSentenceStreamer
+from koel.nlp.tools import emi, emi_options, format_inr
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,49 @@ def _asserts_product_fact(text: str) -> bool:
     return any(m in low for m in _FACT_MARKERS)
 
 
+def _as_number(value: object) -> float | None:
+    """Coerce a CRM offer field to a number, or None if it isn't one."""
+    if isinstance(value, bool):  # bool is an int subclass — never a loan amount
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    return None
+
+
+def emi_grounding(crm_context: dict) -> str | None:
+    """Server-computed EMI figures for a personal-loan offer, as prompt grounding (2.2).
+
+    LLMs mis-do arithmetic and an EMI is a regulated quote, so we compute the
+    exact monthly EMI (and a what-if table over standard tenures) from the
+    offer's own principal/rate/tenure and hand the model finished numbers to
+    quote — never derive. Returns None (and the turn proceeds unchanged) unless
+    the offer fields are present and usable; best-effort, never raises.
+    """
+    principal = _as_number(crm_context.get("pre_approved_amount"))
+    rate = _as_number(crm_context.get("interest_rate"))
+    tenure = _as_number(crm_context.get("tenure_months"))
+    if principal is None or rate is None or tenure is None:
+        return None
+    try:
+        base = emi(principal, rate, int(tenure))
+        options = emi_options(principal, rate)
+    except ValueError:
+        return None
+    if not options:
+        return None
+    table = ", ".join(f"{m}mo={format_inr(v)}" for m, v in sorted(options.items()))
+    return (
+        "EMI (server-computed — quote these EXACTLY, never calculate an EMI yourself): "
+        f"{format_inr(principal)} at {rate}% p.a. over {int(tenure)} months "
+        f"= {format_inr(base)}/month. What-if tenures: {table}."
+    )
+
+
 class GroqNlpProvider(NlpProvider):
     """Live NLP via Groq (OpenAI-compatible chat completions).
 
@@ -364,6 +408,12 @@ class GroqNlpProvider(NlpProvider):
         if crm:
             crm_str = ", ".join(f"{k}={v}" for k, v in crm.items())
             parts.append(f"CUSTOMER (CRM): {crm_str}")
+        # Deterministic EMI grounding (2.2): for personal-loan turns, hand the model
+        # server-computed EMI figures to quote so it never does the arithmetic itself.
+        if ctx.use_case == "personal_loan":
+            grounding = emi_grounding(ctx.crm_context)
+            if grounding:
+                parts.append(grounding)
         if retrieved:
             kb = "\n".join(f"- {c.title}: {c.content}" for c in retrieved)
             titles = ", ".join(f'"{c.title}"' for c in retrieved)
