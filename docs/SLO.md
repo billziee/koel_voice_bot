@@ -41,6 +41,8 @@ Distributed traces (spans) carry `synthesize_latency_ms`, `fallback_used`, and
 
 - Redis evictions / memory pressure → session-state loss risk.
 - DB connection-pool exhaustion (`db_pool_size` + `db_max_overflow`) → 5xx.
+  Watch `koel.db.pool.in_use` (vs the pool ceiling) + `koel.db.pool.held`; load-test
+  and resize per [`LOADTEST.md`](./LOADTEST.md).
 - Circuit breaker open (`koel.errors{hop=nlp}` spike + fallback logs) → upstream down.
 - TTS `fallback_used` rate → primary engine degraded.
 

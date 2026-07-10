@@ -112,3 +112,20 @@ async def test_pool_observability_listeners_attach_and_fire(monkeypatch):
     # checkin listener must have recorded a non-negative duration.
     assert held, "checkin listener should record a connection hold time"
     assert held[0] >= 0.0
+
+
+def test_db_pool_use_lifo_default_on(monkeypatch):
+    """O-10 pool right-sizing: LIFO checkout is on by default (env-overridable)."""
+    from koel.common.config import CommonSettings
+
+    monkeypatch.delenv("KOEL_DB_POOL_USE_LIFO", raising=False)
+    settings = CommonSettings(_env_file=None)
+    assert settings.db_pool_use_lifo is True
+
+
+def test_db_pool_use_lifo_env_override(monkeypatch):
+    from koel.common.config import CommonSettings
+
+    monkeypatch.setenv("KOEL_DB_POOL_USE_LIFO", "false")
+    settings = CommonSettings(_env_file=None)
+    assert settings.db_pool_use_lifo is False

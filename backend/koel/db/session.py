@@ -72,6 +72,10 @@ def get_engine() -> AsyncEngine:
             max_overflow=settings.db_max_overflow,
             pool_recycle=settings.db_pool_recycle_s,
             pool_timeout=settings.db_pool_timeout_s,
+            # LIFO checkout lets idle connections age out between bursts (paired
+            # with pool_pre_ping above), shrinking the live-connection footprint
+            # against RDS max_connections. See config.db_pool_use_lifo.
+            pool_use_lifo=settings.db_pool_use_lifo,
         )
     engine = create_async_engine(settings.database_url, **kwargs)
     # Pool checkout observability (O-10). Best-effort: never fail engine creation.
