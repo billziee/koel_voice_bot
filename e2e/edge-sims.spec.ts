@@ -48,22 +48,6 @@ async function signIn(page: Page): Promise<void> {
   await expect(page.getByText(/Bot Dashboard|Dashboard/i).first()).toBeVisible({ timeout: 15_000 });
 }
 
-// Launch the ICICI bot and drive the guided demo until the greeting appears.
-// ActiveCallView is a React.lazy chunk, so wait for the lazy view to render,
-// then click the demo button and retry until the scripted call starts.
-// Copied from call-flow.spec.ts.
-async function launchDemoCall(page: Page): Promise<void> {
-  await page.getByText('ICICI Pre-Due Collections').first().click();
-  const demoButton = page.getByRole('button', { name: /Run Guided Demo/i });
-  await expect(demoButton).toBeVisible({ timeout: 15_000 });
-  const greeting = page.getByText(/KOEL BOT/i).first();
-  await expect(async () => {
-    if (await greeting.isVisible().catch(() => false)) return;
-    await demoButton.click({ timeout: 2_000 });
-    await expect(greeting).toBeVisible({ timeout: 2_500 });
-  }).toPass({ timeout: 30_000 });
-}
-
 // Open the sandbox call view for the ICICI demo bot WITHOUT auto-running the
 // guided demo, so a test can drive Start Call + individual simulation chips
 // itself. The lazy view is settled once its idle Start Call control renders.
@@ -72,16 +56,26 @@ async function openSandbox(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: /Start Call/i })).toBeVisible({ timeout: 15_000 });
 }
 
-// 1) Barge-in — the guided demo interrupts the bot mid-greeting (~9s in):
-// simulateBargeIn marks the most recent bot bubble interrupted, which renders a
-// persistent "interrupted" badge (TranscriptMessage). The badge stays in the
-// transcript for the rest of the session, so a generous timeout is race-free.
-test('barge-in during the guided demo flags the interrupted transcript bubble', async ({ page }) => {
+// 1) Barge-in — the "Barge-In (interrupt)" chip is enabled only while the bot is
+// speaking (the greeting window); clicking it runs simulateBargeIn, which marks
+// the most recent bot bubble interrupted → a persistent "interrupted" badge
+// (TranscriptMessage). click() auto-waits until the chip is actionable, so it
+// lands mid-greeting without a sleep. (Driving this via the guided demo is
+// unreliable: the ~12s ICICI greeting outlasts the demo's ~9.5s barge-in step,
+// so the no-input watchdog closes the call before barge-in fires.)
+test('the barge-in chip flags the interrupted transcript bubble', async ({ page }) => {
   test.setTimeout(90_000);
   await signIn(page);
-  await launchDemoCall(page);
+  await openSandbox(page);
+  await page.getByRole('button', { name: /Start Call/i }).click();
 
-  await expect(page.getByText('interrupted', { exact: true }).first()).toBeVisible({ timeout: 45_000 });
+  // Wait for the greeting bubble first so there's a bot turn to interrupt — the
+  // chip enables at bot_speaking (~1.2s) but the greeting isn't added until ~2.3s,
+  // and the ~12s greeting leaves plenty of speaking window to still barge in.
+  await expect(page.getByText(/KOEL BOT/i).first()).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: /Barge-In \(interrupt\)/i }).click({ timeout: 45_000 });
+
+  await expect(page.getByText('interrupted', { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 });
 
 // 2) Escalation → agent handoff. Once the bot finishes greeting the call goes
