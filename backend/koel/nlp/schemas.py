@@ -86,6 +86,11 @@ class NlpResponse(BaseModel):
     escalate: bool = False
     escalation_reason: str | None = None
     end_call: bool = False
+    # Structured in-call actions the model requests (2.1): e.g.
+    # {"type": "send_payment_link", "amount": 4500} / {"type": "promise_to_pay",
+    # "amount": 4500, "date": "2026-07-20"}. The orchestrator dispatches them
+    # deterministically after the turn; unknown/malformed entries are ignored.
+    actions: list[dict] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0, default=0.8)
     retrieved: list[RetrievedChunk] = Field(default_factory=list)
     # KB chunks the reply cited; empty when the turn asserts no product fact.

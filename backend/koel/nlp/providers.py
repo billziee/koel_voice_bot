@@ -479,6 +479,10 @@ class GroqNlpProvider(NlpProvider):
                 extra={"session_id": ctx.session_id, "retrieved": len(retrieved)},
             )
 
+        # In-call actions (2.1): keep only well-formed {"type": str, ...} entries;
+        # the orchestrator validates each type before acting.
+        actions = [a for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("type")]
+
         return NlpResponse(
             session_id=ctx.session_id,
             response_text=text,
@@ -492,6 +496,7 @@ class GroqNlpProvider(NlpProvider):
             retrieved=retrieved,
             citations=citations,
             grounded=grounded,
+            actions=actions,
         )
 
     # llama-3.3-70b-versatile blended $/token (Groq public pricing, ~$0.59/M in +

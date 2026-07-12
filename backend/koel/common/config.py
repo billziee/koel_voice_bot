@@ -70,6 +70,20 @@ class CommonSettings(BaseSettings):
     turnstile_verify_url: str = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
     turnstile_timeout_s: float = 5.0
 
+    # --- Outbound messaging (2.1 SMS / 2.4 WhatsApp) + payment links ---
+    # All empty by default ⇒ the channel is DORMANT: a send is a logged no-op that
+    # returns False, so in-call actions (payment link, follow-up) degrade cleanly
+    # until a gateway + key are configured. A generic HTTP gateway is assumed
+    # ({url} POST with a bearer key); swap the adapter for Twilio/MSG91/Meta later.
+    sms_gateway_url: str = ""
+    sms_api_key: str = ""
+    whatsapp_gateway_url: str = ""
+    whatsapp_api_key: str = ""
+    messaging_timeout_s: float = 8.0
+    # Payment-link provider base URL (Razorpay/Setu). Empty ⇒ no link is minted
+    # (the action still records the intent on the CRM, just sends nothing).
+    payment_link_base_url: str = ""
+
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
     # Rate-limiter backend (O-8): "memory" is per-process (fine for a single

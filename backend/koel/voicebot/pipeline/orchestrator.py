@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
+from koel.common.messaging import Channel, send_message
 from koel.common.schemas import Language, Tone
 from koel.common.telemetry import (
     current_trace_id,
@@ -412,6 +413,10 @@ class Orchestrator:
                 state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
             )
 
+        # In-call revenue actions (2.1): payment-link SMS, promise-to-pay capture.
+        if nlp.actions:
+            await self._dispatch_actions(state, nlp.actions)
+
         if nlp.escalate:
             await self._escalate(state, send, reason=nlp.escalation_reason or "intent")
             return
@@ -450,6 +455,42 @@ class Orchestrator:
             await self._clients.flag_customer(customer_id, flag, reason)
         except Exception:  # noqa: BLE001 — best-effort; the turn proceeds regardless
             logger.warning("crm_flag_failed flag=%s customer=%s", flag, customer_id, exc_info=True)
+
+    def _payment_link(self, customer_id: str | None, amount: object) -> str | None:
+        """Mint a payment-link URL when a provider base URL is configured (2.1);
+        None otherwise (the action still records intent, just sends no link)."""
+        base = self._settings.payment_link_base_url
+        if not base or amount is None or not customer_id:
+            return None
+        return f"{base.rstrip('/')}/pay?ref={customer_id}&amt={amount}"
+
+    async def _dispatch_actions(self, state: SessionState, actions: list[dict]) -> None:
+        """Execute the NLP's structured in-call actions (2.1) after the bot turn.
+        Each is best-effort and idempotency-keyed; a failure never breaks the call."""
+        phone = state.crm_context.get("phone") if isinstance(state.crm_context, dict) else None
+        for i, action in enumerate(actions):
+            atype = str(action.get("type", ""))
+            try:
+                if atype == "promise_to_pay":
+                    detail = f"amount={action.get('amount')} date={action.get('date')}"
+                    await self._flag_best_effort(state.customer_id, "promise_to_pay", detail)
+                elif atype == "send_payment_link":
+                    amount = action.get("amount")
+                    link = self._payment_link(state.customer_id, amount)
+                    await self._flag_best_effort(
+                        state.customer_id, "payment_link_sent",
+                        f"amount={amount} link={link or 'n/a'}",
+                    )
+                    if link and phone:
+                        await send_message(
+                            Channel.sms, str(phone),
+                            f"Here is your secure payment link: {link}",
+                            idempotency_key=f"{state.session_id}:paylink:{i}",
+                        )
+                else:
+                    logger.info("ignored_unknown_action type=%s", atype)
+            except Exception:  # noqa: BLE001 — actions are best-effort, never break the turn
+                logger.warning("action_dispatch_failed type=%s", atype, exc_info=True)
 
     def _build_turn_context(self, state: SessionState) -> TurnContext:
         """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
