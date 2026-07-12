@@ -248,6 +248,7 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             resumed=resumed,
             background_tasks=runtime.background_tasks,
             escalations=runtime.escalations,
+            monitor=runtime.monitor,
         )
     finally:
         websocket.app.state.active_calls -= 1

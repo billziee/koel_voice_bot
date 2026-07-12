@@ -28,6 +28,7 @@ from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.escalation import EscalationHub
+from koel.voicebot.monitor import LiveMonitor
 from koel.voicebot.persistence import (
     abandon_escalation_by_session,
     create_escalation,
@@ -75,6 +76,7 @@ class CallSession:
         background_tasks: set | None = None,
         smart_turn: SmartTurnAnalyzer | None = None,
         escalations: EscalationHub | None = None,
+        monitor: LiveMonitor | None = None,
     ) -> None:
         self._ws = websocket
         self._state = state
@@ -87,6 +89,8 @@ class CallSession:
         # Human-handoff bridge (3.1): set once the call parks in waiting_agent.
         self._escalations = escalations if escalations is not None else EscalationHub()
         self._escalation_id: str | None = None
+        # Live supervisor monitor (3.3): read-only tee of transcript + state.
+        self._monitor = monitor if monitor is not None else LiveMonitor()
         # Strong refs to detached finalizer tasks so they aren't GC'd mid-run.
         self._background_tasks = background_tasks if background_tasks is not None else set()
         self._bot_speaking = False
@@ -106,6 +110,16 @@ class CallSession:
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
             await self._ws.send_text(message.model_dump_json())
+        # Supervisor monitor tee (3.3): mirror transcript + state into the live
+        # view. Cheap dict ops, best-effort — never affects the call.
+        if message.type == ServerMessageType.transcript:
+            self._monitor.record_turn(
+                self._state.session_id,
+                str(message.data.get("speaker", "")),
+                str(message.data.get("text", "")),
+            )
+        elif message.type == ServerMessageType.call_state:
+            self._monitor.set_status(self._state.session_id, str(message.data.get("status", "")))
         # Barge-in gating: once we dispatch bot audio, the client may still be
         # *playing* it for several seconds — that whole window is when a
         # barge_in_candidate can legitimately arrive. So "bot speaking" stays
@@ -148,6 +162,8 @@ class CallSession:
         # caller's first turn skips cold cross-ocean handshakes. Fire-and-forget:
         # it runs concurrently with the greeting and never blocks the call.
         warmup = asyncio.create_task(self._clients.warm_up())
+        # Register this call in the live supervisor view (3.3).
+        self._monitor.open(self._state.session_id, self._state.bot_id, self._state.org_id)
         if self._resumed:
             # PRD §05: emit a RECONNECTED span so resume latency is observable.
             with span(
@@ -537,6 +553,8 @@ class CallSession:
             _, timer = self._pending_turn
             self._pending_turn = None
             timer.cancel()
+        # Drop the call from the live supervisor view (3.3).
+        self._monitor.close(self._state.session_id)
         # Tear down any live human-handoff (3.1): drop the operator bridge and, if
         # the handoff was never resolved (caller hung up mid-hold), mark it abandoned.
         if self._escalation_id is not None:
@@ -628,6 +646,7 @@ async def handle_connection(
     background_tasks: set | None = None,
     smart_turn: SmartTurnAnalyzer | None = None,
     escalations: EscalationHub | None = None,
+    monitor: LiveMonitor | None = None,
 ) -> None:
     set_correlation_id(session_id)
     call = CallSession(
@@ -642,5 +661,6 @@ async def handle_connection(
         background_tasks=background_tasks,
         smart_turn=smart_turn,
         escalations=escalations,
+        monitor=monitor,
     )
     await call.run()

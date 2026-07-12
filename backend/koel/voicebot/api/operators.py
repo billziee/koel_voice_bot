@@ -146,3 +146,39 @@ async def resolve(
         extra={"extra_fields": {"escalation_id": escalation_id, "operator": user.sub}},
     )
     return row
+
+
+# --- Live supervisor monitor (3.3) ------------------------------------------
+
+
+class MonitorCall(BaseModel):
+    session_id: str
+    bot_id: str
+    status: str
+    turn_count: int
+    opened_at: str
+    last_at: str
+
+
+@router.get("/monitor", response_model=list[MonitorCall])
+async def monitor_calls(
+    user: CurrentUser, runtime: Runtime = Depends(get_runtime)
+) -> list[dict]:
+    """Read-only list of in-flight calls on this instance (org-scoped)."""
+    return runtime.monitor.list_active(user.org_id)
+
+
+@router.get("/monitor/{session_id}")
+async def monitor_call_detail(
+    session_id: str, user: CurrentUser, runtime: Runtime = Depends(get_runtime)
+) -> dict:
+    """Live detail for one call: status + recent transcript. 404 if the call
+    isn't live here (ended, or served by another process/instance)."""
+    detail = runtime.monitor.get(session_id, user.org_id)
+    if detail is None:
+        raise ApiError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="call_not_live",
+            message="No live call with that id on this instance.",
+        )
+    return detail
