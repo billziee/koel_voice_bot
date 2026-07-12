@@ -213,6 +213,7 @@ class Orchestrator:
             language=state.language,
             tone=tone,
             voice_gender=state.voice_gender,
+            voice=state.voice,
             speaking_rate=state.speaking_rate,
             ambient=use_ambient,
             ambient_profile=state.ambient_profile if use_ambient else None,

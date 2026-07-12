@@ -68,6 +68,7 @@ class SessionState(BaseModel):
     default_tone: Tone = Tone.neutral
     # Persona (G): carried from bot config into every SynthesizeRequest.
     voice_gender: str = "female"
+    voice: str | None = None  # per-bot persona voice id (4.2); None → engine default
     speaking_rate: float = 1.0
     ambient_profile: str = "callfloor"
     greeting_template: str = ""  # from bot config; rendered with CRM fields at greet

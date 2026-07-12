@@ -30,6 +30,11 @@ class SynthesizeRequest(BaseModel):
     language: Language = Language.hinglish
     tone: Tone = Tone.neutral
     voice_gender: str = "female"
+    # Per-bot persona voice (4.2): an explicit engine voice/speaker id that, when
+    # set, overrides the gender-derived default (Orpheus) or the constructor
+    # speaker (Sarvam). None ⇒ unchanged behaviour. A cloned/brand voice is just
+    # a new id here, gated per bot in BotConfig.config['voice'].
+    voice: str | None = None
     speaking_rate: float = 1.0  # bot-config override, multiplies tone rate
     # Stream chunks back vs. return a single clip. Streaming enables barge-in.
     stream: bool = True

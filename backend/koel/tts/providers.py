@@ -200,6 +200,9 @@ class GroqOrpheusProvider(TtsProvider):
     _VOICE_BY_GENDER = {"female": "autumn", "male": "austin"}
 
     def _voice_for(self, request: SynthesizeRequest) -> str:
+        # An explicit per-bot voice (4.2) wins over the gender-derived default.
+        if request.voice:
+            return request.voice
         return self._VOICE_BY_GENDER.get((request.voice_gender or "").lower(), self._voice)
 
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
@@ -399,7 +402,7 @@ class SarvamTtsProvider(TtsProvider):
                 json={
                     "text": request.text,
                     "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
-                    "speaker": self._speaker,
+                    "speaker": request.voice or self._speaker,  # per-bot persona (4.2)
                     "model": self._model,
                     "speech_sample_rate": self._sr,
                     "audio_format": self._format,
@@ -473,7 +476,7 @@ class SarvamTtsProvider(TtsProvider):
         ) as ws:
             config = {
                 "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
-                "speaker": self._speaker,
+                "speaker": request.voice or self._speaker,  # per-bot persona (4.2)
                 "speech_sample_rate": str(self._sr),
                 "output_audio_codec": "linear16",
                 "model": self._model,

@@ -155,6 +155,7 @@ async def start_session(
         prompt_preamble=bot.prompt_preamble,
         default_tone=default_tone,
         voice_gender=bot.voice_gender,
+        voice=(bot.config.get("voice") if isinstance(bot.config, dict) else None),
         speaking_rate=bot.speaking_rate,
         ambient_profile=bot.ambient_profile,
         greeting_template=bot.greeting_template or "",
