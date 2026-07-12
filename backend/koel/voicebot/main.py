@@ -7,14 +7,20 @@ filler-audio cache at startup so latency masking is ready on the first slow turn
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import wave
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 
 from koel.common.app_factory import create_app
 from koel.common.auth import authenticate_websocket
-from koel.common.logging import get_logger
+from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
+from koel.db.models import BotConfig
+from koel.db.session import session_scope
+from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.api import (
     analytics,
@@ -32,6 +38,9 @@ from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.filler import FILLER_PHRASES, filler_tone_for
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
 from koel.voicebot.session.models import CallStatus
+from koel.voicebot.telephony.bridge import TwilioMediaBridge
+from koel.voicebot.telephony.ingest import TelephonyAudioIngest
+from koel.voicebot.telephony.twilio import verify_twilio_signature
 from koel.voicebot.ws.handler import handle_connection
 
 logger = get_logger("koel.voicebot")
@@ -253,6 +262,115 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
     finally:
         websocket.app.state.active_calls -= 1
         active_sessions.discard(session_id)
+
+
+def _pcm16_to_wav_b64(pcm16: bytes, sample_rate: int) -> str:
+    """Wrap raw PCM16 mono samples in a WAV container (base64) for STT_svc.
+
+    Twilio delivers 8 kHz µ-law; the bridge decodes it to raw 16 kHz PCM16. STT
+    infers the codec from the container, so the endpointed utterance is framed as
+    a WAV — the exact inverse of the bridge's own ``_wav_to_pcm16``.
+    """
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm16)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+@app.websocket("/twilio/stream")
+async def twilio_stream(websocket: WebSocket) -> None:
+    """Inbound PSTN call bridge over Twilio Media Streams (roadmap 1.1 / 1.3).
+
+    DORMANT by default. The Twilio request signature is verified FIRST and fails
+    CLOSED when no ``KOEL_TWILIO_AUTH_TOKEN`` is configured, so an unconfigured
+    deployment rejects the upgrade (1008) rather than trusting it. Browser calls
+    (``/ws/calls/{session_id}``) are entirely unaffected.
+
+    On a configured deployment: verify signature → confirm a default bot is bound
+    → accept → seed a :class:`SessionState` (shared with the HTTP path) → wire the
+    caller-audio seam through server-side endpointing (:class:`TelephonyAudioIngest`)
+    into ``orchestrator.handle_final_transcript`` → run the media bridge.
+    """
+    # (1) Fail-closed signature check. verify_twilio_signature returns False on an
+    # empty auth token, so this is the dormancy gate — no token, no inbound calls.
+    signature = websocket.headers.get("x-twilio-signature", "")
+    signed_url = f"{settings.public_base_url}/twilio/stream"
+    params = dict(websocket.query_params)
+    if not verify_twilio_signature(signed_url, params, signature, settings.twilio_auth_token):
+        await websocket.close(code=1008, reason="invalid twilio signature")
+        return
+
+    # (2) Inbound needs a bound bot: the WS URL carries no session_id (unlike the
+    # browser path), so a configured default BotConfig identifies the callee.
+    if not settings.twilio_default_bot_id:
+        await websocket.close(code=1008, reason="inbound telephony disabled")
+        return
+
+    runtime = websocket.app.state.runtime
+    async with session_scope() as db:
+        bot: BotConfig | None = await db.get(BotConfig, settings.twilio_default_bot_id)
+    if bot is None or not bot.active:
+        await websocket.close(code=1008, reason="inbound bot unavailable")
+        return
+
+    await websocket.accept()
+
+    # (4) Seed the call. The caller's number may arrive as a templated WS query
+    # param (e.g. <Stream url=".../twilio/stream?From={{From}}">); if absent the
+    # CRM context stays minimal (an inbound number lookup is a later step).
+    caller_phone = websocket.query_params.get("From") or websocket.query_params.get("from")
+    state = sessions.build_session_state(
+        bot,
+        customer_id=None,
+        crm_context={"phone": caller_phone} if caller_phone else {},
+    )
+    set_correlation_id(state.session_id)
+    await runtime.store.save(state)
+
+    # (5) STT seam: wrap clients.transcribe (mirrors ws/handler._handle_audio —
+    # final utterance, language pinned to the bot) behind the endpointer.
+    async def _transcribe(pcm16: bytes, sample_rate: int) -> TranscriptResult | None:
+        return await runtime.clients.transcribe(
+            TranscribeRequest(
+                session_id=state.session_id,
+                audio_b64=_pcm16_to_wav_b64(pcm16, sample_rate),
+                sample_rate=sample_rate,
+                is_final=True,
+                audio_format="wav",
+                language_hint=state.language,
+            )
+        )
+
+    async def _on_utterance(stt: TranscriptResult) -> None:
+        # bridge.send translates the orchestrator's reply back into Twilio frames.
+        await runtime.orchestrator.handle_final_transcript(state, bridge.send, stt)
+
+    ingest = TelephonyAudioIngest(transcribe=_transcribe, on_utterance=_on_utterance)
+
+    # (6) Run the media bridge. Constructed directly (this is exactly what
+    # run_twilio_bridge does) so on_utterance can reach the bridge's own send.
+    dtmf_map = bot.config.get("dtmf_map", {}) if isinstance(bot.config, dict) else {}
+    bridge = TwilioMediaBridge(
+        websocket=websocket,
+        orchestrator=runtime.orchestrator,
+        state=state,
+        dtmf_map=dtmf_map,
+        on_caller_audio=ingest.feed,
+    )
+
+    websocket.app.state.active_calls += 1
+    try:
+        await bridge.run()
+    finally:
+        # Drain any speech still buffered when the stream stopped — unless the
+        # call already ended normally (a `stop`/hangup already ran end_call), in
+        # which case there's no one left to answer.
+        if state.status != CallStatus.ended:
+            await ingest.flush()
+        websocket.app.state.active_calls -= 1
 
 
 # Re-export the supported-language set for clients/tests.
