@@ -268,8 +268,17 @@ You MUST respond with a single JSON object and nothing else, matching exactly:
   "escalation_reason": "<short reason or null>",
   "end_call": <true|false>,
   "confidence": <float 0.0-1.0>,
-  "citations": [{{"title": "<exact KNOWLEDGE chunk title used>", "excerpt": "<short quote>"}}]
+  "citations": [{{"title": "<exact KNOWLEDGE chunk title used>", "excerpt": "<short quote>"}}],
+  "actions": [<zero or more of the action objects below — omit or leave empty when none apply>]
 }}
+
+Optional "actions" you may request (the system executes them; never claim an
+action succeeded in "response_text" beyond acknowledging it):
+- {{"type": "send_payment_link", "amount": <number>}} — customer agreed to pay now.
+- {{"type": "promise_to_pay", "amount": <number>, "date": "<YYYY-MM-DD>"}} — commitment to pay later.
+- {{"type": "schedule_callback", "at": "<ISO-8601 datetime with timezone>"}} — the customer
+  asked to be called back at a specific time. Compute "at" as an absolute timestamp from
+  their words and the current time; if you cannot resolve a concrete time, omit the action.
 """
 
 # Words that signal a concrete product claim (fee/rate/reward/feature). Used to

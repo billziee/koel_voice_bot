@@ -78,6 +78,30 @@ async def enqueue_dial(
         return row.id
 
 
+async def schedule_callback(
+    *,
+    org_id: str | None,
+    customer_id: str | None,
+    phone: str,
+    at: datetime,
+    now: datetime | None = None,
+) -> str | None:
+    """Queue a customer-requested callback (2.5) as a campaign-less dial due at
+    ``at``. Returns the row id, or ``None`` if the time isn't in the future (a
+    stale/mis-parsed time must never become an immediate dial). Requires a phone
+    to be reachable — the worker can't call an empty number."""
+    now = now or _now()
+    if at <= now or not phone:
+        return None
+    return await enqueue_dial(
+        campaign_id=None,
+        org_id=org_id,
+        customer_id=customer_id,
+        phone=phone,
+        scheduled_at=at,
+    )
+
+
 async def claim_due_attempts(limit: int = 10, now: datetime | None = None) -> list[dict]:
     """Atomically claim up to ``limit`` due dials (``pending`` + ``scheduled_at`` <=
     now), mark them ``in_progress``, bump ``attempt_count``, and return them. On

@@ -32,9 +32,11 @@ from koel.common.text_guard import redact_pii
 from koel.nlp.schemas import Intent, NlpResponse, Sentiment, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
+from koel.voicebot.campaigns import schedule_callback
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline import localization
+from koel.voicebot.pipeline.callback import parse_callback_time
 from koel.voicebot.pipeline.cost import estimate_turn_cost_usd
 from koel.voicebot.pipeline.filler import FillerCache, filler_tone_for
 from koel.voicebot.session.models import CallStatus, SessionState, Turn
@@ -43,6 +45,19 @@ from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 logger = get_logger("koel.voicebot.orchestrator")
 
 Sender = Callable[[ServerMessage], Awaitable[None]]
+
+
+def _coerce_iso(value: object) -> datetime | None:
+    """Parse an NLP-supplied ISO timestamp for a scheduled callback (2.5),
+    normalising to timezone-aware UTC. Returns ``None`` on anything unparseable —
+    a bad time must never crash the turn or become an immediate dial."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 # Explicit "switch language" request in the caller's words (reliable, unlike STT
 # language guessing). A request cue + a language word → lock that language.
@@ -406,8 +421,11 @@ class Orchestrator:
             await self.end_call(state, send, outcome="declined")
             return
         if nlp.intent == Intent.busy:
-            # Deferral → schedule a callback rather than treat it as a loss.
-            await self._flag_best_effort(state.customer_id, "callback", "customer busy")
+            # Deferral → book a concrete callback from what they said ("call me
+            # tomorrow at 5"); fall back to just flagging the intent when the
+            # utterance carried no parseable time.
+            if not await self._schedule_callback(state, {}):
+                await self._flag_best_effort(state.customer_id, "callback", "customer busy")
         if not stream_turn:
             await self._send_bot_turn(
                 state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
@@ -487,10 +505,41 @@ class Orchestrator:
                             f"Here is your secure payment link: {link}",
                             idempotency_key=f"{state.session_id}:paylink:{i}",
                         )
+                elif atype == "schedule_callback":
+                    await self._schedule_callback(state, action)
                 else:
                     logger.info("ignored_unknown_action type=%s", atype)
             except Exception:  # noqa: BLE001 — actions are best-effort, never break the turn
                 logger.warning("action_dispatch_failed type=%s", atype, exc_info=True)
+
+    async def _schedule_callback(self, state: SessionState, action: dict) -> bool:
+        """Queue a customer-requested callback (2.5). Time source, in order: the
+        NLP's structured ``at`` (ISO), else deterministic parsing of the last
+        customer utterance so it works even when NLP is dormant (no key). Returns
+        True iff a concrete dial was booked; no phone or no parseable future time
+        → logged no-op (never a bogus immediate dial)."""
+        now = datetime.now(UTC)
+        phone = state.crm_context.get("phone") if isinstance(state.crm_context, dict) else None
+        at = _coerce_iso(action.get("at"))
+        if at is None and state.transcript:
+            at = parse_callback_time(
+                state.transcript[-1].text, now, self._settings.calling_hours_tz
+            )
+        if at is None or not phone:
+            logger.info(
+                "callback_not_scheduled session_id=%s has_time=%s has_phone=%s",
+                state.session_id, at is not None, bool(phone),
+            )
+            return False
+        attempt_id = await schedule_callback(
+            org_id=state.org_id, customer_id=state.customer_id, phone=str(phone), at=at, now=now
+        )
+        if attempt_id is None:
+            return False
+        await self._flag_best_effort(
+            state.customer_id, "callback", f"at={at.isoformat()} attempt={attempt_id}"
+        )
+        return True
 
     def _build_turn_context(self, state: SessionState) -> TurnContext:
         """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
