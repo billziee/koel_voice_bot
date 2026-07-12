@@ -65,6 +65,16 @@ class CallOutcome(str, enum.Enum):
     in_progress = "in_progress"
 
 
+class EscalationStatus(str, enum.Enum):
+    """Lifecycle of a human-handoff request (3.1). The caller's CallLog stays
+    ``escalated``; this tracks what the operator did with the handoff."""
+
+    pending = "pending"  # queued, no operator yet
+    claimed = "claimed"  # an operator picked it up
+    resolved = "resolved"  # operator finished and ended the call
+    abandoned = "abandoned"  # caller hung up / grace expired before resolution
+
+
 class UseCase(str, enum.Enum):
     credit_card = "credit_card"
     collections = "collections"
@@ -185,6 +195,33 @@ class TranscriptTurn(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     call: Mapped[CallLog] = relationship(back_populates="transcript_turns")
+
+
+class EscalationRequest(Base):
+    """A human-handoff request (3.1). Created when the bot escalates; carries the
+    full context an operator needs (transcript + CRM) so the handoff is 100%
+    (PRD §02). The caller's socket holds in ``waiting_agent`` until an operator
+    claims + resolves it (or the caller drops → abandoned)."""
+
+    __tablename__ = "escalation_requests"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF tenant scope
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    bot_id: Mapped[str] = mapped_column(String(64))
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str] = mapped_column(String(128), default="")
+    language: Mapped[str] = mapped_column(String(16), default="hinglish")
+    status: Mapped[EscalationStatus] = mapped_column(
+        Enum(EscalationStatus), default=EscalationStatus.pending, index=True
+    )
+    operator_sub: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Full handoff context so the operator needs nothing else (PRD §02).
+    transcript: Mapped[list] = mapped_column(JSON, default=list)
+    crm_context: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # --- RAG knowledge base (pgvector) ------------------------------------------

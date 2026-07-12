@@ -13,6 +13,7 @@ from fastapi import Request
 
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
+from koel.voicebot.escalation import EscalationHub
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer
 from koel.voicebot.pipeline.filler import FillerCache
@@ -30,6 +31,9 @@ class Runtime:
     orchestrator: Orchestrator
     # Semantic end-of-turn gate (None unless KOEL_SMART_TURN_ENABLED).
     smart_turn: SmartTurnAnalyzer | None = None
+    # Live operator↔caller bridge for human handoff (3.1). Shared across the WS
+    # handler (caller side) and the operator REST API (operator side).
+    escalations: EscalationHub = field(default_factory=EscalationHub)
     # Strong refs to detached grace-window finalizers (PRD §05 dropped calls),
     # so they survive after the WebSocket handler returns.
     background_tasks: set[asyncio.Task] = field(default_factory=set)
