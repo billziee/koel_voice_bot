@@ -74,6 +74,9 @@ class SessionState(BaseModel):
     # Per-bot backchannel overrides (PRD §05): {language: [words…]} merged on top
     # of the default dictionary so a bot instance can tune its Gate-2 vocabulary.
     backchannels: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-bot script-adherence QA rules (5.5): required_disclosures /
+    # prohibited_phrases / required_intents. Empty ⇒ QA is skipped at call end.
+    qa_rules: dict = Field(default_factory=dict)
     # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from koel.common.logging import get_logger
 from koel.db.models import CallLog, CallOutcome, EscalationRequest, EscalationStatus, TranscriptTurn
 from koel.db.session import session_scope
+from koel.voicebot.pipeline.qa import score_transcript
 from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.persistence")
@@ -35,6 +36,18 @@ async def persist_call(state: SessionState) -> str | None:
     now = datetime.now(UTC)
     duration_ms = int((now - state.started_at).total_seconds() * 1000)
 
+    # §11 audit + §14 latency dashboards: consent log + trace id.
+    metrics: dict = {
+        "turns": len(state.transcript),
+        "consent_captured": state.consent_captured,
+        "consent_at": state.consent_at.isoformat() if state.consent_at else None,
+        "trace_id": state.trace_id,
+    }
+    # Deterministic script-adherence QA (5.5), when the bot defines rules.
+    qa = score_transcript(state.transcript, state.qa_rules)
+    if qa is not None:
+        metrics["qa"] = qa
+
     try:
         async with session_scope() as db:
             call = CallLog(
@@ -49,13 +62,7 @@ async def persist_call(state: SessionState) -> str | None:
                 duration_ms=duration_ms,
                 escalated=state.escalated,
                 recording_url=state.recording_url,
-                # §11 audit + §14 latency dashboards: consent log + trace id.
-                metrics={
-                    "turns": len(state.transcript),
-                    "consent_captured": state.consent_captured,
-                    "consent_at": state.consent_at.isoformat() if state.consent_at else None,
-                    "trace_id": state.trace_id,
-                },
+                metrics=metrics,
             )
             db.add(call)
             await db.flush()  # assign call.id for the FK below

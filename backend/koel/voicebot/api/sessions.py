@@ -135,6 +135,8 @@ async def start_session(
 
     # Per-bot backchannel overrides for Gate 2 (PRD §05), if configured.
     backchannels = bot.config.get("backchannels", {}) if isinstance(bot.config, dict) else {}
+    # Per-bot script-adherence QA rules (5.5), scored deterministically at call end.
+    qa_rules = bot.config.get("qa_rules", {}) if isinstance(bot.config, dict) else {}
 
     state = SessionState(
         session_id=session_id,
@@ -158,6 +160,7 @@ async def start_session(
         greeting_template=bot.greeting_template or "",
         crm_context=crm_context,
         backchannels=backchannels if isinstance(backchannels, dict) else {},
+        qa_rules=qa_rules if isinstance(qa_rules, dict) else {},
         # recording_url is populated on call end with the REAL S3 object (or left
         # NULL when recording is disabled) — never a phantom URL (audit finding).
         recording_url=None,
