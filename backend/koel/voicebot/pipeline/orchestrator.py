@@ -131,6 +131,16 @@ _BUDGET_WRAPUP = localization.register(localization.Localized(
     ),
 ))
 
+# Hold line spoken as the call is handed to a human agent (3.1).
+_HOLD_FOR_AGENT = localization.register(localization.Localized(
+    en="Let me connect you with a specialist who can help — please stay on the line a moment.",
+    hi="मैं आपको एक विशेषज्ञ से जोड़ रही हूँ जो आपकी मदद करेंगे — कृपया एक पल लाइन पर बने रहें।",
+    hinglish_fallback=(
+        "Main aapko ek specialist se connect kar rahi hoon jo aapki help karenge — "
+        "kripya ek pal line par baney rahiye."
+    ),
+))
+
 
 def _by_language(table: localization.Localized, language: Language) -> str:
     """Language-appropriate copy, defaulting to Hinglish (the demo's lingua franca)."""
@@ -708,19 +718,40 @@ class Orchestrator:
         await self._escalate(state, send, reason="unsupported_language")
 
     async def _escalate(self, state: SessionState, send: Sender, *, reason: str) -> None:
+        """Hand the call to a human (3.1). Emits the full-context frame (PRD §02),
+        speaks a hold line, and parks the call in ``waiting_agent`` — it does NOT
+        end the call. The WS handler queues the handoff + registers the live
+        operator bridge on seeing this state; the operator's replies then come
+        back through ``deliver_agent_turn`` until they resolve or the caller drops.
+        """
         state.escalated = True
-        state.status = CallStatus.escalating
+        state.escalation_reason = reason
+        if state.outcome == "in_progress":
+            state.outcome = "escalated"
+        state.status = CallStatus.waiting_agent
         await send(
             ServerMessage.of(
                 ServerMessageType.call_state,
-                status=CallStatus.escalating,
+                status=CallStatus.escalating,  # FE handoff panel keys off this value
                 reason=reason,
                 # Full context handoff (PRD §02 Escalation Quality = 100%).
                 transcript=[t.model_dump(mode="json") for t in state.transcript],
                 crm_context=state.crm_context,
             )
         )
-        await self.end_call(state, send, outcome="escalated")
+        # Reassure the caller they're being connected (ambient muted for the line).
+        await self._send_bot_turn(
+            state, send, text=_by_language(_HOLD_FOR_AGENT, state.language),
+            tone=Tone.empathetic, intent="handoff", ambient=False,
+        )
+
+    async def deliver_agent_turn(self, state: SessionState, send: Sender, *, text: str) -> None:
+        """Speak a human operator's typed reply to the caller via the normal TTS
+        path (3.1 Phase A). The caller's experience stays voice; the transcript
+        records it like any bot turn."""
+        await self._send_bot_turn(
+            state, send, text=text, tone=Tone.neutral, intent="agent", ambient=False
+        )
 
     async def end_call(self, state: SessionState, send: Sender, *, outcome: str) -> None:
         if state.status == CallStatus.ended:

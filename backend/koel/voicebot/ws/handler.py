@@ -27,7 +27,13 @@ from koel.common.telemetry import record_first_audio_latency, span
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
-from koel.voicebot.persistence import persist_call, persist_call_summary
+from koel.voicebot.escalation import EscalationHub
+from koel.voicebot.persistence import (
+    abandon_escalation_by_session,
+    create_escalation,
+    persist_call,
+    persist_call_summary,
+)
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcripts
 from koel.voicebot.pipeline.orchestrator import Orchestrator
@@ -68,6 +74,7 @@ class CallSession:
         resumed: bool,
         background_tasks: set | None = None,
         smart_turn: SmartTurnAnalyzer | None = None,
+        escalations: EscalationHub | None = None,
     ) -> None:
         self._ws = websocket
         self._state = state
@@ -77,6 +84,9 @@ class CallSession:
         self._bargein = bargein
         self._clients = clients
         self._resumed = resumed
+        # Human-handoff bridge (3.1): set once the call parks in waiting_agent.
+        self._escalations = escalations if escalations is not None else EscalationHub()
+        self._escalation_id: str | None = None
         # Strong refs to detached finalizer tasks so they aren't GC'd mid-run.
         self._background_tasks = background_tasks if background_tasks is not None else set()
         self._bot_speaking = False
@@ -172,26 +182,33 @@ class CallSession:
 
     async def _receive_loop(self) -> None:
         while not self._closed:
-            # No-input timer (PRD §05): 5s → re-prompt, a further 5s → close.
-            # The window is measured from whichever happened later — the last
-            # real client input or the moment the bot's audio finished playing —
-            # so the timer only starts once the bot has stopped speaking, and
-            # heartbeat pongs never reset it.
-            window_ms = (
-                self._settings.no_input_reprompt_ms
-                if self._state.no_input_strikes == 0
-                else self._settings.no_input_close_ms
-            )
-            baseline = max(self._last_input_at, self._speech_until)
-            remaining = (baseline + window_ms / 1000) - time.monotonic()
-            if remaining <= 0:
-                await self._safe_no_input()
-                continue
-            try:
-                raw = await asyncio.wait_for(self._ws.receive_text(), timeout=remaining)
-            except TimeoutError:
-                await self._safe_no_input()
-                continue
+            # On agent hold (3.1): suppress the no-input timer entirely — the
+            # caller is meant to wait for a human, and the operator drives the
+            # call out-of-band via the escalation hub. Just block on the socket
+            # (or a disconnect) until the handoff resolves.
+            if self._state.status == CallStatus.waiting_agent:
+                raw = await self._ws.receive_text()
+            else:
+                # No-input timer (PRD §05): 5s → re-prompt, a further 5s → close.
+                # The window is measured from whichever happened later — the last
+                # real client input or the moment the bot's audio finished playing —
+                # so the timer only starts once the bot has stopped speaking, and
+                # heartbeat pongs never reset it.
+                window_ms = (
+                    self._settings.no_input_reprompt_ms
+                    if self._state.no_input_strikes == 0
+                    else self._settings.no_input_close_ms
+                )
+                baseline = max(self._last_input_at, self._speech_until)
+                remaining = (baseline + window_ms / 1000) - time.monotonic()
+                if remaining <= 0:
+                    await self._safe_no_input()
+                    continue
+                try:
+                    raw = await asyncio.wait_for(self._ws.receive_text(), timeout=remaining)
+                except TimeoutError:
+                    await self._safe_no_input()
+                    continue
 
             try:
                 msg = ClientMessage.model_validate_json(raw)
@@ -212,11 +229,45 @@ class CallSession:
             # an error frame and finalise the call exactly once.
             try:
                 await self._dispatch(msg)
+                # If the turn escalated, queue the handoff + open the live bridge.
+                await self._sync_escalation()
                 await self._persist_state()
             except WebSocketDisconnect:
                 raise  # let run() route this to the grace-TTL path
             except (httpx.HTTPError, Exception) as exc:  # noqa: BLE001
                 await self._fail_call("turn_failed", "A service error interrupted the turn.", exc)
+
+    async def _sync_escalation(self) -> None:
+        """On the first turn that parks the call in waiting_agent (3.1): persist
+        the handoff to the queue and register this call's live operator bridge so
+        an operator's replies reach the caller and a resolve ends the call."""
+        if self._state.status != CallStatus.waiting_agent or self._escalation_id is not None:
+            return
+        self._escalation_id = await create_escalation(
+            self._state, reason=self._state.escalation_reason or "escalation"
+        )
+
+        async def _deliver(text: str) -> None:
+            await self._orch.deliver_agent_turn(self._state, self.send, text=text)
+
+        async def _resolve() -> None:
+            # Operator finished: say goodbye, end the call, and drop the socket so
+            # the caller's blocked receive unwinds into the normal finalize path.
+            await self._orch.end_call(self._state, self.send, outcome="escalated")
+            self._closed = True
+            try:
+                await self._ws.close()
+            except Exception:  # noqa: BLE001 — socket may already be gone
+                pass
+
+        self._escalations.register(self._state.session_id, deliver=_deliver, resolve=_resolve)
+        logger.info(
+            "escalation_queued",
+            extra={"extra_fields": {
+                "session_id": self._state.session_id, "escalation_id": self._escalation_id,
+                "reason": self._state.escalation_reason,
+            }},
+        )
 
     async def _fail_call(self, code: str, message: str, exc: Exception | None = None) -> None:
         """Best-effort: tell the client, mark the outcome, and persist once."""
@@ -263,6 +314,12 @@ class CallSession:
             await self._handle_audio(msg)
 
     async def _handle_audio(self, msg: ClientMessage) -> None:
+        # On agent hold (3.1) the human operator owns the conversation — the bot
+        # must stay silent. Drop caller audio rather than run the NLP turn loop
+        # (which would speak over the handoff). Relaying the caller's audio to the
+        # operator console is a follow-up (live transcript stream / 3.3).
+        if self._state.status == CallStatus.waiting_agent:
+            return
         stt = await self._clients.transcribe(
             TranscribeRequest(
                 session_id=self._state.session_id,
@@ -360,7 +417,7 @@ class CallSession:
             await self._fail_call("no_input_failed", "A service error interrupted the turn.", exc)
 
     async def _handle_no_input(self) -> None:
-        if self._state.status in (CallStatus.ended, CallStatus.escalating):
+        if self._state.status in (CallStatus.ended, CallStatus.escalating, CallStatus.waiting_agent):
             return
         outcome = on_no_input(self._state.no_input_strikes, self._state.language)
         # PRD §05: the no-input event MUST be logged on the session.
@@ -480,6 +537,11 @@ class CallSession:
             _, timer = self._pending_turn
             self._pending_turn = None
             timer.cancel()
+        # Tear down any live human-handoff (3.1): drop the operator bridge and, if
+        # the handoff was never resolved (caller hung up mid-hold), mark it abandoned.
+        if self._escalation_id is not None:
+            self._escalations.unregister(self._state.session_id)
+            await abandon_escalation_by_session(self._state.session_id)
         await self._upload_recording()
         call_id = await persist_call(self._state)
         if call_id is not None:
@@ -565,6 +627,7 @@ async def handle_connection(
     resumed: bool,
     background_tasks: set | None = None,
     smart_turn: SmartTurnAnalyzer | None = None,
+    escalations: EscalationHub | None = None,
 ) -> None:
     set_correlation_id(session_id)
     call = CallSession(
@@ -578,5 +641,6 @@ async def handle_connection(
         resumed=resumed,
         background_tasks=background_tasks,
         smart_turn=smart_turn,
+        escalations=escalations,
     )
     await call.run()

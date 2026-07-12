@@ -21,6 +21,7 @@ class CallStatus(str, enum.Enum):
     listening = "listening"
     processing = "processing"
     escalating = "escalating"
+    waiting_agent = "waiting_agent"  # 3.1: handed off, on hold for a human operator
     reconnecting = "reconnecting"  # within the 15s grace window
     ended = "ended"
 
@@ -97,6 +98,7 @@ class SessionState(BaseModel):
     # Resilience bookkeeping.
     no_input_strikes: int = 0  # 0 → re-prompt next, 1 → close next (PRD §05)
     escalated: bool = False
+    escalation_reason: str | None = None  # 3.1: why we handed off (for the agent queue)
     outcome: str = "in_progress"
     consent_captured: bool = False  # DPDP / IRDAI consent (PRD §11)
     consent_at: datetime | None = None  # timestamp consent was captured (PRD §11)
