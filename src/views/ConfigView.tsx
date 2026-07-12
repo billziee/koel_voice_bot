@@ -22,7 +22,7 @@ interface ConfigViewProps {
   theme: Theme;
 }
 
-export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: ConfigViewProps) {
+export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme }: ConfigViewProps) {
   // Seed from existing config > bot defaults > empty
   const seed = existingConfig || (bot ? DEFAULT_CONFIGS[bot.useCase] : undefined);
 
@@ -42,6 +42,22 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
   const handleSave = () => {
     onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone });
   };
+
+  // Truthful status badge (Q-3): only claim "unsaved changes" when an editable
+  // field actually diverges from what was seeded. Mirrors the useState defaults
+  // so a freshly-opened, untouched form reads as clean. A brand-new bot is
+  // inherently unsaved until the first save.
+  const isDirty =
+    name !== (seed?.name || '') ||
+    useCase !== (seed?.useCase || 'Credit Card Cross-Sell') ||
+    language !== (seed?.language || 'Hinglish') ||
+    persona !== (seed?.persona || 'Kore — Female, Firm & Professional') ||
+    speed !== (seed?.speed || 1.0) ||
+    ambientProfile !== (seed?.ambientProfile || 'callfloor') ||
+    ragEnabled !== (seed?.ragEnabled ?? true) ||
+    ragIndex !== (seed?.ragIndex || 'hdfc_regalia_benefits_v2') ||
+    greeting !== (seed?.greeting || '');
+  const showDraft = isNew || isDirty;
 
   const [disclosureEnabled, setDisclosureEnabled] = useState(true);
 
@@ -70,7 +86,13 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
             {bot?.name || name || 'HDFC Credit Card'} · {useCase || 'Cross-sell template'}
           </p>
         </div>
-        <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.primaryLight, color: theme.primary }}>Draft — unsaved changes</span>
+        {showDraft ? (
+          <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.primaryLight, color: theme.primary }}>
+            {isNew ? 'New — unsaved' : 'Unsaved changes'}
+          </span>
+        ) : (
+          <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.ruleSubtle, color: theme.faint }}>Saved</span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

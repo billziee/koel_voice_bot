@@ -50,9 +50,27 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
     }
   };
 
+  // Variables the CRM context can fill at call time. A script token outside this
+  // set has no data source, so it would render literally on the call.
+  const CRM_MAPPED_VARS = new Set([
+    'customer_name', 'name', 'bank', 'product', 'offer', 'offer_amount',
+    'benefit_1', 'benefit_2', 'fee_clause',
+  ]);
+  const scriptVars = Array.from(nodeScript.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim());
+  const unmappedVars = scriptVars.filter((v) => !CRM_MAPPED_VARS.has(v));
+
+  // Real preflight (Q-3): each row reflects the builder's ACTUAL state rather
+  // than a hardcoded pass. Variable-mapping and index checks are deterministic
+  // client-side; a live index-reachability probe is a deploy-time follow-up.
   const preflight = [
-    { label: 'All script variables mapped to CRM', ok: true },
-    { label: 'Knowledge base index reachable', ok: true },
+    {
+      label:
+        unmappedVars.length === 0
+          ? 'All script variables mapped to CRM'
+          : `Unmapped script variables: ${unmappedVars.map((v) => `{${v}}`).join(', ')}`,
+      ok: unmappedVars.length === 0,
+    },
+    { label: 'Knowledge base index configured', ok: ragIndex.trim().length > 0 },
     { label: 'Compliance disclosure block present', ok: disclosure },
     { label: 'Call-hours window not yet set (RBI)', ok: false },
   ];
@@ -350,8 +368,11 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
               ← Back
             </button>
             <span className="text-[12px]" style={{ color: theme.faint }}>
-              {step === 3 && `${FLOW_BRANCHES.length} branches · ${FLOW_NODES.length + FLOW_BRANCHES.length} nodes · 0 unmapped variables`}
-              {step === 5 && `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${preflight.filter(p => !p.ok).length} warning`}
+              {step === 3 && `${FLOW_BRANCHES.length} branches · ${FLOW_NODES.length + FLOW_BRANCHES.length} nodes · ${unmappedVars.length} unmapped variable${unmappedVars.length === 1 ? '' : 's'}`}
+              {step === 5 && (() => {
+                const warnings = preflight.filter(p => !p.ok).length;
+                return `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${warnings} warning${warnings === 1 ? '' : 's'}`;
+              })()}
             </span>
             {step < 5 ? (
               <button onClick={() => setStep((step + 1) as BuilderStep)} className="text-[13px] font-bold px-5 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>
