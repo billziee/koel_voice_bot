@@ -21,6 +21,7 @@ from koel.db.models import (
     BotConfig,
     BotConfigAudit,
     CallLog,
+    ConsentRecord,
     CrmCustomer,
     EscalationRequest,
     ExportJob,
@@ -57,6 +58,7 @@ _SQLITE_TABLES = [
     BotConfigAudit.__table__,
     EscalationRequest.__table__,
     ExportJob.__table__,
+    ConsentRecord.__table__,
 ]
 
 

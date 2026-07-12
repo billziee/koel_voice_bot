@@ -243,6 +243,27 @@ class ExportJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class ConsentRecord(Base):
+    """Evidentiary verbal-consent record (2.3, PRD §04 insurance / §11 IRDAI).
+
+    Links the exact transcript turn where the customer affirmed consent to the
+    call recording + the disclosure version read to them, so the consent is
+    verifiable after the fact. Written at call end only for consent-required bots."""
+
+    __tablename__ = "consent_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    call_id: Mapped[str] = mapped_column(String(32), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    disclosure_version: Mapped[str] = mapped_column(String(64), default="")
+    turn_index: Mapped[int] = mapped_column(Integer, default=-1)  # transcript turn that affirmed
+    consent_text: Mapped[str] = mapped_column(Text, default="")  # the customer's affirmative words
+    recording_url: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 # --- RAG knowledge base (pgvector) ------------------------------------------
 
 

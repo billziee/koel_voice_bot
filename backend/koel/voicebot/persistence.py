@@ -11,8 +11,16 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from koel.common.logging import get_logger
-from koel.db.models import CallLog, CallOutcome, EscalationRequest, EscalationStatus, TranscriptTurn
+from koel.db.models import (
+    CallLog,
+    CallOutcome,
+    ConsentRecord,
+    EscalationRequest,
+    EscalationStatus,
+    TranscriptTurn,
+)
 from koel.db.session import session_scope
+from koel.voicebot.pipeline.consent import find_consent_turn
 from koel.voicebot.pipeline.qa import score_transcript
 from koel.voicebot.session.models import SessionState
 
@@ -69,6 +77,23 @@ async def persist_call(state: SessionState) -> str | None:
             )
             db.add(call)
             await db.flush()  # assign call.id for the FK below
+            # Evidentiary verbal-consent record (2.3): only for consent-required
+            # bots, and only when the customer actually affirmed after a disclosure.
+            if state.consent_disclosure_version:
+                affirm = find_consent_turn(state.transcript)
+                if affirm is not None:
+                    db.add(
+                        ConsentRecord(
+                            org_id=state.org_id,
+                            call_id=call.id,
+                            session_id=state.session_id,
+                            customer_id=state.customer_id,
+                            disclosure_version=state.consent_disclosure_version,
+                            turn_index=affirm.index,
+                            consent_text=affirm.text,
+                            recording_url=state.recording_url,
+                        )
+                    )
             for turn in state.transcript:
                 db.add(
                     TranscriptTurn(

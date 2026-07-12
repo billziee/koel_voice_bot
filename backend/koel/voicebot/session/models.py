@@ -82,6 +82,9 @@ class SessionState(BaseModel):
     followup_templates: dict = Field(default_factory=dict)
     # A/B experiment arm this call was assigned (6.3), "<exp>:<variant>" or None.
     variant_id: str | None = None
+    # Consent-required bots (2.3): the disclosure version read this call. Set ⇒ an
+    # evidentiary ConsentRecord is written at call end when the customer affirms.
+    consent_disclosure_version: str | None = None
     # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None

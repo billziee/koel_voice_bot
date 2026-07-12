@@ -176,6 +176,9 @@ async def start_session(
         ambient_profile=bot.ambient_profile,
         greeting_template=greeting_template,
         variant_id=variant_id,
+        consent_disclosure_version=(
+            bot.config.get("consent_disclosure_version") if isinstance(bot.config, dict) else None
+        ),
         crm_context=crm_context,
         backchannels=backchannels if isinstance(backchannels, dict) else {},
         qa_rules=qa_rules if isinstance(qa_rules, dict) else {},
