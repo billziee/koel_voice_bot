@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 
+import httpx
 from opentelemetry.propagate import inject
 
 from koel.common.auth import issue_token
@@ -195,6 +196,27 @@ class ServiceClients:
             f"{self._settings.crm_svc_url}/v1/customers/{quote(customer_id, safe='')}",
             headers=self._headers(),
         )
+        resp.raise_for_status()
+        return CustomerRecord.model_validate(resp.json())
+
+    async def get_customer_by_phone(
+        self, phone: str, *, org_id: str | None = None
+    ) -> CustomerRecord | None:
+        """ANI lookup for inbound calls (roadmap 3.2): resolve a caller by their
+        phone number. Returns ``None`` on a 404 (unknown ANI) so an unresolved
+        caller is still served as an anonymous inbound session — the lookup never
+        raises for a miss. Other HTTP errors still propagate. ``org_id`` scopes the
+        lookup to one tenant (AF), mirroring the session's bot org."""
+        params = {"phone": phone}
+        if org_id is not None:
+            params["org_id"] = org_id
+        resp = await self._client.get(
+            f"{self._settings.crm_svc_url}/v1/customers/by-phone",
+            params=params,
+            headers=self._headers(),
+        )
+        if resp.status_code == httpx.codes.NOT_FOUND:
+            return None
         resp.raise_for_status()
         return CustomerRecord.model_validate(resp.json())
 

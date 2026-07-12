@@ -51,6 +51,29 @@ async def list_customers(_: ServicePrincipal) -> list[CustomerRecord]:
     return [_to_record(r) for r in rows]
 
 
+@router.get("/by-phone", response_model=CustomerRecord)
+async def get_customer_by_phone(
+    phone: str, _: ServicePrincipal, org_id: str | None = None
+) -> CustomerRecord:
+    """ANI lookup for inbound calls (roadmap 3.2): resolve a caller by their phone
+    number. Declared before ``/{customer_id}`` so the literal path wins over the
+    dynamic one. Org-scoped like the other customer routes — when ``org_id`` is
+    given, only that tenant's records match (multi-tenant isolation, AF)."""
+    with span("crm.get_customer_by_phone"):
+        stmt = select(CrmCustomer).where(CrmCustomer.phone == phone)
+        if org_id is not None:
+            stmt = stmt.where(CrmCustomer.org_id == org_id)
+        async with session_scope() as db:
+            row = (await db.execute(stmt)).scalars().first()
+        if row is None:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="customer_not_found",
+                message="No customer with that phone number.",
+            )
+        return _to_record(row)
+
+
 @router.get("/{customer_id}", response_model=CustomerRecord)
 async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
     with span("crm.get_customer", customer_id=customer_id):

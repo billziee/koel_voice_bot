@@ -21,6 +21,7 @@ from koel.common.schemas import Tone
 from koel.common.telemetry import record_nlp_usage
 from koel.common.text import split_sentences
 from koel.common.text_guard import redact_pii, sanitize_crm, sanitize_untrusted, truncate_history
+from koel.db.models import CallDirection
 from koel.nlp.schemas import (
     Citation,
     Intent,
@@ -281,6 +282,42 @@ action succeeded in "response_text" beyond acknowledging it):
   their words and the current time; if you cannot resolve a concrete time, omit the action.
 """
 
+# Intent-first addendum for INBOUND calls (roadmap 3.2). Purely additive: it is
+# APPENDED to the unchanged outbound _SYSTEM_PROMPT, so the security section, the
+# grounding rules, and the JSON contract all still hold verbatim — only the
+# opening posture flips from "run the outbound script" to "react to what the
+# caller asked for". Selected per turn by ``select_system_prompt`` when the
+# session is marked inbound (crm_context["direction"] == "incoming").
+_INBOUND_DIRECTIVE = """\
+INBOUND CALL MODE — the customer dialled US, this is not an outbound campaign:
+- Do NOT open with a pitch, sales, or collections script. The caller reached out;
+  your first job is to find out what THEY need.
+- Open by briefly acknowledging their call and asking how you can help, then stay
+  reactive — let the caller's stated intent drive the conversation.
+- Discuss a specific product or offer only once the caller asks about it; answer
+  their question first. All grounding rules still apply (facts ONLY from KNOWLEDGE).
+- Everything above (language/script, security, and the JSON contract) is unchanged
+  and still binding."""
+
+_INBOUND_SYSTEM_PROMPT = f"{_SYSTEM_PROMPT}\n\n{_INBOUND_DIRECTIVE}"
+
+# crm_context keys that only route the turn (they are session→NLP plumbing, not
+# CRM attributes) and so must be kept out of the CUSTOMER (CRM) prompt line.
+_ROUTING_CRM_KEYS: frozenset[str] = frozenset({"direction"})
+
+
+def select_system_prompt(direction: str | None) -> str:
+    """Pick a turn's system prompt by call direction (roadmap 3.2).
+
+    Only an explicit ``"incoming"`` selects the intent-first inbound variant;
+    outbound — the default, and any missing/unknown value — returns the unchanged
+    :data:`_SYSTEM_PROMPT` byte-for-byte. The direction is threaded from the
+    session via ``crm_context["direction"]`` (see :mod:`koel.voicebot.inbound`)."""
+    if direction == CallDirection.incoming.value:
+        return _INBOUND_SYSTEM_PROMPT
+    return _SYSTEM_PROMPT
+
+
 # Words that signal a concrete product claim (fee/rate/reward/feature). Used to
 # decide whether a reply *needs* a citation — grounding guardrail (Z, PRD §12).
 _FACT_MARKERS: tuple[str, ...] = (
@@ -413,7 +450,11 @@ class GroqNlpProvider(NlpProvider):
         # N: mask account/card/phone-length digits before the prompt egresses to
         # the (US-hosted) Groq API. Masking these does not change intent/tone, so
         # grounding + classification are unaffected.
-        crm = {k: redact_pii(v) for k, v in sanitize_crm(ctx.crm_context).items()}
+        crm = {
+            k: redact_pii(v)
+            for k, v in sanitize_crm(ctx.crm_context).items()
+            if k not in _ROUTING_CRM_KEYS  # drop session→NLP routing keys (e.g. direction)
+        }
         if crm:
             crm_str = ", ".join(f"{k}={v}" for k, v in crm.items())
             parts.append(f"CUSTOMER (CRM): {crm_str}")
@@ -541,7 +582,10 @@ class GroqNlpProvider(NlpProvider):
         # replacement — so the security/compliance/JSON-contract rules always hold.
         model = ctx.llm_model or self._model_for(ctx)
         temperature = ctx.llm_temperature if ctx.llm_temperature is not None else self._temperature
-        system_content = _SYSTEM_PROMPT
+        # Intent-first inbound prompt when the session is marked inbound (3.2);
+        # outbound (the default) is byte-for-byte the unchanged _SYSTEM_PROMPT.
+        direction = ctx.crm_context.get("direction") if isinstance(ctx.crm_context, dict) else None
+        system_content = select_system_prompt(direction if isinstance(direction, str) else None)
         if ctx.prompt_preamble:
             system_content = (
                 f"{_SYSTEM_PROMPT}\n\n"

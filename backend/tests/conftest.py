@@ -28,6 +28,7 @@ from koel.db.models import (
     EscalationRequest,
     ExportJob,
     InteractionLogRow,
+    Org,
     TranscriptTurn,
     UseCase,
 )
@@ -52,6 +53,7 @@ def _clear_tts_cache():
 
 # Tables we can create on SQLite (excludes KnowledgeChunk — pgvector Vector type).
 _SQLITE_TABLES = [
+    Org.__table__,
     CrmCustomer.__table__,
     BotConfig.__table__,
     CallLog.__table__,

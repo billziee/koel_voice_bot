@@ -30,10 +30,12 @@ from koel.voicebot.api import (
     history,
     knowledge,
     operators,
+    orgs,
     sessions,
 )
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
+from koel.voicebot.inbound import build_inbound_session
 from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.filler import FILLER_PHRASES, filler_tone_for
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
@@ -200,6 +202,7 @@ app.include_router(history.router)
 app.include_router(analytics.router)
 app.include_router(knowledge.router)
 app.include_router(operators.router)
+app.include_router(orgs.router)
 app.include_router(exports.router)
 
 
@@ -319,14 +322,11 @@ async def twilio_stream(websocket: WebSocket) -> None:
     await websocket.accept()
 
     # (4) Seed the call. The caller's number may arrive as a templated WS query
-    # param (e.g. <Stream url=".../twilio/stream?From={{From}}">); if absent the
-    # CRM context stays minimal (an inbound number lookup is a later step).
+    # param (e.g. <Stream url=".../twilio/stream?From={{From}}">). Inbound (3.2):
+    # resolve the caller by ANI → CRM lookup → intent-first session; an unknown
+    # or absent number still yields an anonymous inbound session.
     caller_phone = websocket.query_params.get("From") or websocket.query_params.get("from")
-    state = sessions.build_session_state(
-        bot,
-        customer_id=None,
-        crm_context={"phone": caller_phone} if caller_phone else {},
-    )
+    state = await build_inbound_session(runtime.clients, bot, caller_phone=caller_phone)
     set_correlation_id(state.session_id)
     await runtime.store.save(state)
 

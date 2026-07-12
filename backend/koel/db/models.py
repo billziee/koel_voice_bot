@@ -83,6 +83,29 @@ class UseCase(str, enum.Enum):
     custom = "custom"
 
 
+# --- Tenant registry (6.4 Multi-tenant enablement) --------------------------
+
+
+class Org(Base):
+    """Authoritative tenant (organization) registry.
+
+    Org scoping is already pervasive — every table carries a nullable indexed
+    ``org_id`` and the read/list routers filter by it (AF). What was missing to
+    actually *enable* multi-tenancy is the registry those ids point at. Adding
+    it (plus the cross-tenant isolation gate proven in the test suite) is what
+    turns the dormant scoping into real multi-tenancy; it is deliberately NOT a
+    destructive backfill — single-tenant pilot rows keep ``org_id=NULL``.
+    """
+
+    __tablename__ = "orgs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 # --- CRM (Dummy CRM, PRD §06 / §10) -----------------------------------------
 
 
