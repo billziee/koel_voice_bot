@@ -29,7 +29,7 @@ from koel.common.telemetry import (
     span,
 )
 from koel.common.text_guard import redact_pii
-from koel.nlp.schemas import Intent, NlpResponse, Sentiment, TurnContext
+from koel.nlp.schemas import Intent, NlpResponse, RetrievedChunk, Sentiment, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.campaigns import schedule_callback
@@ -324,18 +324,28 @@ class Orchestrator:
         return out
 
     async def handle_final_transcript(
-        self, state: SessionState, send: Sender, stt: TranscriptResult
+        self, state: SessionState, send: Sender, stt: TranscriptResult,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
     ) -> None:
-        """Process one completed customer utterance through the pipeline."""
+        """Process one completed customer utterance through the pipeline.
+
+        ``prefetched_chunks`` (O-5): KB chunks VB_Svc speculatively retrieved
+        during the endpointing hold window. When provided they ride in the
+        TurnContext so NLP_svc reuses them instead of retrieving again; ``None``
+        (no speculation / diverged / miss) keeps today's behaviour exactly.
+        """
         turn_start = time.monotonic()
         try:
-            await self._handle_final_transcript(state, send, stt)
+            await self._handle_final_transcript(
+                state, send, stt, prefetched_chunks=prefetched_chunks
+            )
         finally:
             # End-to-end audio-in→audio-out turn latency vs the §14 <300ms budget (Q).
             record_turn_latency((time.monotonic() - turn_start) * 1000)
 
     async def _handle_final_transcript(
-        self, state: SessionState, send: Sender, stt: TranscriptResult
+        self, state: SessionState, send: Sender, stt: TranscriptResult,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
     ) -> None:
         # Reset no-input bookkeeping — the customer spoke.
         state.no_input_strikes = 0
@@ -391,9 +401,12 @@ class Orchestrator:
         # turn is spoken by the _send_bot_turn calls below. Batch is the fallback.
         stream_turn = self._settings.stream_nlp and self._settings.stream_tts
         if stream_turn:
-            nlp = await self._stream_bot_turn(state, send, self._build_turn_context(state))
+            ctx = self._build_turn_context(state, prefetched_chunks=prefetched_chunks)
+            nlp = await self._stream_bot_turn(state, send, ctx)
         else:
-            nlp = await self._respond_with_filler(state, send)
+            nlp = await self._respond_with_filler(
+                state, send, prefetched_chunks=prefetched_chunks
+            )
 
         # Scripted-flow advance (6.6): move to the next node on the returned intent
         # so the NEXT turn's context injects that node's prompt. Guarded so an
@@ -557,8 +570,15 @@ class Orchestrator:
             return None
         return parse_flow({"flow": state.flow})
 
-    def _build_turn_context(self, state: SessionState) -> TurnContext:
-        """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
+    def _build_turn_context(
+        self, state: SessionState, *, prefetched_chunks: list[RetrievedChunk] | None = None
+    ) -> TurnContext:
+        """The NLP TurnContext for this turn (shared by the batch + streaming paths).
+
+        ``prefetched_chunks`` (O-5): when provided, ride in ``retrieved`` so
+        NLP_svc reuses them and skips its own retrieval; ``None`` ⇒ empty, and
+        NLP_svc retrieves as today.
+        """
         # Scripted-flow scaffolding (6.6): append the current node's prompt as
         # extra guidance for this turn. It augments — never replaces — the
         # hardened preamble, so the compliance/JSON rules always stay in force.
@@ -583,11 +603,23 @@ class Orchestrator:
             llm_model=state.llm_model,
             llm_temperature=state.llm_temperature,
             prompt_preamble=preamble,
+            retrieved=prefetched_chunks or [],
         )
 
-    async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
+    def build_speculative_context(self, state: SessionState, query: str) -> TurnContext:
+        """Public builder for O-5 speculative RAG: a retrieval TurnContext for a
+        held-but-not-yet-recorded transcript. Reuses ``_build_turn_context`` (so
+        the rag_index / org / per-bot RAG overrides all match the real turn) but
+        overrides the customer text with the held query. ``retrieved`` stays empty
+        so the ``/v1/retrieve`` call actually retrieves."""
+        return self._build_turn_context(state).model_copy(update={"customer_text": query})
+
+    async def _respond_with_filler(
+        self, state: SessionState, send: Sender,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
+    ) -> NlpResponse:
         """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
-        ctx = self._build_turn_context(state)
+        ctx = self._build_turn_context(state, prefetched_chunks=prefetched_chunks)
         with span("nlp.respond", session_id=state.session_id):
             t0 = time.monotonic()
             nlp_task = asyncio.create_task(self._clients.respond(ctx))

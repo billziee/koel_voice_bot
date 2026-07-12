@@ -35,6 +35,12 @@ class Sentiment(str, Enum):
     negative = "negative"
 
 
+class RetrievedChunk(BaseModel):
+    title: str
+    content: str
+    score: float
+
+
 class TurnContext(BaseModel):
     """One customer turn handed to NLP_svc, with the context VB_Svc has gathered."""
 
@@ -58,12 +64,12 @@ class TurnContext(BaseModel):
     llm_model: str | None = None
     llm_temperature: float | None = None
     prompt_preamble: str | None = None
-
-
-class RetrievedChunk(BaseModel):
-    title: str
-    content: str
-    score: float
+    # Speculative RAG (O-5): KB chunks VB_Svc pre-fetched during the endpointing
+    # hold window, before the final transcript triggered the turn. When non-empty
+    # NLP_svc USES these and SKIPS its own retrieval (no double retrieval); empty
+    # ⇒ NLP_svc retrieves as usual. Defaulted so existing callers/serialized
+    # bodies stay valid.
+    retrieved: list[RetrievedChunk] = Field(default_factory=list)
 
 
 class Citation(BaseModel):

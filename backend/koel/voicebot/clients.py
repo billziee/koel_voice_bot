@@ -18,7 +18,7 @@ from koel.common.config import CommonSettings
 from koel.common.http import make_async_client
 from koel.common.logging import get_correlation_id
 from koel.crm.schemas import CustomerRecord
-from koel.nlp.schemas import NlpResponse, NlpStreamFrame, TurnContext
+from koel.nlp.schemas import NlpResponse, NlpStreamFrame, RetrievedChunk, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
 from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE, tts_cache_key
@@ -37,6 +37,7 @@ _TTS_STREAM_TIMEOUT_S = 40.0  # one provider attempt, no cascade on the stream p
 _TTS_SYNTHESIZE_TIMEOUT_S = 70.0  # primary + fallback cascade, worst case
 _WARMUP_TIMEOUT_S = 6.0  # session warm-up ping (O-1); short — it's best-effort
 _NLP_STREAM_TIMEOUT_S = 15.0  # first-token NLP stream (O-2): generation ≲1s + margin
+_RETRIEVE_TIMEOUT_S = 8.0  # speculative RAG pre-fetch (O-5): embed + ANN query + margin
 
 
 class ServiceClients:
@@ -102,6 +103,25 @@ class ServiceClients:
         )
         resp.raise_for_status()
         return NlpResponse.model_validate(resp.json())
+
+    async def retrieve(self, ctx: TurnContext) -> list[RetrievedChunk]:
+        """Speculative RAG pre-fetch (O-5): fetch the KB chunks for a held
+        transcript during the endpointing hold window so they are in hand when
+        the turn runs. Mirrors ``respond``'s client/auth/tracing, but is fully
+        best-effort — ANY error (transport, HTTP status, parse) returns ``[]`` and
+        NEVER raises into the caller, so a speculative miss silently degrades to
+        NLP-side retrieval on the turn."""
+        try:
+            resp = await self._client.post(
+                f"{self._settings.nlp_svc_url}/v1/retrieve",
+                json=ctx.model_dump(mode="json"),
+                headers=self._headers(),
+                timeout=_RETRIEVE_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            return [RetrievedChunk.model_validate(c) for c in resp.json()]
+        except Exception:  # noqa: BLE001 — speculative pre-fetch is best-effort
+            return []
 
     async def respond_stream(self, ctx: TurnContext) -> AsyncIterator[NlpStreamFrame]:
         """Consume NLP_svc /v1/respond/stream (NDJSON) so the orchestrator can feed

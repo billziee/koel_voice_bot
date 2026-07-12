@@ -24,6 +24,7 @@ from koel.common.auth import WS_SUBPROTOCOL
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.schemas import Language
 from koel.common.telemetry import record_first_audio_latency, span
+from koel.nlp.schemas import RetrievedChunk
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.mixer import concat_wavs
 from koel.voicebot.config import VoiceBotSettings
@@ -40,6 +41,7 @@ from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcri
 from koel.voicebot.pipeline.followup import send_followup
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
+from koel.voicebot.pipeline.specrag import transcripts_diverged
 from koel.voicebot.pipeline.summarizer import SarvamSummarizer
 from koel.voicebot.recording import upload_recording
 from koel.voicebot.session.models import CallStatus, SessionState
@@ -107,6 +109,10 @@ class CallSession:
         self._smart_turn = smart_turn
         # Mid-thought hold (smart-turn gate): stashed transcript + flush timer.
         self._pending_turn: tuple[TranscriptResult, asyncio.Task] | None = None
+        # Speculative RAG (O-5): (held_text, Task[list[RetrievedChunk]]) for an
+        # in-flight RAG pre-fetch fired during the smart-turn hold window. Reused
+        # by the resulting turn when the final transcript hasn't diverged.
+        self._spec_retrieval: tuple[str, asyncio.Task[list[RetrievedChunk]]] | None = None
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -371,9 +377,15 @@ class CallSession:
             if await self._smart_turn.is_complete(msg.pcm16_b64) is False:
                 timer = asyncio.create_task(self._flush_pending_turn())
                 self._pending_turn = (stt, timer)
+                # O-5: fire RAG retrieval for the held text NOW (in the background)
+                # so the chunks are already in hand when the turn eventually runs.
+                self._start_speculative_retrieval(stt.text)
                 return
 
-        await self._orch.handle_final_transcript(self._state, self.send, stt)
+        prefetched = await self._resolve_prefetched_chunks(stt.text)
+        await self._orch.handle_final_transcript(
+            self._state, self.send, stt, prefetched_chunks=prefetched
+        )
         if self._state.status == CallStatus.ended:
             self._closed = True
 
@@ -385,9 +397,81 @@ class CallSession:
             return
         held, _ = self._pending_turn
         self._pending_turn = None
-        await self._orch.handle_final_transcript(self._state, self.send, held)
+        prefetched = await self._resolve_prefetched_chunks(held.text)
+        await self._orch.handle_final_transcript(
+            self._state, self.send, held, prefetched_chunks=prefetched
+        )
         if self._state.status == CallStatus.ended:
             self._closed = True
+
+    def _start_speculative_retrieval(self, held_text: str) -> None:
+        """O-5: fire RAG retrieval for the held mid-thought text in the background
+        during the smart-turn hold window. Fully guarded + best-effort — the
+        kill-switch off, a RAG-disabled bot, a client without the O-5 method, or
+        blank text all just skip speculation (the turn falls back to NLP-side
+        retrieval). Never blocks the hold; a stale in-flight pre-fetch from an
+        earlier hold is cancelled first so only the newest one can win."""
+        self._cancel_speculative_retrieval()
+        if not self._settings.speculative_rag_enabled:
+            return
+        if not (self._state.rag_enabled and self._state.rag_index) or not held_text.strip():
+            return
+        retrieve = getattr(self._clients, "retrieve", None)
+        if retrieve is None:  # a client build without the O-5 method — skip
+            return
+        try:
+            ctx = self._orch.build_speculative_context(self._state, held_text)
+        except Exception:  # noqa: BLE001 — context build must never break the hold
+            logger.debug("speculative_context_build_failed", exc_info=True)
+            return
+        task = asyncio.create_task(self._run_speculative_retrieval(retrieve, ctx))
+        self._spec_retrieval = (held_text, task)
+
+    async def _run_speculative_retrieval(self, retrieve, ctx) -> list[RetrievedChunk]:  # noqa: ANN001
+        """Await the client's retrieve; any error yields [] (speculation is
+        best-effort). CancelledError propagates so a stale/torn-down task exits."""
+        try:
+            return await retrieve(ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — best-effort pre-fetch
+            logger.debug("speculative_retrieval_failed", exc_info=True)
+            return []
+
+    def _cancel_speculative_retrieval(self) -> None:
+        """Drop + cancel any in-flight speculative pre-fetch (stale hold, barge-in,
+        call-end)."""
+        if self._spec_retrieval is not None:
+            _, task = self._spec_retrieval
+            self._spec_retrieval = None
+            task.cancel()
+
+    async def _resolve_prefetched_chunks(self, final_text: str) -> list[RetrievedChunk] | None:
+        """O-5 decision at turn time: reuse the in-flight speculative chunks when
+        the final transcript hasn't diverged from the speculative query, else
+        discard them and let NLP_svc retrieve normally.
+
+        Returns the pre-fetched chunks (to thread into the TurnContext) or None
+        (no speculation / diverged / timeout / error / empty). Fully best-effort:
+        never blocks the turn beyond the configured await bound and never raises
+        (CancelledError still propagates for barge-in / shutdown)."""
+        spec = self._spec_retrieval
+        self._spec_retrieval = None
+        if spec is None:
+            return None
+        spec_text, task = spec
+        if transcripts_diverged(spec_text, final_text):
+            task.cancel()
+            return None
+        try:
+            chunks = await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=self._settings.spec_retrieval_await_ms / 1000,
+            )
+        except Exception:  # noqa: BLE001 — timeout/error ⇒ NLP retrieves instead
+            task.cancel()
+            return None
+        return chunks or None
 
     async def _handle_barge_in(self, msg: ClientMessage) -> None:
         """Gate 2 (PRD §05): decide whether a VAD candidate is a real interrupt."""
@@ -554,6 +638,8 @@ class CallSession:
             _, timer = self._pending_turn
             self._pending_turn = None
             timer.cancel()
+        # O-5: drop any in-flight speculative RAG pre-fetch on teardown.
+        self._cancel_speculative_retrieval()
         # Drop the call from the live supervisor view (3.3).
         self._monitor.close(self._state.session_id)
         # Tear down any live human-handoff (3.1): drop the operator bridge and, if

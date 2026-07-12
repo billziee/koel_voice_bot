@@ -97,10 +97,22 @@ async def _retrieve_for(ctx: TurnContext) -> list[RetrievedChunk]:
             return []
 
 
+@router.post("/retrieve", response_model=list[RetrievedChunk])
+async def retrieve_route(ctx: TurnContext, _: ServicePrincipal) -> list[RetrievedChunk]:
+    """Speculative RAG retrieval (O-5): VB_Svc pre-fetches the KB chunks for a
+    held transcript DURING the endpointing hold window, so they are already in
+    hand when the turn runs (hiding retrieval latency). Same body shape + auth as
+    ``/respond``; RAG-disabled or an empty index ⇒ ``[]`` (degrade-safe)."""
+    with span("nlp.retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
+        return await _retrieve_for(ctx)
+
+
 @router.post("/respond", response_model=NlpResponse)
 async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
     """Classify intent, retrieve RAG context, generate the next bot turn."""
-    retrieved = await _retrieve_for(ctx)
+    # O-5: honour chunks VB_Svc pre-fetched during the hold window — using them
+    # skips a second retrieval. Empty ⇒ retrieve now, exactly as before.
+    retrieved = ctx.retrieved or await _retrieve_for(ctx)
     with span("nlp.generate", session_id=ctx.session_id, intent_known=bool(ctx.customer_text)):
         return await _provider.generate(ctx, retrieved)
 
@@ -111,7 +123,8 @@ async def respond_stream(ctx: TurnContext, _: ServicePrincipal) -> StreamingResp
     then a terminal ``final`` frame with the full NlpResponse. VB_Svc feeds each
     sentence into sentence-streaming TTS as it arrives instead of waiting for the
     whole completion; the batch /respond route stays the fallback."""
-    retrieved = await _retrieve_for(ctx)
+    # O-5: use VB_Svc's pre-fetched chunks when present; else retrieve now.
+    retrieved = ctx.retrieved or await _retrieve_for(ctx)
 
     async def _gen():
         with span("nlp.generate_stream", session_id=ctx.session_id):
