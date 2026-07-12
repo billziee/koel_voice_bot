@@ -23,6 +23,7 @@ from koel.db.models import (
     CallLog,
     CrmCustomer,
     EscalationRequest,
+    ExportJob,
     InteractionLogRow,
     TranscriptTurn,
     UseCase,
@@ -55,6 +56,7 @@ _SQLITE_TABLES = [
     InteractionLogRow.__table__,
     BotConfigAudit.__table__,
     EscalationRequest.__table__,
+    ExportJob.__table__,
 ]
 
 

@@ -224,6 +224,25 @@ class EscalationRequest(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ExportJob(Base):
+    """Audit trail of a regulatory export (6.5). The export itself is a JSONL
+    bundle + SHA-256 manifest; this row records who exported which range, how
+    many records, the manifest hash, and where the bundle landed — the export
+    action is itself audit-relevant (PRD §10 / §11)."""
+
+    __tablename__ = "export_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    range_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    range_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    record_count: Mapped[int] = mapped_column(Integer, default=0)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), default="")
+    object_url: Mapped[str | None] = mapped_column(String(256), nullable=True)  # None ⇒ returned inline
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 # --- RAG knowledge base (pgvector) ------------------------------------------
 
 

@@ -16,7 +16,16 @@ from koel.common.auth import authenticate_websocket
 from koel.common.logging import get_logger
 from koel.common.schemas import Language
 from koel.tts.schemas import SynthesizeRequest
-from koel.voicebot.api import analytics, auth, bots, history, knowledge, operators, sessions
+from koel.voicebot.api import (
+    analytics,
+    auth,
+    bots,
+    exports,
+    history,
+    knowledge,
+    operators,
+    sessions,
+)
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
 from koel.voicebot.pipeline import localization
@@ -182,6 +191,7 @@ app.include_router(history.router)
 app.include_router(analytics.router)
 app.include_router(knowledge.router)
 app.include_router(operators.router)
+app.include_router(exports.router)
 
 
 @app.websocket("/ws/calls/{session_id}")
