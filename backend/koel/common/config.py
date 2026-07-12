@@ -84,6 +84,14 @@ class CommonSettings(BaseSettings):
     # (the action still records the intent on the CRM, just sends nothing).
     payment_link_base_url: str = ""
 
+    # --- Live-CRM mirror (6.1) ---
+    # When set, CRM writes (interactions/flags/call-summaries) are also forwarded
+    # to a client's CRM middleware over an HMAC-signed webhook. Empty ⇒ dormant:
+    # the internal DB-backed CRM stays the source of truth and nothing is sent.
+    crm_webhook_url: str = ""
+    crm_webhook_key: str = ""
+    crm_webhook_timeout_s: float = 8.0
+
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
     # Rate-limiter backend (O-8): "memory" is per-process (fine for a single

@@ -17,6 +17,7 @@ from koel.common.auth import ServicePrincipal
 from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account
 from koel.common.telemetry import span
+from koel.crm.adapters import mirror_to_webhook
 from koel.crm.schemas import CallSummaryRequest, CustomerRecord, FlagRequest, InteractionLog
 from koel.db.models import CrmCustomer, InteractionLogRow
 from koel.db.session import session_scope
@@ -98,6 +99,7 @@ async def log_interaction(customer_id: str, payload: InteractionLog, _: ServiceP
         "crm_interaction",
         extra={"extra_fields": {"customer_id": mask_account(customer_id), "event": payload.event}},
     )
+    await mirror_to_webhook("interaction", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "logged", "id": row_id, "customer_id": customer_id, "event": payload.event}
 
 
@@ -119,6 +121,7 @@ async def flag_customer(customer_id: str, payload: FlagRequest, _: ServicePrinci
         if payload.flag == "opt_out":
             row.dnd = True
         row.attributes = attrs
+    await mirror_to_webhook("flag", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "flagged", "customer_id": customer_id, "flag": payload.flag}
 
 
@@ -153,6 +156,7 @@ async def add_call_summary(customer_id: str, payload: CallSummaryRequest, _: Ser
         "crm_call_summary_added",
         extra={"extra_fields": {"customer_id": mask_account(customer_id), "session_id": payload.session_id}},
     )
+    await mirror_to_webhook("call_summary", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "logged", "customer_id": customer_id, "session_id": payload.session_id}
 
 
