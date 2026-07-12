@@ -152,12 +152,16 @@ function configToNewBot(config: BotConfig): NewBotPayload {
     rag_index: config.ragIndex || null,
     default_tone: config.tone,
     ambient_profile: config.ambientProfile,
+    // Round-trips to the backend's bot config JSON under exactly `stt_mode`.
+    config: { stt_mode: config.sttMode },
   };
 }
 
 function backendBotToBot(b: BackendBot): Bot {
   const useCase = USE_CASE_LABEL[b.use_case] || 'Credit Card';
   const langLabel = b.language === 'hi' ? 'Hindi' : b.language === 'en' ? 'English' : 'Hinglish';
+  // Hydrate the persisted STT mode so the config form seeds the operator's choice.
+  const sttMode: Bot['sttMode'] = b.config?.stt_mode === 'ws' ? 'ws' : 'chunk';
   return {
     id: b.id,
     name: b.name,
@@ -173,6 +177,7 @@ function backendBotToBot(b: BackendBot): Bot {
     lastActiveTs: Date.now(),
     backendId: b.id,
     backendCustomerId: USE_CASE_CUSTOMER[b.use_case],
+    sttMode,
   };
 }
 

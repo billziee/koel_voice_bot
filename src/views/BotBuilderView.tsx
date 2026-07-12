@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
-import type { BotConfig } from '../types';
+import type { BotConfig, SttMode } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
+import { SttModeSelector } from '../components/SttModeSelector';
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
 const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
@@ -35,6 +36,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
   const [voiceSpeed, setVoiceSpeed] = useState(1.05);
   const [disclosure, setDisclosure] = useState(true);
   const [ambientEnabled, setAmbientEnabled] = useState(true);
+  const [sttMode, setSttMode] = useState<SttMode>('chunk'); // Chunk = default
   const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
   const [selectedNode, setSelectedNode] = useState<string | null>('Handle objection');
   const [nodeScript, setNodeScript] = useState('Bilkul samajh sakti hoon. Yeh card {benefit_1} aur {benefit_2} deta hai — aapke existing cards se alag benefit. {fee_clause}. Interested hain?');
@@ -89,6 +91,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
       ragIndex,
       greeting: '',
       tone: 'cheerful',
+      sttMode,
     });
   };
 
@@ -217,6 +220,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                     <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all" style={{ left: ambientEnabled ? '18px' : '2px' }} />
                   </button>
                 </div>
+                <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
               </div>
             )}
 
@@ -339,6 +343,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                   <KV k="Speed" v={`${voiceSpeed.toFixed(2)}×`} theme={theme} />
                   <KV k="Greeting" v="Personalised template" theme={theme} />
                   <KV k="Disclosure block" v={disclosure ? 'Enabled' : 'Disabled'} theme={theme} />
+                  <KV k="STT mode" v={sttMode === 'ws' ? 'WebSocket streaming' : 'Chunk (batch)'} theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Flow & knowledge" theme={theme}>
                   <KV k="Script nodes" v={`${FLOW_NODES.length + FLOW_BRANCHES.length}`} theme={theme} />

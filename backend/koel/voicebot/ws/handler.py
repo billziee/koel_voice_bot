@@ -343,19 +343,27 @@ class CallSession:
         # operator console is a follow-up (live transcript stream / 3.3).
         if self._state.status == CallStatus.waiting_agent:
             return
-        stt = await self._clients.transcribe(
-            TranscribeRequest(
-                session_id=self._state.session_id,
-                audio_b64=msg.audio_b64 or "",
-                sample_rate=msg.sample_rate,
-                is_final=msg.is_final,
-                audio_format=msg.audio_format,
-                # Pin transcription to the bot's language — otherwise Whisper
-                # auto-detects and mislabels idle/short/code-mixed audio (Hindi →
-                # Russian/Ukrainian, noise → Spanish/French), garbling the turn.
-                language_hint=self._state.language,
-            )
+        req = TranscribeRequest(
+            session_id=self._state.session_id,
+            audio_b64=msg.audio_b64 or "",
+            sample_rate=msg.sample_rate,
+            is_final=msg.is_final,
+            audio_format=msg.audio_format,
+            # Pin transcription to the bot's language — otherwise Whisper
+            # auto-detects and mislabels idle/short/code-mixed audio (Hindi →
+            # Russian/Ukrainian, noise → Spanish/French), garbling the turn.
+            language_hint=self._state.language,
         )
+        # O-6 per-bot STT transport. "ws" mode obtains the FINAL transcript over the
+        # streaming STT endpoint (Sarvam's verified /speech-to-text/ws); only the
+        # final matters, so partial audio chunks stay on the batch path (dropped
+        # just below, exactly like chunk mode). Everything downstream (smart-turn
+        # hold, O-5 speculative RAG, _pending_turn merge, barge-in,
+        # handle_final_transcript) runs unchanged on the resulting `stt`.
+        if self._state.stt_mode == "ws" and msg.is_final:
+            stt = await self._final_from_stream(req)
+        else:
+            stt = await self._clients.transcribe(req)
         if not stt.is_final:
             # Partial transcripts are only used by the barge-in path.
             return
@@ -388,6 +396,21 @@ class CallSession:
         )
         if self._state.status == CallStatus.ended:
             self._closed = True
+
+    async def _final_from_stream(self, req: TranscribeRequest) -> TranscriptResult:
+        """ws-mode STT (O-6): consume the streaming STT endpoint and return the
+        last ``is_final`` transcript. Interim/partial frames are ignored for now
+        (true partials + barge-in-on-partial are a follow-up). The client's own
+        WS→batch fallback guarantees at least one final, and a stream that somehow
+        yields none still degrades to a batch ``transcribe`` here — so a ws bot
+        with a broken stream always completes its turn."""
+        last_final: TranscriptResult | None = None
+        async for result in self._clients.stream_transcribe(req):
+            if result.is_final:
+                last_final = result
+        if last_final is not None:
+            return last_final
+        return await self._clients.transcribe(req)
 
     async def _flush_pending_turn(self) -> None:
         """Merge window elapsed with no follow-up — the pause was just a pause.

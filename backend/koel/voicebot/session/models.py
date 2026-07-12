@@ -66,6 +66,13 @@ class SessionState(BaseModel):
     llm_temperature: float | None = None
     prompt_preamble: str | None = None
     default_tone: Tone = Tone.neutral
+    # Per-bot STT transport (roadmap O-6): "chunk" (default — today's batch
+    # POST /v1/transcribe path) or "ws" (opt-in — consume the streaming STT
+    # endpoint that runs Sarvam's verified /speech-to-text/ws, degrading to
+    # batch on any error). Plain Redis-safe string; seeded from BotConfig.config
+    # ["stt_mode"] in build_session_state and defaulted so existing serialized
+    # Redis states stay valid.
+    stt_mode: str = "chunk"
     # Persona (G): carried from bot config into every SynthesizeRequest.
     voice_gender: str = "female"
     voice: str | None = None  # per-bot persona voice id (4.2); None → engine default

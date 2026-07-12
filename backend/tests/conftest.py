@@ -142,6 +142,12 @@ class FakeClients:
     async def transcribe(self, request):  # noqa: ANN001
         raise NotImplementedError
 
+    async def stream_transcribe(self, request):  # noqa: ANN001 — O-6 ws-mode STT stand-in
+        # Mirror the real client's batch-fallback shape: yield one final result
+        # from transcribe(). Subclasses that only override transcribe() get a
+        # working stream_transcribe for free; ws-mode tests override this directly.
+        yield await self.transcribe(request)
+
     async def warm_up(self) -> None:  # O-1 session warm-up — no-op in tests
         pass
 

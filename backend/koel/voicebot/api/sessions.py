@@ -96,6 +96,12 @@ def build_session_state(
     # Per-bot scripted conversation flow (6.6): raw {start, nodes} dict + entry node.
     flow_config = bot.config.get("flow") if isinstance(bot.config, dict) else None
     _flow = parse_flow({"flow": flow_config})
+    # Per-bot STT transport (O-6): "ws" opts into the streaming STT endpoint;
+    # anything else (absent / invalid) stays on today's "chunk" batch path.
+    # Seeded here — the one shared bootstrap — so the HTTP and telephony/inbound
+    # paths never drift.
+    raw_stt_mode = bot.config.get("stt_mode") if isinstance(bot.config, dict) else None
+    stt_mode = raw_stt_mode if raw_stt_mode in ("chunk", "ws") else "chunk"
 
     # A/B experiment arm (6.3): deterministically assigned, overrides applied as
     # variant → bot → default. Same customer → same arm across retries.
@@ -126,6 +132,7 @@ def build_session_state(
         llm_temperature=bot.llm_temperature,
         prompt_preamble=prompt_preamble,
         default_tone=default_tone,
+        stt_mode=stt_mode,
         voice_gender=bot.voice_gender,
         voice=voice,
         speaking_rate=speaking_rate,

@@ -10,6 +10,9 @@ export type CallState =
 export type Tone = 'cheerful' | 'empathetic' | 'firm' | 'neutral';
 export type UseCase = 'Credit Card' | 'Collections' | 'Insurance' | 'Personal Loan';
 export type AmbientProfile = 'callfloor' | 'office' | 'comfort' | 'silent';
+// STT pipeline mode — operator choice, persists to backend `config.stt_mode`.
+// 'chunk' (default) = batch each utterance; 'ws' = stream over a persistent socket.
+export type SttMode = 'chunk' | 'ws';
 
 export interface Bot {
   id: string;
@@ -26,6 +29,7 @@ export interface Bot {
   lastActiveTs: number; // epoch for live aging
   backendId?: string; // real VB_Svc bot id when connected to the live backend
   backendCustomerId?: string; // seed CRM customer to dial for this bot
+  sttMode?: SttMode; // hydrated from backend `config.stt_mode` so the config form can seed it
 }
 
 // Item 5 — per-bot configuration that persists across views
@@ -42,6 +46,7 @@ export interface BotConfig {
   ragIndex: string;
   greeting: string;
   tone: Tone;
+  sttMode: SttMode; // Item — operator-selected STT pipeline; round-trips to backend config.stt_mode
 }
 
 export interface CRMField { label: string; value: string; highlight?: 'green' | 'orange' }

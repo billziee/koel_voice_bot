@@ -16,12 +16,14 @@ from opentelemetry.propagate import inject
 from koel.common.auth import issue_token
 from koel.common.config import CommonSettings
 from koel.common.http import make_async_client
-from koel.common.logging import get_correlation_id
+from koel.common.logging import get_correlation_id, get_logger
 from koel.crm.schemas import CustomerRecord
 from koel.nlp.schemas import NlpResponse, NlpStreamFrame, RetrievedChunk, TurnContext
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.tts.schemas import SynthesisChunk, SynthesisResult, SynthesizeRequest
 from koel.voicebot.tts_cache import TTS_CLIP_CACHE, TTS_RESULT_CACHE, tts_cache_key
+
+logger = get_logger("koel.voicebot.clients")
 
 _SERVICE_PRINCIPAL = "voicebot_svc"
 
@@ -38,6 +40,11 @@ _TTS_SYNTHESIZE_TIMEOUT_S = 70.0  # primary + fallback cascade, worst case
 _WARMUP_TIMEOUT_S = 6.0  # session warm-up ping (O-1); short — it's best-effort
 _NLP_STREAM_TIMEOUT_S = 15.0  # first-token NLP stream (O-2): generation ≲1s + margin
 _RETRIEVE_TIMEOUT_S = 8.0  # speculative RAG pre-fetch (O-5): embed + ANN query + margin
+# ws-mode streaming STT (O-6): the WS turn resolves in <1s live, but the
+# provider's own open/recv ceiling plus a batch degrade can run longer — keep a
+# generous bound so the endpoint's built-in fallback (not this timeout) is what
+# produces the final on a slow upstream.
+_STT_STREAM_TIMEOUT_S = 30.0
 
 
 class ServiceClients:
@@ -93,6 +100,39 @@ class ServiceClients:
         )
         resp.raise_for_status()
         return TranscriptResult.model_validate(resp.json())
+
+    async def stream_transcribe(
+        self, request: TranscribeRequest
+    ) -> AsyncIterator[TranscriptResult]:
+        """Consume STT_svc ``/v1/transcribe/stream`` (NDJSON) for ``ws``-mode bots
+        (O-6), mirroring ``respond_stream`` / ``stream_synthesis``.
+
+        Yields each ``TranscriptResult`` as it arrives (interim results carry
+        ``is_final=False``; the terminal one ``is_final=True``). On ANY error
+        (transport / HTTP status / parse) we degrade to a single batch
+        ``transcribe()`` yield so a ws-mode turn is never dropped — the same
+        never-drop posture as the provider's own WS→batch fallback. The batch
+        ``transcribe()`` stays the path for ``chunk``-mode bots, untouched.
+        """
+        try:
+            async with self._client.stream(
+                "POST",
+                f"{self._settings.stt_svc_url}/v1/transcribe/stream",
+                json=request.model_dump(),
+                headers=self._headers(),
+                timeout=_STT_STREAM_TIMEOUT_S,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if line.strip():
+                        yield TranscriptResult.model_validate_json(line)
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to batch
+            logger.warning(
+                "stt_stream_failed; degrading to batch transcribe",
+                extra={"extra_fields": {"session_id": request.session_id}},
+                exc_info=True,
+            )
+            yield await self.transcribe(request)
 
     # --- NLP ---
     async def respond(self, ctx: TurnContext) -> NlpResponse:

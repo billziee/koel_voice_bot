@@ -1,16 +1,17 @@
 import { useState } from 'react';
 import { Lock } from 'lucide-react';
 
-import type { Bot, BotConfig, AmbientProfile, Tone, UseCase } from '../types';
+import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
+import { SttModeSelector } from '../components/SttModeSelector';
 
 // Default config seed per use case (ConfigView-only).
 const DEFAULT_CONFIGS: Record<UseCase, BotConfig> = {
-  'Credit Card': { name: 'HDFC Card Cross-Sell', useCase: 'Credit Card Cross-Sell', language: 'Hinglish', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'hdfc_regalia_benefits_v2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai. Aapke account par ek pre-approved {offer.product} offer hai. Do minute baat kar sakte hain?', tone: 'cheerful' },
-  'Collections': { name: 'ICICI Pre-Due Collections', useCase: 'Collections — Pre-Due (DPD 0–30)', language: 'Hindi', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'icici_collection_guidelines_2026', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated reminder call hai.', tone: 'firm' },
-  'Insurance': { name: 'MaxLife Term Pitch', useCase: 'Life Insurance Sell (IRDAI flow)', language: 'English', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'okay', 'yeah', 'right', 'I see'], ragEnabled: true, ragIndex: 'maxlife_term_disclosures', greeting: 'Hello {customer.name} sir, this is KOEL calling from MaxLife — this is an automated call.', tone: 'cheerful' },
-  'Personal Loan': { name: 'Axis Loan Origination', useCase: 'Personal Loan Sell', language: 'Hinglish', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'axis_pl_rate_card_q2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai.', tone: 'cheerful' },
+  'Credit Card': { name: 'HDFC Card Cross-Sell', useCase: 'Credit Card Cross-Sell', language: 'Hinglish', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'hdfc_regalia_benefits_v2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai. Aapke account par ek pre-approved {offer.product} offer hai. Do minute baat kar sakte hain?', tone: 'cheerful', sttMode: 'chunk' },
+  'Collections': { name: 'ICICI Pre-Due Collections', useCase: 'Collections — Pre-Due (DPD 0–30)', language: 'Hindi', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'icici_collection_guidelines_2026', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated reminder call hai.', tone: 'firm', sttMode: 'chunk' },
+  'Insurance': { name: 'MaxLife Term Pitch', useCase: 'Life Insurance Sell (IRDAI flow)', language: 'English', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'okay', 'yeah', 'right', 'I see'], ragEnabled: true, ragIndex: 'maxlife_term_disclosures', greeting: 'Hello {customer.name} sir, this is KOEL calling from MaxLife — this is an automated call.', tone: 'cheerful', sttMode: 'chunk' },
+  'Personal Loan': { name: 'Axis Loan Origination', useCase: 'Personal Loan Sell', language: 'Hinglish', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'axis_pl_rate_card_q2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai.', tone: 'cheerful', sttMode: 'chunk' },
 };
 
 interface ConfigViewProps {
@@ -38,9 +39,13 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
   const [ragIndex, setRagIndex] = useState(seed?.ragIndex || 'hdfc_regalia_benefits_v2');
   const [greeting, setGreeting] = useState(seed?.greeting || '');
   const [tone] = useState<Tone>(seed?.tone || 'cheerful');
+  // Seed priority: config saved this session > backend-persisted config.stt_mode
+  // (carried on the Bot) > default. Chunk is the default when nothing is set.
+  const initialSttMode: SttMode = existingConfig?.sttMode ?? bot?.sttMode ?? 'chunk';
+  const [sttMode, setSttMode] = useState<SttMode>(initialSttMode);
 
   const handleSave = () => {
-    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone });
+    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode });
   };
 
   // Truthful status badge (Q-3): only claim "unsaved changes" when an editable
@@ -56,7 +61,8 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
     ambientProfile !== (seed?.ambientProfile || 'callfloor') ||
     ragEnabled !== (seed?.ragEnabled ?? true) ||
     ragIndex !== (seed?.ragIndex || 'hdfc_regalia_benefits_v2') ||
-    greeting !== (seed?.greeting || '');
+    greeting !== (seed?.greeting || '') ||
+    sttMode !== initialSttMode;
   const showDraft = isNew || isDirty;
 
   const [disclosureEnabled, setDisclosureEnabled] = useState(true);
@@ -135,6 +141,7 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
                 <textarea className="w-full border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2 min-h-[80px] resize-y" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }} value={greeting} onChange={e => setGreeting(e.target.value)} placeholder="Namaste {customer_name} ji, main {bank_name} ki taraf se KOEL bol rahi hoon..." />
                 <p className="text-[11px] mt-1" style={{ color: theme.faint }}>Variables in braces resolve from CRM at session start.</p>
               </div>
+              <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
             </div>
           </div>
 

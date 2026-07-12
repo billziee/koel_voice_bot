@@ -19,6 +19,8 @@ export interface BackendBot {
   rag_enabled: boolean;
   rag_index: string | null;
   active: boolean;
+  // Free-form per-bot config blob the backend persists (e.g. { stt_mode: 'chunk' | 'ws' }).
+  config?: Record<string, unknown> | null;
 }
 
 export interface BackendCustomer {
