@@ -92,6 +92,12 @@ class CommonSettings(BaseSettings):
     crm_webhook_key: str = ""
     crm_webhook_timeout_s: float = 8.0
 
+    # --- Telephony / PSTN (1.1 Twilio, 1.4 Exotel) ---
+    # Empty ⇒ no carrier configured: the Media Streams bridge stays off and
+    # inbound webhook signatures fail closed. Set the carrier's auth token to
+    # enable + verify signed webhooks. Browser calls are unaffected.
+    twilio_auth_token: str = ""
+
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
     # Rate-limiter backend (O-8): "memory" is per-process (fine for a single
