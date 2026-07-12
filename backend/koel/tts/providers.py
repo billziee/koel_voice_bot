@@ -355,7 +355,11 @@ class SarvamTtsProvider(TtsProvider):
     Magpie would mangle romanized text). Never drops a turn either way.
     """
 
-    _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN"}
+    _LANG_CODE = {
+        "hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN",
+        # Additional Indian languages (4.1) — Sarvam Bulbul supports all of these.
+        "ta": "ta-IN", "te": "te-IN", "mr": "mr-IN", "bn": "bn-IN",
+    }
 
     def __init__(
         self,

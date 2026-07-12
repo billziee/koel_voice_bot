@@ -65,6 +65,10 @@ class TtsSettings(CommonSettings):
     # synthesis runs, instead of one HTTP round-trip per sentence. On by default
     # (soak-tested); any WS failure falls back to the HTTP path automatically.
     sarvam_tts_ws_enabled: bool = True
+    # Languages Sarvam Bulbul voices (4.1). When Sarvam is enabled these all route
+    # to it; hi/hinglish keep their Magpie/Orpheus fallbacks, the rest are
+    # Sarvam-only (Magpie can't voice non-Devanagari scripts).
+    sarvam_languages: str = "hi,hinglish,ta,te,mr,bn"
 
     @property
     def groq_enabled(self) -> bool:
@@ -81,6 +85,10 @@ class TtsSettings(CommonSettings):
     @property
     def nvidia_language_set(self) -> set[str]:
         return {x.strip().lower() for x in self.tts_nvidia_languages.split(",") if x.strip()}
+
+    @property
+    def sarvam_language_set(self) -> set[str]:
+        return {x.strip().lower() for x in self.sarvam_languages.split(",") if x.strip()}
 
 
 @lru_cache

@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
 from koel.common.messaging import Channel, send_message
-from koel.common.schemas import Language, Tone
+from koel.common.schemas import SUPPORTED_LANGUAGES, Language, Tone
 from koel.common.telemetry import (
     current_trace_id,
     record_hop_latency,
@@ -360,7 +360,7 @@ class Orchestrator:
         elif (
             self._settings.adapt_language_to_caller
             and stt.language_id
-            and stt.language_id in (Language.en, Language.hi, Language.hinglish)
+            and stt.language_id in SUPPORTED_LANGUAGES
         ):
             state.language = stt.language_id
 
@@ -728,7 +728,7 @@ class Orchestrator:
         )
 
     def _is_unsupported_language(self, stt: TranscriptResult) -> bool:
-        supported = {Language.en, Language.hi, Language.hinglish}
+        supported = SUPPORTED_LANGUAGES
         # (a) Auto-detect path: STT explicitly reports a non-supported language with
         #     confidence (used when transcription isn't force-pinned).
         if (

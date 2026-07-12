@@ -44,6 +44,11 @@ _WHISPER_FORCE: dict[Language, str] = {
     Language.en: "en",
     Language.hi: "hi",
     Language.hinglish: "hi",
+    # Additional Indian languages (4.1); Whisper large-v3 transcribes all of these.
+    Language.ta: "ta",
+    Language.te: "te",
+    Language.mr: "mr",
+    Language.bn: "bn",
 }
 
 

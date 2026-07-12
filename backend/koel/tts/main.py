@@ -71,11 +71,13 @@ def _build_provider() -> TtsProvider:
         )
     if hindi is base:
         return base
-    # Without Sarvam, Magpie can only take hi (never hinglish) — restrict the
-    # routed set accordingly regardless of what's configured.
-    hindi_languages = settings.nvidia_language_set
-    if not settings.sarvam_enabled:
-        hindi_languages = hindi_languages & {"hi"}
+    # With Sarvam, it handles its full language set (hi/hinglish + the 4.1 Indian
+    # languages). Without it, Magpie can only take hi (never hinglish or the other
+    # scripts) — restrict the routed set accordingly regardless of config.
+    if settings.sarvam_enabled:
+        hindi_languages = settings.sarvam_language_set
+    else:
+        hindi_languages = settings.nvidia_language_set & {"hi"}
     return RoutingTtsProvider(default=base, hindi=hindi, hindi_languages=hindi_languages)
 
 
