@@ -264,6 +264,52 @@ class ConsentRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class DialAttemptStatus(str, enum.Enum):
+    """Lifecycle of one outbound dial (1.2)."""
+
+    pending = "pending"  # due at scheduled_at, not yet claimed
+    in_progress = "in_progress"  # a worker claimed it and is dialing
+    done = "done"  # connected + completed (terminal)
+    failed = "failed"  # exhausted retries / non-retryable outcome (terminal)
+
+
+class Campaign(Base):
+    """An outbound campaign (1.2): a bot dialing a segment within a window, with a
+    retry policy. The dialer worker originates ``DialAttempt`` rows for it."""
+
+    __tablename__ = "campaigns"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    bot_id: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(128), default="")
+    active: Mapped[bool] = mapped_column(default=True)
+    # {max_attempts, backoff_seconds, retry_outcomes: [...]} — see pipeline/dialer.py.
+    retry_policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DialAttempt(Base):
+    """One scheduled outbound dial (1.2) — also backs scheduled callbacks (2.5).
+    A worker claims due rows (``pending`` + ``scheduled_at`` <= now) with
+    FOR UPDATE SKIP LOCKED so multiple workers don't double-dial."""
+
+    __tablename__ = "dial_attempts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phone: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[DialAttemptStatus] = mapped_column(
+        Enum(DialAttemptStatus), default=DialAttemptStatus.pending, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    last_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 # --- RAG knowledge base (pgvector) ------------------------------------------
 
 
