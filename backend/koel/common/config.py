@@ -97,6 +97,17 @@ class CommonSettings(BaseSettings):
     # inbound webhook signatures fail closed. Set the carrier's auth token to
     # enable + verify signed webhooks. Browser calls are unaffected.
     twilio_auth_token: str = ""
+    # Which BotConfig an inbound PSTN call binds to (the /twilio/stream URL carries
+    # no session_id like the browser path). Empty ⇒ inbound bridge disabled.
+    twilio_default_bot_id: str = ""
+    # Public origin used to reconstruct the exact URL for Twilio signature checks
+    # behind a proxy (e.g. https://koel.example.com). Empty ⇒ verify uses the
+    # request URL as-is.
+    public_base_url: str = ""
+    # Exotel (1.4, India-hosted PSTN). Empty token ⇒ signatures fail closed /
+    # adapter dormant. media_mode: "pcm" (raw 8 kHz slin, no transcode) or "ulaw".
+    exotel_auth_token: str = ""
+    exotel_media_mode: str = "pcm"
 
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
