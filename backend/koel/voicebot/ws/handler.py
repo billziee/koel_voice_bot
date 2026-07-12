@@ -37,6 +37,7 @@ from koel.voicebot.persistence import (
 )
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcripts
+from koel.voicebot.pipeline.followup import send_followup
 from koel.voicebot.pipeline.orchestrator import Orchestrator
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
 from koel.voicebot.pipeline.summarizer import SarvamSummarizer
@@ -567,8 +568,18 @@ class CallSession:
             # leave it on TTL so the state isn't lost on a transient DB failure.
             await self._store.delete(self._state.session_id)
             self._summarize_and_annotate_crm()  # fire-and-forget, never blocks teardown
+            self._dispatch_followup()  # 2.4: outcome-based WhatsApp follow-up (dormant w/o gateway)
         else:
             self._finalized = False  # allow a later attempt to persist
+
+    def _dispatch_followup(self) -> None:
+        """Fire the post-call follow-up (2.4) off the critical path. No-op unless a
+        template matches the outcome and the WhatsApp channel is configured."""
+        if not self._state.followup_templates:
+            return
+        task = asyncio.create_task(send_followup(self._state))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _summarize_and_annotate_crm(self) -> None:
         """Best-effort post-call CRM note: an LLM extracts interest/objection/

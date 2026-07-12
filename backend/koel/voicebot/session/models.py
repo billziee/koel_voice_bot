@@ -78,6 +78,8 @@ class SessionState(BaseModel):
     # Per-bot script-adherence QA rules (5.5): required_disclosures /
     # prohibited_phrases / required_intents. Empty ⇒ QA is skipped at call end.
     qa_rules: dict = Field(default_factory=dict)
+    # Per-bot post-call follow-up templates (2.4): outcome → message text.
+    followup_templates: dict = Field(default_factory=dict)
     # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None
