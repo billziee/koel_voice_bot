@@ -673,3 +673,46 @@ class GroqNlpProvider(NlpProvider):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class SarvamNlpProvider(GroqNlpProvider):
+    """India-hosted NLP via Sarvam chat completions (O-7 Track A).
+
+    Sarvam's chat API is OpenAI-compatible in body (messages + JSON mode), so
+    this reuses GroqNlpProvider's prompt building, JSON-mode parsing, streaming,
+    grounding, and stub fallback wholesale — only the endpoint path and auth
+    header differ (Sarvam authenticates with ``api-subscription-key``, not a
+    Bearer token, and serves ``/v1/chat/completions``). Selected by
+    ``KOEL_NLP_PROVIDER=sarvam``; keeping inference in-region is the cheapest step
+    toward the DPDP/RBI residency requirement (docs/RESIDENCY.md).
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.sarvam.ai",
+        temperature: float = 0.3,
+        max_tokens: int = 160,
+        timeout_s: float = 8.0,
+        hinglish_script: str = "latin",
+    ) -> None:
+        # Sarvam serves one chat model, so both routing slots point at it.
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            model_fast=model,
+            model_quality=model,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_s=timeout_s,
+            hinglish_script=hinglish_script,
+        )
+        # Override the Groq-shaped endpoint + auth for Sarvam's API.
+        self._url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        self._headers = {
+            "api-subscription-key": api_key,
+            "Content-Type": "application/json",
+        }

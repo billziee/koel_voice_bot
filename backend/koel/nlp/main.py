@@ -13,7 +13,7 @@ from koel.common.logging import get_logger
 from koel.common.schemas import Tone
 from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
-from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
+from koel.nlp.providers import GroqNlpProvider, NlpProvider, SarvamNlpProvider, StubNlpProvider
 from koel.nlp.rag import build_embedder, retrieve
 from koel.nlp.schemas import Intent, NlpResponse, NlpStreamFrame, RetrievedChunk, TurnContext
 
@@ -40,6 +40,17 @@ app = create_app(
 
 def _build_provider() -> NlpProvider:
     settings = get_nlp_settings()
+    if settings.sarvam_nlp_enabled:
+        # O-7 Track A: India-hosted NLP. Reuses the Groq JSON-mode contract.
+        return SarvamNlpProvider(
+            api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_nlp_enabled guards None
+            model=settings.sarvam_model,
+            base_url=settings.sarvam_base_url,
+            hinglish_script=settings.hinglish_script,
+            temperature=settings.groq_temperature,
+            max_tokens=settings.groq_max_tokens,
+            timeout_s=settings.groq_timeout_s,
+        )
     if settings.groq_enabled:
         return GroqNlpProvider(
             api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
