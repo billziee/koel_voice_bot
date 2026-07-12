@@ -80,6 +80,8 @@ class SessionState(BaseModel):
     qa_rules: dict = Field(default_factory=dict)
     # Per-bot post-call follow-up templates (2.4): outcome → message text.
     followup_templates: dict = Field(default_factory=dict)
+    # A/B experiment arm this call was assigned (6.3), "<exp>:<variant>" or None.
+    variant_id: str | None = None
     # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None

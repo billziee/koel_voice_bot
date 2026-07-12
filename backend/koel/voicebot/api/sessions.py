@@ -24,6 +24,7 @@ from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.voicebot.deps import Runtime, get_runtime
+from koel.voicebot.pipeline.experiment import assign_variant
 from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
@@ -140,6 +141,19 @@ async def start_session(
     # Per-bot post-call follow-up templates (2.4): outcome → WhatsApp message.
     followup_templates = bot.config.get("followup_templates", {}) if isinstance(bot.config, dict) else {}
 
+    # A/B experiment arm (6.3): deterministically assigned, overrides applied as
+    # variant → bot → default. Same customer → same arm across retries.
+    variant_id, overrides = assign_variant(bot.config, payload.customer_id)
+    greeting_template = str(overrides.get("greeting_template", bot.greeting_template or ""))
+    prompt_preamble = overrides.get("prompt_preamble", bot.prompt_preamble)
+    voice = overrides.get("voice", bot.config.get("voice") if isinstance(bot.config, dict) else None)
+    speaking_rate = overrides.get("speaking_rate", bot.speaking_rate)
+    if "default_tone" in overrides:
+        try:
+            default_tone = Tone(str(overrides["default_tone"]))
+        except ValueError:
+            pass  # keep the bot default on a bad variant value
+
     state = SessionState(
         session_id=session_id,
         bot_id=bot.id,
@@ -154,13 +168,14 @@ async def start_session(
         rag_score_threshold=bot.rag_score_threshold,
         llm_model=bot.llm_model,
         llm_temperature=bot.llm_temperature,
-        prompt_preamble=bot.prompt_preamble,
+        prompt_preamble=prompt_preamble,
         default_tone=default_tone,
         voice_gender=bot.voice_gender,
-        voice=(bot.config.get("voice") if isinstance(bot.config, dict) else None),
-        speaking_rate=bot.speaking_rate,
+        voice=voice,
+        speaking_rate=speaking_rate,
         ambient_profile=bot.ambient_profile,
-        greeting_template=bot.greeting_template or "",
+        greeting_template=greeting_template,
+        variant_id=variant_id,
         crm_context=crm_context,
         backchannels=backchannels if isinstance(backchannels, dict) else {},
         qa_rules=qa_rules if isinstance(qa_rules, dict) else {},

@@ -47,6 +47,9 @@ async def persist_call(state: SessionState) -> str | None:
     qa = score_transcript(state.transcript, state.qa_rules)
     if qa is not None:
         metrics["qa"] = qa
+    # A/B arm for per-variant readouts (6.3), when the call was in an experiment.
+    if state.variant_id:
+        metrics["variant_id"] = state.variant_id
 
     try:
         async with session_scope() as db:
