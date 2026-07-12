@@ -6,8 +6,10 @@ over ``call_logs``. Tenant-scoped (AF): a scoped operator only sees their org.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from fastapi import APIRouter, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from koel.common.auth import CurrentUser
@@ -115,3 +117,62 @@ async def bot_stats(bot_id: str, user: CurrentUser) -> BotStats:
 @router.get("/stats", response_model=list[BotStats])
 async def all_bot_stats(user: CurrentUser) -> list[BotStats]:
     return await _aggregate(None, user.org_id)
+
+
+# --- Overview: funnel + objections + sentiment (6.2) ------------------------
+
+
+class ObjectionCount(BaseModel):
+    objection: str
+    count: int
+
+
+class AnalyticsOverview(BaseModel):
+    total_calls: int
+    funnel: dict[str, int]  # outcome value → count (the campaign funnel stages)
+    conversion_rate: float  # 0..1
+    escalation_rate: float  # 0..1
+    top_objections: list[ObjectionCount] = Field(default_factory=list)
+    sentiment: dict[str, int] = Field(default_factory=dict)  # sentiment tag → count
+
+
+@router.get("/analytics/overview", response_model=AnalyticsOverview)
+async def analytics_overview(user: CurrentUser) -> AnalyticsOverview:
+    """Cross-bot funnel plus the top objections and sentiment breakdown, mined
+    from the post-call summaries persisted on ``CallLog.metrics`` (5.3). Tenant-
+    scoped (AF). Aggregated in Python over an org-scoped fetch so it's portable
+    across the JSON-column dialects (SQLite in tests, Postgres in prod) —
+    fine at MVP volume; a SQL-native rollup is the scale-up path (O-10)."""
+    stmt = select(CallLog.outcome, CallLog.metrics)
+    if user.org_id is not None:
+        stmt = stmt.where(CallLog.org_id == user.org_id)
+    async with session_scope() as db:
+        rows = (await db.execute(stmt)).all()
+
+    funnel: dict[str, int] = {}
+    objections: Counter[str] = Counter()
+    sentiment: Counter[str] = Counter()
+    converted = escalated = 0
+    for outcome, metrics in rows:
+        funnel[outcome.value] = funnel.get(outcome.value, 0) + 1
+        if outcome is CallOutcome.converted:
+            converted += 1
+        if outcome is CallOutcome.escalated:
+            escalated += 1
+        summary = (metrics or {}).get("summary") or {}
+        objection = str(summary.get("objection") or "").strip()
+        if objection:
+            objections[objection] += 1
+        sent = str(summary.get("sentiment") or "").strip()
+        if sent:
+            sentiment[sent] += 1
+
+    total = len(rows)
+    return AnalyticsOverview(
+        total_calls=total,
+        funnel=funnel,
+        conversion_rate=_rate(converted, total),
+        escalation_rate=_rate(escalated, total),
+        top_objections=[ObjectionCount(objection=o, count=c) for o, c in objections.most_common(10)],
+        sentiment=dict(sentiment),
+    )
