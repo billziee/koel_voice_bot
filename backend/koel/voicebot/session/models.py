@@ -80,6 +80,13 @@ class SessionState(BaseModel):
     qa_rules: dict = Field(default_factory=dict)
     # Per-bot post-call follow-up templates (2.4): outcome → message text.
     followup_templates: dict = Field(default_factory=dict)
+    # Per-bot scripted conversation flow (6.6): the raw {start, nodes} dict from
+    # BotConfig.config["flow"]. None ⇒ unscripted (LLM-only). Re-parsed per turn
+    # (parse_flow is pure/cheap) since the parsed Flow isn't Redis-serializable.
+    flow: dict | None = None
+    # Current position in that flow; None ⇒ no/invalid flow. Advances once per
+    # completed customer turn on the returned intent.
+    flow_node_id: str | None = None
     # A/B experiment arm this call was assigned (6.3), "<exp>:<variant>" or None.
     variant_id: str | None = None
     # Consent-required bots (2.3): the disclosure version read this call. Set ⇒ an

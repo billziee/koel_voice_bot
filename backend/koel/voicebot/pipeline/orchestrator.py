@@ -39,6 +39,7 @@ from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.callback import parse_callback_time
 from koel.voicebot.pipeline.cost import estimate_turn_cost_usd
 from koel.voicebot.pipeline.filler import FillerCache, filler_tone_for
+from koel.voicebot.pipeline.flow import Flow, advance, current_prompt, parse_flow
 from koel.voicebot.session.models import CallStatus, SessionState, Turn
 from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 
@@ -394,6 +395,14 @@ class Orchestrator:
         else:
             nlp = await self._respond_with_filler(state, send)
 
+        # Scripted-flow advance (6.6): move to the next node on the returned intent
+        # so the NEXT turn's context injects that node's prompt. Guarded so an
+        # absent/malformed flow is a no-op (the call runs unscripted).
+        if state.flow_node_id is not None:
+            flow = self._flow_for(state)
+            if flow is not None:
+                state.flow_node_id = advance(flow, state.flow_node_id, nlp.intent.value)
+
         # In-call tone adaptation (roadmap 4.3): fold this turn's customer sentiment
         # into a rolling window and soften the bot's tone when the trend is negative.
         state.recent_sentiments.append(nlp.customer_sentiment.value)
@@ -541,8 +550,23 @@ class Orchestrator:
         )
         return True
 
+    def _flow_for(self, state: SessionState) -> Flow | None:
+        """The parsed scripted flow for this call (6.6), or None when unscripted.
+        Re-parsed per turn — parse_flow is pure/cheap and the Flow isn't stored."""
+        if not state.flow:
+            return None
+        return parse_flow({"flow": state.flow})
+
     def _build_turn_context(self, state: SessionState) -> TurnContext:
         """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
+        # Scripted-flow scaffolding (6.6): append the current node's prompt as
+        # extra guidance for this turn. It augments — never replaces — the
+        # hardened preamble, so the compliance/JSON rules always stay in force.
+        preamble = state.prompt_preamble
+        flow = self._flow_for(state)
+        node_prompt = current_prompt(flow, state.flow_node_id) if flow else None
+        if node_prompt:
+            preamble = f"{preamble}\n\n{node_prompt}".strip() if preamble else node_prompt
         return TurnContext(
             session_id=state.session_id,
             bot_id=state.bot_id,
@@ -558,7 +582,7 @@ class Orchestrator:
             rag_score_threshold=state.rag_score_threshold,
             llm_model=state.llm_model,
             llm_temperature=state.llm_temperature,
-            prompt_preamble=state.prompt_preamble,
+            prompt_preamble=preamble,
         )
 
     async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:

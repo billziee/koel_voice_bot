@@ -25,6 +25,7 @@ from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.voicebot.deps import Runtime, get_runtime
 from koel.voicebot.pipeline.experiment import assign_variant
+from koel.voicebot.pipeline.flow import parse_flow
 from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
@@ -140,6 +141,9 @@ async def start_session(
     qa_rules = bot.config.get("qa_rules", {}) if isinstance(bot.config, dict) else {}
     # Per-bot post-call follow-up templates (2.4): outcome → WhatsApp message.
     followup_templates = bot.config.get("followup_templates", {}) if isinstance(bot.config, dict) else {}
+    # Per-bot scripted conversation flow (6.6): raw {start, nodes} dict + entry node.
+    flow_config = bot.config.get("flow") if isinstance(bot.config, dict) else None
+    _flow = parse_flow({"flow": flow_config})
 
     # A/B experiment arm (6.3): deterministically assigned, overrides applied as
     # variant → bot → default. Same customer → same arm across retries.
@@ -183,6 +187,8 @@ async def start_session(
         backchannels=backchannels if isinstance(backchannels, dict) else {},
         qa_rules=qa_rules if isinstance(qa_rules, dict) else {},
         followup_templates=followup_templates if isinstance(followup_templates, dict) else {},
+        flow=flow_config if isinstance(flow_config, dict) else None,
+        flow_node_id=_flow.start if _flow else None,
         # recording_url is populated on call end with the REAL S3 object (or left
         # NULL when recording is disabled) — never a phantom URL (audit finding).
         recording_url=None,
