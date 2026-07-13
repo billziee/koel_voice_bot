@@ -2,6 +2,7 @@
 
 Schema is owned by Alembic (O) — this runs ``alembic upgrade head`` (which also
 creates the pgvector extension + HNSW index), then seeds:
+  - the tenant registry + login users (demo platform-admin + two org operators),
   - the Dummy CRM customers (all four use cases + a DND record),
   - three demo bot instances (HDFC / ICICI / Insurance, per PRD §09),
   - a small RAG knowledge base for the credit-card use case.
@@ -20,6 +21,7 @@ from sqlalchemy import delete
 
 from koel.crm.seed import SEED_CUSTOMERS
 from koel.db.models import BotConfig, CrmCustomer, KnowledgeChunk, UseCase
+from koel.db.seed_users import seed_orgs, seed_users
 from koel.db.session import session_scope
 from koel.nlp.config import get_nlp_settings
 from koel.nlp.rag import build_embedder
@@ -152,6 +154,13 @@ async def _seed() -> None:
     embedder = build_embedder(get_nlp_settings())
 
     async with session_scope() as db:
+        # Tenant registry + login users (6.4 follow-up). Idempotent — restarts /
+        # re-runs never duplicate. Seeds `demo`/`koel-demo` (platform-admin,
+        # org_id=None, sees all) so the demo login is unchanged, plus one operator
+        # in each of two orgs so login → tenant-scoping is provable end-to-end.
+        await seed_orgs(db)
+        await seed_users(db)
+
         # CRM customers
         for record in SEED_CUSTOMERS:
             if await db.get(CrmCustomer, record["id"]) is None:
@@ -184,7 +193,7 @@ async def _seed() -> None:
     aclose = getattr(embedder, "aclose", None)
     if aclose is not None:
         await aclose()
-    print("Bootstrap complete: migrations applied, CRM + bots + knowledge base seeded.")
+    print("Bootstrap complete: migrations applied, orgs + users + CRM + bots + knowledge base seeded.")
 
 
 if __name__ == "__main__":

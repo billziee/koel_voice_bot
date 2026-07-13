@@ -23,6 +23,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -103,6 +104,32 @@ class Org(Base):
     name: Mapped[str] = mapped_column(String(120))
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class User(Base):
+    """Operator/admin login identity, mapped to an org (6.4 follow-up).
+
+    This closes the last gap in tenant scoping: login (``koel.voicebot.api.auth``)
+    looks the user up by ``username``, verifies the bcrypt ``password_hash``, and
+    mints a token carrying this user's ``org_id`` + ``role`` — so a logged-in
+    operator is scoped to their tenant instead of the unscoped "sees all"
+    principal every prior login minted.
+
+    ``org_id=None`` is the platform-admin / single-tenant "sees all" principal —
+    the SAME convention every scoped table's nullable ``org_id`` already uses
+    (None = no tenant filter). A tenant-scoped user carries their org's id.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[bytes] = mapped_column(LargeBinary)  # bcrypt hash — never plaintext
+    # Tenant scope. None = platform-admin / single-tenant "sees all" (AF convention).
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="operator")
+    active: Mapped[bool] = mapped_column(default=True)  # soft-disable without deletion
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
