@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "python-jose[cryptography]>=3.3",
+    "cryptography>=42.0",  # Fernet — BYOK model-connection key encryption at rest
     "bcrypt>=4.0",
     "redis>=5.0",
     "sqlalchemy[asyncio]>=2.0",  # [asyncio] pulls greenlet, required by the async engine

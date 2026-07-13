@@ -28,6 +28,7 @@ from koel.db.models import (
     EscalationRequest,
     ExportJob,
     InteractionLogRow,
+    ModelConnection,
     Org,
     TranscriptTurn,
     UseCase,
@@ -57,6 +58,7 @@ def _clear_tts_cache():
 _SQLITE_TABLES = [
     Org.__table__,
     User.__table__,
+    ModelConnection.__table__,
     CrmCustomer.__table__,
     BotConfig.__table__,
     CallLog.__table__,

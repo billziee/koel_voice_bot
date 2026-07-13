@@ -133,6 +133,38 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+# --- BYOK model connections (custom LLM/TTS/STT) ----------------------------
+
+
+class ModelConnection(Base):
+    """A reusable, org-scoped connection to a customer-supplied model provider
+    (BYOK): an OpenAI-compatible or vendor LLM / TTS / STT endpoint. Bots select
+    one per role via ``BotConfig.config['connections']``.
+
+    The ``api_key_encrypted`` column stores the provider key encrypted at rest
+    (Fernet, see ``koel.common.crypto``) — never plaintext, never returned by the
+    API, never sent on the inter-service wire (only the connection id travels;
+    each service decrypts server-side to build its provider).
+    """
+
+    __tablename__ = "model_connections"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF; None = shared
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(8))  # "llm" | "tts" | "stt"
+    provider: Mapped[str] = mapped_column(String(32), default="openai_compatible")
+    base_url: Mapped[str] = mapped_column(String(256), default="")
+    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    # Role-specific tuning: temperature/top_p/max_tokens (llm), voice/encoding
+    # (tts), language/interim (stt), plus persona/preamble. Free-form so a new
+    # provider needs no migration.
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 # --- CRM (Dummy CRM, PRD §06 / §10) -----------------------------------------
 
 
