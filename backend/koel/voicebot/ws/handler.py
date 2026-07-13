@@ -353,6 +353,7 @@ class CallSession:
             # auto-detects and mislabels idle/short/code-mixed audio (Hindi →
             # Russian/Ukrainian, noise → Spanish/French), garbling the turn.
             language_hint=self._state.language,
+            stt_connection_id=self._state.stt_connection_id,  # BYOK per-bot STT connection
         )
         # O-6 per-bot STT transport. "ws" mode obtains the FINAL transcript over the
         # streaming STT endpoint (Sarvam's verified /speech-to-text/ws); only the

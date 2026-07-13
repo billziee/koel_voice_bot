@@ -46,6 +46,12 @@ class SynthesizeRequest(BaseModel):
     # Telephony seam (F): when true, post-mix audio is transcoded to 8 kHz µ-law
     # (PCMU) for a PSTN leg. Default off — browser calls stay 24 kHz WAV.
     telephony: bool = False
+    # BYOK (Phase 3): id of the org's custom TTS ModelConnection to synthesize this
+    # clip on. TTS_svc resolves it server-side (decrypts the key) and builds a
+    # provider by its ``provider`` label (deepgram / openai_compatible / sarvam);
+    # None ⇒ the service-default provider. Only the id crosses the wire. Defaulted
+    # so existing serialized request bodies stay valid.
+    tts_connection_id: str | None = None
 
 
 # Canonical output: 24 kHz mono 16-bit PCM-in-WAV. Providers resample/declare to

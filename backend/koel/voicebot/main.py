@@ -343,6 +343,7 @@ async def twilio_stream(websocket: WebSocket) -> None:
                 is_final=True,
                 audio_format="wav",
                 language_hint=state.language,
+                stt_connection_id=state.stt_connection_id,  # BYOK per-bot STT connection
             )
         )
 

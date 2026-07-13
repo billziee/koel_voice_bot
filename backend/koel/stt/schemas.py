@@ -18,6 +18,12 @@ class TranscribeRequest(BaseModel):
     # Container format of the audio (wav/webm/m4a/mp3/ogg/flac). Whisper infers
     # the codec from the filename extension, so this must match the bytes.
     audio_format: str = "wav"
+    # BYOK (Phase 3): id of the org's custom STT ModelConnection to transcribe on.
+    # STT_svc resolves it server-side (decrypts the key) and builds a provider by
+    # its ``provider`` label (deepgram / sarvam); None ⇒ the service-default
+    # provider. Only the id crosses the wire. Defaulted so existing serialized
+    # request bodies stay valid.
+    stt_connection_id: str | None = None
 
 
 class TranscriptResult(BaseModel):

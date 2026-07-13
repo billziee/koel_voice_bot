@@ -235,6 +235,7 @@ class Orchestrator:
             ambient=use_ambient,
             ambient_profile=state.ambient_profile if use_ambient else None,
             telephony=self._settings.telephony_mode,
+            tts_connection_id=state.tts_connection_id,  # BYOK per-bot TTS connection
         )
         with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
             # Capture the trace id for the §11 audit / §14 latency dashboards.
@@ -691,6 +692,7 @@ class Orchestrator:
                         ambient=use_ambient,
                         ambient_profile=state.ambient_profile if use_ambient else None,
                         telephony=self._settings.telephony_mode,
+                        tts_connection_id=state.tts_connection_id,  # BYOK per-bot TTS connection
                     )
                     async for chunk in self._clients.stream_synthesis(req):
                         if first_ms is None:
