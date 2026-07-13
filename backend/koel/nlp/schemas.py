@@ -64,6 +64,10 @@ class TurnContext(BaseModel):
     llm_model: str | None = None
     llm_temperature: float | None = None
     prompt_preamble: str | None = None
+    # BYOK: id of the org's custom LLM ModelConnection to run this turn on. NLP_svc
+    # resolves it server-side (decrypts the key) and builds an OpenAI-compatible
+    # provider; None ⇒ the service-default provider. Only the id crosses the wire.
+    llm_connection_id: str | None = None
     # Speculative RAG (O-5): KB chunks VB_Svc pre-fetched during the endpointing
     # hold window, before the final transcript triggered the turn. When non-empty
     # NLP_svc USES these and SKIPS its own retrieval (no double retrieval); empty

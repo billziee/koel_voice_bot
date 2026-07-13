@@ -94,6 +94,13 @@ class SessionState(BaseModel):
     # Current position in that flow; None ⇒ no/invalid flow. Advances once per
     # completed customer turn on the returned intent.
     flow_node_id: str | None = None
+    # BYOK model-connection ids per role (custom LLM/TTS/STT). Seeded from
+    # BotConfig.config["connections"]; None ⇒ the service-default provider. Only
+    # the id is carried (to TurnContext / SynthesizeRequest / TranscribeRequest);
+    # each service resolves + decrypts the key server-side.
+    llm_connection_id: str | None = None
+    tts_connection_id: str | None = None
+    stt_connection_id: str | None = None
     # A/B experiment arm this call was assigned (6.3), "<exp>:<variant>" or None.
     variant_id: str | None = None
     # Consent-required bots (2.3): the disclosure version read this call. Set ⇒ an

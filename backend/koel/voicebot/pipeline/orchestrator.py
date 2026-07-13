@@ -603,6 +603,7 @@ class Orchestrator:
             llm_model=state.llm_model,
             llm_temperature=state.llm_temperature,
             prompt_preamble=preamble,
+            llm_connection_id=state.llm_connection_id,  # BYOK custom LLM (Phase 2)
             retrieved=prefetched_chunks or [],
         )
 

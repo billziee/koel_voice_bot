@@ -102,6 +102,15 @@ def build_session_state(
     # paths never drift.
     raw_stt_mode = bot.config.get("stt_mode") if isinstance(bot.config, dict) else None
     stt_mode = raw_stt_mode if raw_stt_mode in ("chunk", "ws") else "chunk"
+    # Per-bot BYOK model connections (LLM/TTS/STT). Each id, when set, routes that
+    # service to a custom provider (resolved + decrypted server-side); absent ⇒
+    # the service default. Ignore non-string entries defensively.
+    _conns = bot.config.get("connections") if isinstance(bot.config, dict) else None
+    _conns = _conns if isinstance(_conns, dict) else {}
+
+    def _conn(role: str) -> str | None:
+        v = _conns.get(role)
+        return v if isinstance(v, str) and v else None
 
     # A/B experiment arm (6.3): deterministically assigned, overrides applied as
     # variant → bot → default. Same customer → same arm across retries.
@@ -133,6 +142,9 @@ def build_session_state(
         prompt_preamble=prompt_preamble,
         default_tone=default_tone,
         stt_mode=stt_mode,
+        llm_connection_id=_conn("llm"),
+        tts_connection_id=_conn("tts"),
+        stt_connection_id=_conn("stt"),
         voice_gender=bot.voice_gender,
         voice=voice,
         speaking_rate=speaking_rate,

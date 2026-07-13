@@ -26,6 +26,7 @@ from koel.voicebot.api import (
     analytics,
     auth,
     bots,
+    connections,
     exports,
     history,
     knowledge,
@@ -203,6 +204,7 @@ app.include_router(analytics.router)
 app.include_router(knowledge.router)
 app.include_router(operators.router)
 app.include_router(orgs.router)
+app.include_router(connections.router)
 app.include_router(exports.router)
 
 
