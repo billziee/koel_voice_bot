@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from koel.common.logging import get_logger
 from koel.stt.schemas import TranscriptResult
@@ -206,3 +207,129 @@ class TelephonyAudioIngest:
             return audioop.rms(pcm16, _PCM_WIDTH)
         except audioop.error:
             return 0
+
+
+# -- streaming variant (O-6 Wave 2) -------------------------------------------
+# Interim-transcript sink (best-effort, non-authoritative live partial → FE).
+PartialCallback = Callable[[str], Awaitable[None]]
+
+
+class StreamingSttSession(Protocol):
+    """The long-lived streaming-STT session surface :class:`StreamingTelephonyIngest`
+    drives — structurally satisfied by
+    :class:`koel.stt.streaming_session.DeepgramStreamingSession` and by test fakes.
+
+    The session is expected to deliver interims/finals through the two callbacks it
+    was constructed with (the ingest wires its own forwarders in as those)."""
+
+    async def start(self) -> None: ...
+
+    async def send_frame(self, pcm16: bytes) -> None: ...
+
+    async def finish(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
+# Builds a session bound to the ingest's own (partial, final) forwarders. The
+# ingest owns the callbacks; the factory only supplies transport (api key/url/…).
+StreamingSessionFactory = Callable[
+    [PartialCallback, UtteranceCallback], StreamingSttSession
+]
+
+
+class StreamingTelephonyIngest:
+    """Streaming counterpart to :class:`TelephonyAudioIngest` for the Deepgram
+    true-partials path (O-6 Wave 2).
+
+    Exposes the SAME ``feed(pcm16, rate)`` / ``flush()`` seam the Twilio bridge
+    drives, so the bridge stays transport-agnostic — but instead of buffering +
+    RMS-endpointing + a per-utterance batch transcribe, it PUSHES every decoded
+    frame straight into a long-lived :class:`StreamingSttSession`. Deepgram does
+    the endpointing: interims arrive live on ``on_partial`` and utterance finals on
+    ``on_utterance`` via the session's background reader — no server-side silence
+    gate on this path.
+
+    Fully defensive: :meth:`start` reports (never raises) a connect failure so the
+    route can fall back to the buffered ingest before audio flows; once started, a
+    mid-stream session failure degrades silently (partials stop) and NEVER raises
+    into the live call. :meth:`aclose` always tears the session down.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: StreamingSessionFactory,
+        on_utterance: UtteranceCallback,
+        on_partial: PartialCallback | None = None,
+    ) -> None:
+        self._on_utterance = on_utterance
+        self._on_partial = on_partial
+        # The session emits through OUR forwarders (defensive wrappers), so a sink
+        # failure can never crash the session's reader or the call.
+        self._session = session_factory(self._forward_partial, self._forward_final)
+        self._started = False
+        self._degraded = False
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    async def start(self) -> bool:
+        """Open the streaming session. Returns False (never raises) on failure so
+        the route can fall back to the buffered ingest before any frame is fed."""
+        try:
+            await self._session.start()
+            self._started = True
+            return True
+        except Exception:  # noqa: BLE001 — connect failure → caller falls back to buffered
+            self._degraded = True
+            logger.warning("streaming_telephony_ingest_start_failed", exc_info=True)
+            return False
+
+    async def feed(self, pcm16: bytes, sample_rate: int) -> None:  # noqa: ARG002 — rate fixed at start
+        """Push one decoded caller frame into the streaming session. The sample
+        rate is fixed when the session is opened, so it is accepted (bridge
+        contract) but unused here. Never raises into the caller."""
+        if self._degraded or not self._started or not pcm16:
+            return
+        try:
+            await self._session.send_frame(pcm16)
+        except Exception:  # noqa: BLE001 — a session send error degrades, never drops the call
+            self._degraded = True
+            logger.warning("streaming_telephony_ingest_feed_failed", exc_info=True)
+
+    async def flush(self) -> None:
+        """Finalize the utterance in flight at stream stop (send CloseStream, drain
+        the last final). No-op if never started. Never raises."""
+        if not self._started:
+            return
+        try:
+            await self._session.finish()
+        except Exception:  # noqa: BLE001 — teardown-time flush must never raise
+            logger.warning("streaming_telephony_ingest_flush_failed", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Tear the session down (idempotent). Called by the route regardless of
+        how the call ended so the Deepgram socket is never leaked."""
+        try:
+            await self._session.aclose()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            logger.warning("streaming_telephony_ingest_aclose_failed", exc_info=True)
+
+    async def _forward_partial(self, text: str) -> None:
+        if self._on_partial is None or not text.strip():
+            return
+        try:
+            await self._on_partial(text)
+        except Exception:  # noqa: BLE001 — interim delivery is best-effort/non-authoritative
+            logger.warning("streaming_telephony_ingest_partial_failed", exc_info=True)
+
+    async def _forward_final(self, result: TranscriptResult) -> None:
+        if result is None or not result.is_final or not result.text.strip():
+            # Empty/partial/None → nothing worth a turn (mirrors TelephonyAudioIngest).
+            return
+        try:
+            await self._on_utterance(result)
+        except Exception:  # noqa: BLE001 — a turn-handler failure is the route's to own
+            logger.warning("streaming_telephony_ingest_on_utterance_failed", exc_info=True)
