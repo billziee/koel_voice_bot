@@ -24,6 +24,9 @@ import type {
 } from './types';
 import { getTheme } from './lib/theme';
 import { formatRelativeTime } from './lib/format';
+// Pure helper (no React) — safe to import on the eager path without pulling the
+// flow-editor canvas components into the initial bundle.
+import { coerceFlow } from './components/FlowEditor/flowModel';
 import { LoginView } from './views/LoginView';
 import { DashboardView } from './views/DashboardView';
 
@@ -152,8 +155,11 @@ function configToNewBot(config: BotConfig): NewBotPayload {
     rag_index: config.ragIndex || null,
     default_tone: config.tone,
     ambient_profile: config.ambientProfile,
-    // Round-trips to the backend's bot config JSON under exactly `stt_mode`.
-    config: { stt_mode: config.sttMode },
+    // Round-trips to the backend's bot config JSON. `stt_mode` and `flow` (6.6)
+    // share the one blob; PATCH replaces `config` wholesale so both must ship
+    // together. The scripted flow is consumed by the backend interpreter from
+    // exactly `config.flow` (koel/voicebot/pipeline/flow.py).
+    config: { stt_mode: config.sttMode, ...(config.flow ? { flow: config.flow } : {}) },
   };
 }
 
@@ -162,6 +168,9 @@ function backendBotToBot(b: BackendBot): Bot {
   const langLabel = b.language === 'hi' ? 'Hindi' : b.language === 'en' ? 'English' : 'Hinglish';
   // Hydrate the persisted STT mode so the config form seeds the operator's choice.
   const sttMode: Bot['sttMode'] = b.config?.stt_mode === 'ws' ? 'ws' : 'chunk';
+  // Hydrate the persisted scripted flow (6.6) — coerced defensively; a malformed
+  // or absent flow yields undefined and the editor seeds a default starter.
+  const flow = coerceFlow(b.config?.flow) ?? undefined;
   return {
     id: b.id,
     name: b.name,
@@ -178,6 +187,7 @@ function backendBotToBot(b: BackendBot): Bot {
     backendId: b.id,
     backendCustomerId: USE_CASE_CUSTOMER[b.use_case],
     sttMode,
+    flow,
   };
 }
 

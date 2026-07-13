@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
-import type { BotConfig, SttMode } from '../types';
+import type { BotConfig, SttMode, Flow } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
+import { FlowEditor, defaultFlow, validateFlow } from '../components/FlowEditor';
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
 const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
@@ -13,18 +14,6 @@ const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
   { num: 3, title: 'Conversation flow', sub: 'Script nodes & branches' },
   { num: 4, title: 'Knowledge & CRM', sub: 'RAG index · field map' },
   { num: 5, title: 'Review & deploy', sub: 'Preflight checks' },
-];
-
-const FLOW_NODES = [
-  { type: 'greet', label: 'Greeting', title: 'Personalised opener', detail: 'CRM: name, bank, product, offer' },
-  { type: 'listen', label: 'Listen', title: 'Capture & classify intent', detail: 'STT → Groq intent tag' },
-];
-
-const FLOW_BRANCHES = [
-  { type: 'rag', label: 'RAG response', title: 'Pitch benefits', detail: 'on intent = INTERESTED' },
-  { type: 'rag', label: 'RAG response', title: 'Handle objection', detail: 'on intent = OBJECTION' },
-  { type: 'escalate', label: 'Escalate', title: 'Hand to specialist', detail: 'on intent = HIGH_INTEREST' },
-  { type: 'end', label: 'End', title: 'Log & close', detail: 'on intent = REJECTION · suppress 30d' },
 ];
 
 export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotConfig) => void; onCancel: () => void; theme: Theme }) {
@@ -38,38 +27,43 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
   const [ambientEnabled, setAmbientEnabled] = useState(true);
   const [sttMode, setSttMode] = useState<SttMode>('chunk'); // Chunk = default
   const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
-  const [selectedNode, setSelectedNode] = useState<string | null>('Handle objection');
-  const [nodeScript, setNodeScript] = useState('Bilkul samajh sakti hoon. Yeh card {benefit_1} aur {benefit_2} deta hai — aapke existing cards se alag benefit. {fee_clause}. Interested hain?');
+  // Real scripted flow (6.6): seeded with a minimal single-node starter, edited
+  // in place, and shipped in config.flow on deploy.
+  const [flow, setFlow] = useState<Flow>(() => defaultFlow());
 
-  const nodeColor = (type: string) => {
-    switch (type) {
-      case 'greet': return theme.primary;
-      case 'listen': return theme.faint;
-      case 'rag': return theme.greenMid;
-      case 'escalate': return theme.accent;
-      case 'end': return theme.destructive;
-      default: return theme.faint;
-    }
-  };
+  // Flow shape stats + validation feed the footer, review panel, and preflight.
+  const flowNodeCount = Object.keys(flow.nodes).length;
+  const flowBranchCount = Object.values(flow.nodes).reduce((n, node) => n + Object.keys(node.branches).length, 0);
+  const flowErrors = validateFlow(flow).filter((i) => i.level === 'error').length;
 
-  // Variables the CRM context can fill at call time. A script token outside this
-  // set has no data source, so it would render literally on the call.
+  // Variables the CRM context can fill at call time. A prompt token outside this
+  // set has no data source, so it would render literally on the call. Scanned
+  // across ALL node prompts so the check tracks the real flow, not one node.
   const CRM_MAPPED_VARS = new Set([
     'customer_name', 'name', 'bank', 'product', 'offer', 'offer_amount',
     'benefit_1', 'benefit_2', 'fee_clause',
   ]);
-  const scriptVars = Array.from(nodeScript.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim());
+  const flowPromptText = Object.values(flow.nodes).map((n) => n.prompt).join(' ');
+  const scriptVars = Array.from(flowPromptText.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim());
   const unmappedVars = scriptVars.filter((v) => !CRM_MAPPED_VARS.has(v));
 
   // Real preflight (Q-3): each row reflects the builder's ACTUAL state rather
-  // than a hardcoded pass. Variable-mapping and index checks are deterministic
-  // client-side; a live index-reachability probe is a deploy-time follow-up.
+  // than a hardcoded pass. Variable-mapping, flow validity, and index checks are
+  // deterministic client-side; a live index-reachability probe is a deploy-time
+  // follow-up.
   const preflight = [
     {
       label:
+        flowErrors === 0
+          ? 'Conversation flow is valid'
+          : `Conversation flow has ${flowErrors} error${flowErrors === 1 ? '' : 's'}`,
+      ok: flowErrors === 0,
+    },
+    {
+      label:
         unmappedVars.length === 0
-          ? 'All script variables mapped to CRM'
-          : `Unmapped script variables: ${unmappedVars.map((v) => `{${v}}`).join(', ')}`,
+          ? 'All prompt variables mapped to CRM'
+          : `Unmapped prompt variables: ${unmappedVars.map((v) => `{${v}}`).join(', ')}`,
       ok: unmappedVars.length === 0,
     },
     { label: 'Knowledge base index configured', ok: ragIndex.trim().length > 0 },
@@ -92,6 +86,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
       greeting: '',
       tone: 'cheerful',
       sttMode,
+      flow,
     });
   };
 
@@ -224,65 +219,9 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
               </div>
             )}
 
-            {/* Step 3: Conversation flow */}
+            {/* Step 3: Conversation flow — real editor (canvas + form) */}
             {step === 3 && (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex gap-4 text-[11.5px]" style={{ color: theme.faint }}>
-                    {[{ c: theme.primary, l: 'Greeting' }, { c: theme.faint, l: 'Listen' }, { c: theme.greenMid, l: 'RAG response' }, { c: theme.accent, l: 'Escalate' }, { c: theme.destructive, l: 'End' }].map(lg => (
-                      <span key={lg.l} className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: lg.c }} />{lg.l}</span>
-                    ))}
-                  </div>
-                  <button className="text-[12.5px] font-medium px-3 py-1 border rounded-md" style={{ borderColor: theme.rule, color: theme.inkMuted }}>Test flow</button>
-                </div>
-
-                <div className="p-4 rounded-lg" style={{ backgroundColor: theme.inset }}>
-                  {/* Linear nodes */}
-                  {FLOW_NODES.map((n, i) => (
-                    <React.Fragment key={i}>
-                      <div className="p-3 rounded-md border cursor-pointer" style={{ borderColor: theme.ruleSubtle, backgroundColor: theme.surfaceCard }} onClick={() => setSelectedNode(n.title)}>
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: nodeColor(n.type) }}>
-                          <span className="w-[5px] h-[5px] rounded-full" style={{ backgroundColor: nodeColor(n.type) }} />{n.label}
-                        </span>
-                        <div className="text-[13px] font-medium" style={{ color: theme.ink }}>{n.title}</div>
-                        <div className="text-[11.5px]" style={{ color: theme.faint }}>{n.detail}</div>
-                      </div>
-                      <div className="w-px h-4 mx-auto" style={{ backgroundColor: theme.rule }} />
-                    </React.Fragment>
-                  ))}
-
-                  {/* Branches */}
-                  <div className="grid grid-cols-4 gap-3 mt-1">
-                    {FLOW_BRANCHES.map((b, i) => (
-                      <div key={i} className="p-3 rounded-md border cursor-pointer" style={{ borderColor: selectedNode === b.title ? theme.primary : theme.ruleSubtle, backgroundColor: selectedNode === b.title ? theme.primarySubtle : theme.surfaceCard }} onClick={() => { setSelectedNode(b.title); setNodeScript(b.detail); }}>
-                        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: nodeColor(b.type) }}>
-                          <span className="w-[5px] h-[5px] rounded-full" style={{ backgroundColor: nodeColor(b.type) }} />{b.label}
-                        </span>
-                        <div className="text-[12.5px] font-medium" style={{ color: theme.ink }}>{b.title}</div>
-                        <div className="text-[11px]" style={{ color: theme.faint }}>{b.detail}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedNode && (
-                  <div className="flex gap-4 mt-4">
-                    <div className="flex-1">
-                      <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Selected node — {selectedNode}</label>
-                      <textarea value={nodeScript} onChange={e => setNodeScript(e.target.value)} className="w-full border rounded-md px-3 py-2 text-[13px] outline-none min-h-[64px] resize-y" style={{ borderColor: theme.rule, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }} />
-                    </div>
-                    <div className="w-[200px]">
-                      <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Knowledge source</label>
-                      <select value={ragIndex} onChange={e => setRagIndex(e.target.value)} className="w-full border rounded-md px-3 py-2 text-[13px]" style={{ borderColor: theme.rule, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }}>
-                        <option>kb_hdfc_regalia_v3</option>
-                        <option>kb_hdfc_millennia_v1</option>
-                        <option>kb_icici_plat_v2</option>
-                      </select>
-                      <p className="text-[11px] mt-2" style={{ color: theme.faint }}>Retrieved per utterance — no hallucinated product details.</p>
-                    </div>
-                  </div>
-                )}
-              </div>
+              <FlowEditor value={flow} onChange={setFlow} theme={theme} />
             )}
 
             {/* Step 4: Knowledge & CRM */}
@@ -346,10 +285,10 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                   <KV k="STT mode" v={sttMode === 'ws' ? 'WebSocket streaming' : 'Chunk (batch)'} theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Flow & knowledge" theme={theme}>
-                  <KV k="Script nodes" v={`${FLOW_NODES.length + FLOW_BRANCHES.length}`} theme={theme} />
-                  <KV k="Branches" v={`${FLOW_BRANCHES.length}`} theme={theme} />
+                  <KV k="Flow nodes" v={`${flowNodeCount}`} theme={theme} />
+                  <KV k="Branches" v={`${flowBranchCount}`} theme={theme} />
+                  <KV k="Start node" v={flow.start || '—'} theme={theme} mono />
                   <KV k="RAG index" v={ragIndex} theme={theme} mono />
-                  <KV k="Escalation rules" v="4" theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Preflight checks" theme={theme}>
                   {preflight.map((pf, i) => (
@@ -373,7 +312,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
               ← Back
             </button>
             <span className="text-[12px]" style={{ color: theme.faint }}>
-              {step === 3 && `${FLOW_BRANCHES.length} branches · ${FLOW_NODES.length + FLOW_BRANCHES.length} nodes · ${unmappedVars.length} unmapped variable${unmappedVars.length === 1 ? '' : 's'}`}
+              {step === 3 && `${flowNodeCount} node${flowNodeCount === 1 ? '' : 's'} · ${flowBranchCount} branch${flowBranchCount === 1 ? '' : 'es'} · ${flowErrors} error${flowErrors === 1 ? '' : 's'}`}
               {step === 5 && (() => {
                 const warnings = preflight.filter(p => !p.ok).length;
                 return `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${warnings} warning${warnings === 1 ? '' : 's'}`;

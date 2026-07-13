@@ -14,6 +14,34 @@ export type AmbientProfile = 'callfloor' | 'office' | 'comfort' | 'silent';
 // 'chunk' (default) = batch each utterance; 'ws' = stream over a persistent socket.
 export type SttMode = 'chunk' | 'ws';
 
+// ── Conversation flow (roadmap 6.6) ──────────────────────────────────────────
+// A scripted state machine the backend interpreter consumes from
+// BotConfig.config["flow"] (see backend koel/voicebot/pipeline/flow.py). It
+// scaffolds the LLM — each node's `prompt` is per-turn guidance and `branches`
+// route on the NLP-returned intent. These intent values mirror the backend
+// `Intent` enum exactly; `'*'` is the wildcard fallback branch.
+export type FlowIntent =
+  | 'high_interest' | 'interested' | 'objection' | 'not_interested'
+  | 'busy' | 'promise_to_pay' | 'dispute' | 'request_human'
+  | 'opt_out' | 'smalltalk' | 'unknown';
+export type FlowBranchKey = FlowIntent | '*';
+
+// Editor-only board position for a node. Persisted under the node's private
+// `_ui` key: the backend interpreter reads only `prompt`/`branches`, so it
+// ignores `_ui` — positions round-trip through config without touching a call.
+export interface FlowNodeUi { x: number; y: number }
+
+export interface FlowNode {
+  prompt: string; // per-turn guidance appended to (never replacing) the system prompt
+  branches: Record<string, string>; // intent value (or '*') → next node id
+  _ui?: FlowNodeUi; // editor-only position; backend safely ignores it
+}
+
+export interface Flow {
+  start: string; // must resolve to an existing node id
+  nodes: Record<string, FlowNode>;
+}
+
 export interface Bot {
   id: string;
   name: string;
@@ -30,6 +58,7 @@ export interface Bot {
   backendId?: string; // real VB_Svc bot id when connected to the live backend
   backendCustomerId?: string; // seed CRM customer to dial for this bot
   sttMode?: SttMode; // hydrated from backend `config.stt_mode` so the config form can seed it
+  flow?: Flow; // hydrated from backend `config.flow` so the flow editor can seed it (6.6)
 }
 
 // Item 5 — per-bot configuration that persists across views
@@ -47,6 +76,7 @@ export interface BotConfig {
   greeting: string;
   tone: Tone;
   sttMode: SttMode; // Item — operator-selected STT pipeline; round-trips to backend config.stt_mode
+  flow?: Flow; // 6.6 — scripted conversation flow; round-trips to backend config.flow
 }
 
 export interface CRMField { label: string; value: string; highlight?: 'green' | 'orange' }

@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Lock } from 'lucide-react';
 
-import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode } from '../types';
+import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode, Flow } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
+import { FlowEditor, defaultFlow } from '../components/FlowEditor';
 
 // Default config seed per use case (ConfigView-only).
 const DEFAULT_CONFIGS: Record<UseCase, BotConfig> = {
@@ -43,9 +44,13 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
   // (carried on the Bot) > default. Chunk is the default when nothing is set.
   const initialSttMode: SttMode = existingConfig?.sttMode ?? bot?.sttMode ?? 'chunk';
   const [sttMode, setSttMode] = useState<SttMode>(initialSttMode);
+  // Scripted flow (6.6): seed priority mirrors sttMode — config saved this
+  // session > backend-hydrated bot.flow > a minimal default starter.
+  const seedFlow: Flow = existingConfig?.flow ?? bot?.flow ?? defaultFlow();
+  const [flow, setFlow] = useState<Flow>(seedFlow);
 
   const handleSave = () => {
-    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode });
+    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode, flow });
   };
 
   // Truthful status badge (Q-3): only claim "unsaved changes" when an editable
@@ -62,7 +67,8 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
     ragEnabled !== (seed?.ragEnabled ?? true) ||
     ragIndex !== (seed?.ragIndex || 'hdfc_regalia_benefits_v2') ||
     greeting !== (seed?.greeting || '') ||
-    sttMode !== initialSttMode;
+    sttMode !== initialSttMode ||
+    JSON.stringify(flow) !== JSON.stringify(seedFlow);
   const showDraft = isNew || isDirty;
 
   const [disclosureEnabled, setDisclosureEnabled] = useState(true);
@@ -261,6 +267,17 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
               <KV k="Hard rejection handling" v="Log + suppress 30 days" theme={theme} />
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Conversation flow — real editor (canvas + form), full width */}
+      <div className="mt-4 rounded-lg border overflow-hidden" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
+        <div className="p-4 border-b" style={{ borderColor: theme.ruleSubtle }}>
+          <div className="text-[14px] font-semibold" style={{ color: theme.ink }}>Conversation flow</div>
+          <div className="text-[12px]" style={{ color: theme.faint }}>Scripted state machine that scaffolds the LLM — nodes carry per-turn guidance, branches route on detected intent.</div>
+        </div>
+        <div className="p-4">
+          <FlowEditor value={flow} onChange={setFlow} theme={theme} />
         </div>
       </div>
 
