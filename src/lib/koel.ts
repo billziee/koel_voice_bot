@@ -3,6 +3,8 @@
 // Mirrors koel.voicebot.ws.protocol on the backend. The dashboard authenticates
 // over REST (JWT), starts a session, then drives a live call over the socket.
 
+import type { ModelConnection, ModelConnectionKind } from '../types';
+
 export const KOEL_API: string =
   (import.meta as any).env?.VITE_KOEL_API || 'http://localhost:8100';
 
@@ -260,6 +262,129 @@ export async function uploadKnowledgeFile(
       body: fd,
     }),
   );
+}
+
+// ---- Model connections (BYOK — Phase 4) -----------------------------------
+// Org-scoped provider credentials + endpoints. The api_key is write-only: the
+// backend never returns it, so responses only carry `api_key_set`. We map the
+// snake_case wire shape to the camelCase `ModelConnection` the UI consumes.
+
+interface BackendModelConnection {
+  id: string;
+  org_id: string;
+  name: string;
+  kind: ModelConnectionKind;
+  provider: string;
+  base_url: string | null;
+  model: string | null;
+  params: Record<string, unknown> | null;
+  api_key_set: boolean;
+  active: boolean;
+  created_at: string;
+}
+
+function mapConnection(b: BackendModelConnection): ModelConnection {
+  return {
+    id: b.id,
+    name: b.name,
+    kind: b.kind,
+    provider: b.provider,
+    baseUrl: b.base_url ?? '',
+    model: b.model ?? '',
+    params: b.params ?? {},
+    apiKeySet: b.api_key_set,
+    active: b.active,
+  };
+}
+
+// Create/patch input in camelCase. `apiKey` is write-only — omit it (or pass an
+// empty string, which is dropped below) to leave a stored key unchanged on edit.
+export interface ConnectionInput {
+  name: string;
+  kind: ModelConnectionKind;
+  provider: string;
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  params?: Record<string, unknown>;
+}
+
+export type ConnectionPatch = Partial<ConnectionInput>;
+
+// Only serialise fields that were actually provided, mapping camelCase→snake_case.
+// A blank/absent apiKey is never sent, so editing without retyping the key keeps
+// the existing one (blank = "leave unchanged").
+function connectionToBody(input: ConnectionPatch): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.name !== undefined) body.name = input.name;
+  if (input.kind !== undefined) body.kind = input.kind;
+  if (input.provider !== undefined) body.provider = input.provider;
+  if (input.baseUrl !== undefined) body.base_url = input.baseUrl;
+  if (input.model !== undefined) body.model = input.model;
+  if (input.params !== undefined) body.params = input.params;
+  if (input.apiKey) body.api_key = input.apiKey; // truthy only — never send a blank key
+  return body;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  detail: string;
+  latencyMs?: number;
+}
+
+export async function listConnections(
+  token: string,
+  kind?: ModelConnectionKind,
+): Promise<ModelConnection[]> {
+  const qs = kind ? `?kind=${encodeURIComponent(kind)}` : '';
+  const rows: BackendModelConnection[] = await jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/model-connections${qs}`, { headers: authHeaders(token) }),
+  );
+  return rows.map(mapConnection);
+}
+
+export async function createConnection(token: string, input: ConnectionInput): Promise<ModelConnection> {
+  const res = await fetch(`${KOEL_API}/v1/model-connections`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify(connectionToBody(input)),
+  });
+  return mapConnection(await jsonOrThrow(res));
+}
+
+export async function updateConnection(
+  token: string,
+  id: string,
+  patch: ConnectionPatch,
+): Promise<ModelConnection> {
+  const res = await fetch(`${KOEL_API}/v1/model-connections/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify(connectionToBody(patch)),
+  });
+  return mapConnection(await jsonOrThrow(res));
+}
+
+export async function deactivateConnection(token: string, id: string): Promise<ModelConnection> {
+  const res = await fetch(`${KOEL_API}/v1/model-connections/${encodeURIComponent(id)}/deactivate`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  return mapConnection(await jsonOrThrow(res));
+}
+
+export async function testConnection(token: string, id: string): Promise<ConnectionTestResult> {
+  const body = await jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/model-connections/${encodeURIComponent(id)}/test`, {
+      method: 'POST',
+      headers: authHeaders(token),
+    }),
+  );
+  return {
+    ok: Boolean(body.ok),
+    detail: String(body.detail ?? ''),
+    latencyMs: typeof body.latency_ms === 'number' ? body.latency_ms : undefined,
+  };
 }
 
 export async function startSession(

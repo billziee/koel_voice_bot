@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
-import type { BotConfig, SttMode, Flow } from '../types';
+import type { BotConfig, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
+import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
+import { useConnections } from '../hooks/useConnections';
 import { FlowEditor, defaultFlow, validateFlow } from '../components/FlowEditor';
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
@@ -16,7 +18,7 @@ const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
   { num: 5, title: 'Review & deploy', sub: 'Preflight checks' },
 ];
 
-export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotConfig) => void; onCancel: () => void; theme: Theme }) {
+export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy: (config: BotConfig) => void; onCancel: () => void; theme: Theme; token: string | null }) {
   const [step, setStep] = useState<BuilderStep>(1);
   const [botName, setBotName] = useState('');
   const [useCase, setUseCase] = useState('Credit Card Cross-Sell');
@@ -26,6 +28,10 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
   const [disclosure, setDisclosure] = useState(true);
   const [ambientEnabled, setAmbientEnabled] = useState(true);
   const [sttMode, setSttMode] = useState<SttMode>('chunk'); // Chunk = default
+  // Per-bot BYOK model selection (Phase 4). Available list fetched via the token;
+  // degrades to Default-only when the backend is offline or the fetch fails.
+  const availableConnections = useConnections(token);
+  const [connectionSel, setConnectionSel] = useState<ConnectionSelection>({});
   const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
   // Real scripted flow (6.6): seeded with a minimal single-node starter, edited
   // in place, and shipped in config.flow on deploy.
@@ -71,6 +77,13 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
     { label: 'Call-hours window not yet set (RBI)', ok: false },
   ];
 
+  // Resolve a selected connection id to its display name for the review panel;
+  // an unset id reads as the built-in default.
+  const connName = (id?: string): string => {
+    if (!id) return 'Default';
+    return availableConnections.find((c) => c.id === id)?.name ?? id;
+  };
+
   const handleDeploy = () => {
     onDeploy({
       name: botName || 'KOEL — New Bot',
@@ -87,6 +100,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
       tone: 'cheerful',
       sttMode,
       flow,
+      connections: connectionSel,
     });
   };
 
@@ -216,6 +230,11 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                   </button>
                 </div>
                 <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
+                <div>
+                  <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Model connections</label>
+                  <ModelConnectionSelectors connections={availableConnections} value={connectionSel} onChange={setConnectionSel} theme={theme} />
+                  <p className="text-[11px] mt-1.5" style={{ color: theme.faint }}>Pick a BYOK provider per stage, or leave on Default (built-in). Add providers under Model Connections.</p>
+                </div>
               </div>
             )}
 
@@ -283,6 +302,9 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                   <KV k="Greeting" v="Personalised template" theme={theme} />
                   <KV k="Disclosure block" v={disclosure ? 'Enabled' : 'Disabled'} theme={theme} />
                   <KV k="STT mode" v={sttMode === 'ws' ? 'WebSocket streaming' : 'Chunk (batch)'} theme={theme} />
+                  <KV k="LLM model" v={connName(connectionSel.llm)} theme={theme} />
+                  <KV k="TTS voice" v={connName(connectionSel.tts)} theme={theme} />
+                  <KV k="STT model" v={connName(connectionSel.stt)} theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Flow & knowledge" theme={theme}>
                   <KV k="Flow nodes" v={`${flowNodeCount}`} theme={theme} />

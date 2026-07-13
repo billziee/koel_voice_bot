@@ -3,7 +3,7 @@
 // Extracted from App.tsx (roadmap Q-1 decomposition) so view modules and hooks
 // can share one canonical set of types instead of reaching into the monolith.
 
-export type ViewState = 'dashboard' | 'call' | 'config' | 'history' | 'builder' | 'knowledge';
+export type ViewState = 'dashboard' | 'call' | 'config' | 'history' | 'builder' | 'knowledge' | 'connections';
 export type CallState =
   | 'idle' | 'connecting' | 'bot_speaking' | 'listening' | 'user_speaking'
   | 'processing' | 'reconnecting' | 'escalating' | 'ended';
@@ -42,6 +42,34 @@ export interface Flow {
   nodes: Record<string, FlowNode>;
 }
 
+// ── BYOK model connections (Phase 4) ─────────────────────────────────────────
+// An org-scoped credential + endpoint for an external model provider. One kind
+// per connection; a bot selects at most one connection per kind via
+// BotConfig.connections. The API key is write-only — the backend never returns
+// it, so the client only ever knows whether one is set (`apiKeySet`).
+export type ModelConnectionKind = 'llm' | 'tts' | 'stt';
+
+export interface ModelConnection {
+  id: string;
+  name: string;
+  kind: ModelConnectionKind;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  params: Record<string, unknown>; // e.g. { temperature, max_tokens } | { voice } | { language }
+  apiKeySet: boolean; // true when the backend holds a key (key itself never returned)
+  active: boolean;
+}
+
+// Per-bot model selection — connection ids by kind. Rides the same config blob
+// as `stt_mode`/`flow` under `config.connections`. An absent id means the bot
+// uses the built-in default model for that kind.
+export interface ConnectionSelection {
+  llm?: string;
+  tts?: string;
+  stt?: string;
+}
+
 export interface Bot {
   id: string;
   name: string;
@@ -59,6 +87,7 @@ export interface Bot {
   backendCustomerId?: string; // seed CRM customer to dial for this bot
   sttMode?: SttMode; // hydrated from backend `config.stt_mode` so the config form can seed it
   flow?: Flow; // hydrated from backend `config.flow` so the flow editor can seed it (6.6)
+  connections?: ConnectionSelection; // hydrated from backend `config.connections` so the selectors can seed it
 }
 
 // Item 5 — per-bot configuration that persists across views
@@ -77,6 +106,7 @@ export interface BotConfig {
   tone: Tone;
   sttMode: SttMode; // Item — operator-selected STT pipeline; round-trips to backend config.stt_mode
   flow?: Flow; // 6.6 — scripted conversation flow; round-trips to backend config.flow
+  connections?: ConnectionSelection; // Phase 4 — per-bot BYOK model selection; round-trips to backend config.connections
 }
 
 export interface CRMField { label: string; value: string; highlight?: 'green' | 'orange' }

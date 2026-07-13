@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { Lock } from 'lucide-react';
 
-import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode, Flow } from '../types';
+import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
+import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
+import { useConnections } from '../hooks/useConnections';
 import { FlowEditor, defaultFlow } from '../components/FlowEditor';
 
 // Default config seed per use case (ConfigView-only).
@@ -22,9 +24,14 @@ interface ConfigViewProps {
   onSave: (config: BotConfig) => void;
   onCancel: () => void;
   theme: Theme;
+  token: string | null;
 }
 
-export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme }: ConfigViewProps) {
+// Normalise a selection so comparisons ignore key ordering / undefined kinds.
+const connKey = (sel: ConnectionSelection): string =>
+  JSON.stringify({ llm: sel.llm ?? null, tts: sel.tts ?? null, stt: sel.stt ?? null });
+
+export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme, token }: ConfigViewProps) {
   // Seed from existing config > bot defaults > empty
   const seed = existingConfig || (bot ? DEFAULT_CONFIGS[bot.useCase] : undefined);
 
@@ -48,9 +55,15 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
   // session > backend-hydrated bot.flow > a minimal default starter.
   const seedFlow: Flow = existingConfig?.flow ?? bot?.flow ?? defaultFlow();
   const [flow, setFlow] = useState<Flow>(seedFlow);
+  // Per-bot BYOK model selection (Phase 4). Seed priority mirrors sttMode/flow:
+  // config saved this session > backend-hydrated bot.connections > none. The
+  // available list is fetched via the token; it degrades to Default-only on failure.
+  const availableConnections = useConnections(token);
+  const seedConnections: ConnectionSelection = existingConfig?.connections ?? bot?.connections ?? {};
+  const [connectionSel, setConnectionSel] = useState<ConnectionSelection>(seedConnections);
 
   const handleSave = () => {
-    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode, flow });
+    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode, flow, connections: connectionSel });
   };
 
   // Truthful status badge (Q-3): only claim "unsaved changes" when an editable
@@ -68,7 +81,8 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
     ragIndex !== (seed?.ragIndex || 'hdfc_regalia_benefits_v2') ||
     greeting !== (seed?.greeting || '') ||
     sttMode !== initialSttMode ||
-    JSON.stringify(flow) !== JSON.stringify(seedFlow);
+    JSON.stringify(flow) !== JSON.stringify(seedFlow) ||
+    connKey(connectionSel) !== connKey(seedConnections);
   const showDraft = isNew || isDirty;
 
   const [disclosureEnabled, setDisclosureEnabled] = useState(true);
@@ -148,6 +162,11 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
                 <p className="text-[11px] mt-1" style={{ color: theme.faint }}>Variables in braces resolve from CRM at session start.</p>
               </div>
               <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
+              <div>
+                <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Model connections</label>
+                <ModelConnectionSelectors connections={availableConnections} value={connectionSel} onChange={setConnectionSel} theme={theme} />
+                <p className="text-[11px] mt-1.5" style={{ color: theme.faint }}>Choose a BYOK provider per stage, or leave on Default (built-in). Manage providers under Model Connections.</p>
+              </div>
             </div>
           </div>
 
