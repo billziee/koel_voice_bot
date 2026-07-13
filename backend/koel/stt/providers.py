@@ -509,6 +509,225 @@ class SarvamSttProvider(SttProvider):
         await self._client.aclose()
 
 
+# Deepgram realtime STT (nova-3) — protocol verified live (2026-07): raw linear16
+# PCM is streamed as binary WS frames to `/v1/listen`; with `interim_results=true`
+# Deepgram emits `is_final:false` partials as audio streams in, then an
+# `is_final:true` final; `{"type":"CloseStream"}` flushes and a trailing
+# `{"type":"Metadata"}` marks end-of-stream.
+_DEEPGRAM_WS_PATH = "/v1/listen"
+# ~250 ms of 16 kHz 16-bit mono PCM per binary frame — small enough that Deepgram
+# streams interim partials as audio arrives, large enough to avoid frame churn.
+_DEEPGRAM_CHUNK_BYTES = 8000
+
+
+class DeepgramSttProvider(SttProvider):
+    """Live *streaming* STT via Deepgram (nova-3, ``/v1/listen`` WS) — the O-6
+    true-partials path.
+
+    Deepgram's edge here is genuine incremental partials: with
+    ``interim_results=true`` it emits ``is_final=false`` transcripts while audio
+    streams in, then an ``is_final=true`` final on flush (verified live 2026-07).
+
+    - :meth:`transcribe` (batch) delegates straight to ``fallback``. Deepgram's
+      prerecorded REST adds nothing over the base batch provider already wired
+      (Sarvam / Whisper / stub), so the ``/v1/transcribe`` chunk-mode path is
+      byte-for-byte unchanged when this provider is in front.
+    - :meth:`stream_transcribe` opens the Deepgram WS, streams the utterance's raw
+      linear16 PCM (extracted from the WAV via the stdlib :mod:`wave` module) as
+      binary frames, sends ``{"type":"CloseStream"}``, and yields a non-final
+      ``TranscriptResult`` per interim + a final one for the ``is_final`` result.
+
+    Degrade chain: any WS error / non-WAV / empty audio → :meth:`transcribe`
+    (== ``fallback.transcribe``), which itself cascades through its own fallback to
+    the deterministic stub — a live turn is never dropped and never raises.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "nova-3",
+        base_url: str = "https://api.deepgram.com",
+        fallback: SttProvider,
+        timeout_s: float = 20.0,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._fallback = fallback
+        self._timeout_s = timeout_s
+        self._warned = False
+        self._ws_warned = False
+        # https:// → wss:// on the same host; encoding/sample_rate/channels are
+        # appended per-utterance from the decoded WAV in _build_ws_url.
+        self._ws_base = (
+            base_url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+        )
+
+    async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
+        # Batch path delegates to the wrapped provider: Deepgram's value is
+        # streaming partials, and the fallback already transcribes buffered audio.
+        # Keeping this a pure delegate is what makes /v1/transcribe unchanged.
+        return await self._fallback.transcribe(request)
+
+    async def stream_transcribe(
+        self, request: TranscribeRequest
+    ) -> AsyncIterator[TranscriptResult]:
+        """Stream Deepgram interims + a final over ``/v1/listen``; on any error
+        (or non-WAV / empty / type-to-talk audio) degrade to the batch path.
+
+        Degradation reuses the base default (:meth:`transcribe`, which here is
+        ``fallback.transcribe`` → its own fallback → stub), so a live turn is never
+        dropped and the streaming path never raises.
+        """
+        try:
+            raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
+        except (ValueError, binascii.Error):
+            raw = b""
+
+        # Type-to-talk sentinel or empty audio → skip the WS entirely.
+        if raw and not raw.startswith(_TEXT_SENTINEL):
+            produced_final = False
+            try:
+                async for result in self._stream_ws(request, raw):
+                    produced_final = produced_final or result.is_final
+                    yield result
+            except Exception:  # noqa: BLE001 — never raise on the live path; degrade
+                if not self._ws_warned:
+                    self._ws_warned = True
+                    logger.warning(
+                        "deepgram_stt_ws_failed; degrading to fallback batch",
+                        extra={"extra_fields": {"session_id": request.session_id}},
+                        exc_info=True,
+                    )
+            else:
+                if produced_final:
+                    return
+                # WS closed without a final transcript → fall through to the batch
+                # path for an authoritative result (interims already delivered).
+                logger.warning(
+                    "deepgram_stt_ws_no_final; degrading to fallback batch",
+                    extra={"extra_fields": {"session_id": request.session_id}},
+                )
+
+        # Batch path (base default): one final from transcribe() == fallback → stub.
+        async for result in SttProvider.stream_transcribe(self, request):
+            yield result
+
+    async def _stream_ws(
+        self, request: TranscribeRequest, raw: bytes
+    ) -> AsyncIterator[TranscriptResult]:
+        """Transcribe over Deepgram's realtime ``/v1/listen`` (protocol verified live,
+        2026-07): stream the utterance's raw linear16 PCM as binary WS frames, send
+        ``{"type":"CloseStream"}`` to flush, and read ``{"type":"Results",...}``
+        frames — ``is_final:false`` are interim partials, ``is_final:true`` is the
+        final, and a trailing ``{"type":"Metadata"}`` ends the stream.
+
+        Errors before any transcript raise (so the caller degrades to batch); once
+        results have been delivered we only ever ``return`` — never re-raise — so the
+        caller doesn't double-yield a fallback final on top of a real one.
+        """
+        from websockets.asyncio.client import connect as ws_connect
+        from websockets.exceptions import ConnectionClosed
+
+        pcm, sample_rate, channels = self._extract_pcm(raw)
+        async with ws_connect(
+            self._build_ws_url(sample_rate, channels),
+            additional_headers={"Authorization": f"Token {self._api_key}"},
+            open_timeout=self._timeout_s,
+            close_timeout=2.0,
+        ) as ws:
+            for i in range(0, len(pcm), _DEEPGRAM_CHUNK_BYTES):
+                await ws.send(pcm[i : i + _DEEPGRAM_CHUNK_BYTES])
+            # Flush: tell Deepgram no more audio — it finalizes and sends Metadata.
+            await ws.send(json.dumps({"type": "CloseStream"}))
+            yielded = False
+            while True:
+                try:
+                    frame = await asyncio.wait_for(ws.recv(), timeout=self._timeout_s)
+                except ConnectionClosed:
+                    return  # socket closed after flush → stop cleanly (no raise)
+                msg = json.loads(frame)
+                mtype = msg.get("type")
+                if mtype == "Results":
+                    alts = (msg.get("channel") or {}).get("alternatives") or []
+                    text = (alts[0].get("transcript") if alts else "") or ""
+                    if not text.strip():
+                        continue  # empty interim (silence) → don't emit a frame
+                    yielded = True
+                    yield self._result_from_ws(request, msg, is_final=bool(msg.get("is_final")))
+                elif mtype == "Metadata":
+                    return  # end-of-stream marker after CloseStream
+                elif mtype in ("Error", "error"):
+                    # Pre-transcript error → raise so we degrade; post-transcript →
+                    # stop (results already delivered; don't trigger a double final).
+                    if not yielded:
+                        raise ValueError(f"deepgram stt ws error: {msg}")
+                    return
+
+    @staticmethod
+    def _extract_pcm(raw: bytes) -> tuple[bytes, int, int]:
+        """Extract raw linear16 PCM + sample rate + channel count from a WAV.
+
+        Deepgram's realtime endpoint ingests raw ``linear16`` (not a WAV container),
+        so we strip the RIFF header via the stdlib :mod:`wave` module and forward the
+        true sample rate / channel count in the URL. Non-WAV or non-16-bit audio
+        raises so the caller degrades to the batch fallback.
+        """
+        import io
+        import wave
+
+        if raw[:4] != b"RIFF":
+            raise ValueError("deepgram ws stt requires wav audio")
+        try:
+            with wave.open(io.BytesIO(raw), "rb") as wf:
+                if wf.getsampwidth() != 2:
+                    raise ValueError("deepgram ws stt requires 16-bit pcm wav")
+                return wf.readframes(wf.getnframes()), wf.getframerate(), wf.getnchannels()
+        except wave.Error as exc:
+            raise ValueError(f"deepgram ws stt wav parse failed: {exc}") from exc
+
+    def _build_ws_url(self, sample_rate: int, channels: int) -> str:
+        return (
+            f"{self._ws_base}{_DEEPGRAM_WS_PATH}"
+            f"?model={self._model}&encoding=linear16&sample_rate={sample_rate}"
+            f"&channels={channels}&interim_results=true&punctuate=true"
+        )
+
+    def _result_from_ws(
+        self, request: TranscribeRequest, msg: dict, *, is_final: bool
+    ) -> TranscriptResult:
+        alts = (msg.get("channel") or {}).get("alternatives") or []
+        alt = alts[0] if alts else {}
+        text = (alt.get("transcript") or "").strip()
+        confidence = alt.get("confidence")
+        conf = float(confidence) if confidence is not None else 0.9
+        duration = msg.get("duration")
+        duration_ms = int(float(duration) * 1000) if duration else 0
+        # nova-3's base response carries no language id, so carry the hint through
+        # (English-centric model → default en). The authoritative language id +
+        # escalation confidence still come from the batch fallback, not partials.
+        lang = request.language_hint or Language.en
+        return TranscriptResult(
+            session_id=request.session_id,
+            text=text,
+            is_final=is_final,
+            language_id=lang,
+            language_confidence=conf,
+            speech_duration_ms=duration_ms or max(120, len(text) * 60),
+            word_confidence=conf,  # Deepgram alternative confidence (per-utterance)
+        )
+
+    async def warm(self) -> None:
+        # No own client; warm the wrapped batch provider (the /v1/transcribe path).
+        await self._fallback.warm()
+
+    async def aclose(self) -> None:
+        # Own no client — but close the wrapped provider's (Sarvam/Groq httpx).
+        aclose = getattr(self._fallback, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 class WhisperSageMakerProvider(SttProvider):
     """Real provider — invokes a SageMaker Whisper endpoint. Not wired in MVP boilerplate."""
 

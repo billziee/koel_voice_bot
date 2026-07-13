@@ -12,7 +12,13 @@ from koel.common.auth import ServicePrincipal
 from koel.common.logging import get_logger
 from koel.common.telemetry import span
 from koel.stt.config import get_stt_settings
-from koel.stt.providers import GroqWhisperProvider, SarvamSttProvider, SttProvider, StubWhisperProvider
+from koel.stt.providers import (
+    DeepgramSttProvider,
+    GroqWhisperProvider,
+    SarvamSttProvider,
+    SttProvider,
+    StubWhisperProvider,
+)
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
 
 logger = get_logger("koel.stt")
@@ -38,6 +44,20 @@ def _build_provider() -> SttProvider:
             timeout_s=settings.sarvam_timeout_s,
             fallback=provider,
             stream_stt=settings.stream_stt,
+        )
+    # Deepgram is the STREAMING provider only when explicitly selected AND keyed
+    # (both default off → nothing changes for existing deployments). It WRAPS the
+    # provider built above as its batch fallback: DeepgramSttProvider.transcribe()
+    # delegates straight to that fallback, so the batch /v1/transcribe path and
+    # chunk-mode bots are byte-for-byte unaffected — only stream_transcribe()
+    # upgrades to Deepgram's genuine interim partials (O-6). When Deepgram is not
+    # selected, the Sarvam WS seam (armed in _enable_streaming_seam) is used as before.
+    if settings.stream_stt_provider.lower() == "deepgram" and settings.deepgram_enabled:
+        provider = DeepgramSttProvider(
+            api_key=settings.deepgram_api_key,  # type: ignore[arg-type]  # deepgram_enabled guards None
+            model=settings.deepgram_model,
+            base_url=settings.deepgram_base_url,
+            fallback=provider,
         )
     return provider
 
@@ -72,6 +92,10 @@ def _enable_streaming_seam(provider: SttProvider) -> None:
     ``transcribe()``, which never reads this flag, so ``chunk``-mode bots are
     completely unaffected. Providers without the seam (stub/Whisper) keep the
     batch-wrapping default and ignore this.
+
+    ``DeepgramSttProvider`` (selected via ``stream_stt_provider="deepgram"``) has no
+    dormant flag — its ``stream_transcribe`` is always armed — so it is not a
+    ``SarvamSttProvider`` and this is a no-op for it.
     """
     if isinstance(provider, SarvamSttProvider):
         provider._stream_stt = True  # noqa: SLF001 — endpoint-scoped seam activation
