@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — Deploy v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;gap:16px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;white-space:nowrap;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 11px;border-radius:7px;transition:.15s;white-space:nowrap;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;} nav{height:auto;padding:8px 18px;flex-direction:column;align-items:flex-start;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs · v3</small></span>
+  <span class="nav-links"><a href="HLD_V3.html">HLD</a><a href="LLD_V3.html">LLD</a><a href="PRD_V3.html">PRD</a><a href="SECURITY_V3.html">Security</a><a href="SLO_V3.html">SLO</a><a href="DEPLOY_V3.html" class="active">Deploy</a><a href="RESIDENCY_V3.html">Residency</a><a href="TELEPHONY_V3.html">Telephony</a><a href="PRODUCTION_MASTERPLAN_V3.html">Masterplan</a></span>
+</nav>
+<main><p class="doc-meta">Deploy · KOEL Voice Bot · v3</p><div id="content"><h1 id="koel-deploy-render-v3">KOEL — Deploy (Render) v3</h1>
+<blockquote>
+<p>Supersedes <a href="./DEPLOY.md">DEPLOY.md</a>. Base topology unchanged; v3 reconciles the
+deploy config and adds the optional streaming/scale dependencies.</p>
+</blockquote>
+<h2 id="deploy-evolution-v1-v2-v3">Deploy evolution (v1 → v2 → v3)</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Runtime</td>
+<td>Docker Compose (dev)</td>
+<td>Render, <code>koel.combined:app</code> from <code>main</code>, self-migrating</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td>Config parity</td>
+<td>—</td>
+<td>render.yaml drift (env-prefix no-ops)</td>
+<td><strong>Q-6: render.yaml ↔ Dockerfile reconciled</strong> (correct <code>KOEL_</code> prefixes, fetch-script)</td>
+</tr>
+<tr>
+<td>Keep-alive</td>
+<td>—</td>
+<td>in-app self-ping + GH Actions cron</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td>Redis</td>
+<td>—</td>
+<td>—</td>
+<td><strong>optional (<code>KOEL_RATE_LIMIT_BACKEND=redis</code> + <code>rediss://</code> URL) for multi-worker (O-8)</strong></td>
+</tr>
+<tr>
+<td>Deepgram STT</td>
+<td>—</td>
+<td>—</td>
+<td><strong>optional streaming STT creds + per-bot <code>stream_stt</code>/mode (O-6)</strong></td>
+</tr>
+<tr>
+<td>Local embedder</td>
+<td>—</td>
+<td>—</td>
+<td><strong>optional <code>koel[local-embed]</code> + <code>KOEL_NLP_EMBEDDER=fastembed</code> (O-4)</strong></td>
+</tr>
+<tr>
+<td>BYOK</td>
+<td>—</td>
+<td>—</td>
+<td><strong>model-connection config (encrypted secrets)</strong></td>
+</tr>
+<tr>
+<td>Model prefetch</td>
+<td>smart-turn ONNX fetch script</td>
+<td>same</td>
+<td>+ FastEmbed model prefetch note</td>
+</tr>
+</tbody>
+</table>
+<h2 id="v3-env-additions-all-default-off-inert">v3 env additions (all default-off / inert)</h2>
+<p><code>stream_nlp</code>, <code>stream_stt</code> + Deepgram creds, <code>nlp_embedder=fastembed</code> +
+<code>fastembed_model</code>, <code>rate_limit_backend=redis</code> + <code>redis_url</code>, <code>session_budget_usd</code>,
+<code>pgvector_hnsw_ef_search</code>, <code>db_pool_use_lifo</code>/<code>db_pool_*</code>, <code>tts_cache_ttl_s</code>, BYOK
+connection settings. Enabling any is additive; the v2 free-tier deploy is unchanged
+if none are set. Production hardening: <a href="./SECURITY_V3.md">SECURITY_V3.md</a>; load
+sizing: <a href="./LOADTEST.md">LOADTEST.md</a>.</p></div></main>
+<footer>Generated from <code>docs/DEPLOY_V3.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>

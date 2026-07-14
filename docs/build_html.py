@@ -1,9 +1,9 @@
-"""Render the design-doc markdown into styled, standalone HTML.
+"""Render the KOEL design/product docs (v3 set) into styled, standalone HTML.
 
-Reads HLD.md / LLD.md and emits HLD.html / LLD.html, matching the KOEL PRD
-aesthetic. Prose/tables/code are rendered to static HTML at build time (so the
-docs are fully readable offline); only the mermaid diagrams render in-browser
-via mermaid.js (CDN) — and degrade to readable source if offline.
+Reads the *_V3.md docs and emits matching *.html, in the KOEL PRD aesthetic.
+Prose/tables/code render to static HTML at build time (fully readable offline);
+only mermaid diagrams render in-browser via mermaid.js (CDN), degrading to
+readable source if offline. The top nav is generated from PAGES.
 
 Run:  python docs/build_html.py   (needs the `markdown` package; in backend/.venv)
 """
@@ -17,9 +17,19 @@ import re
 import markdown as _md
 
 DOCS = pathlib.Path(__file__).parent
+
+# (source md, output html, <title>, short nav label). Order = nav order.
 PAGES = [
-    ("HLD.md", "HLD.html", "KOEL — High-Level Design", "HLD"),
-    ("LLD.md", "LLD.html", "KOEL — Low-Level Design", "LLD"),
+    ("HLD_V3.md", "HLD_V3.html", "KOEL — High-Level Design v3", "HLD"),
+    ("LLD_V3.md", "LLD_V3.html", "KOEL — Low-Level Design v3", "LLD"),
+    ("PRD_V3.md", "PRD_V3.html", "KOEL — Product Requirements v3", "PRD"),
+    ("SECURITY_V3.md", "SECURITY_V3.html", "KOEL — Security Posture v3", "Security"),
+    ("SLO_V3.md", "SLO_V3.html", "KOEL — SLOs v3", "SLO"),
+    ("DEPLOY_V3.md", "DEPLOY_V3.html", "KOEL — Deploy v3", "Deploy"),
+    ("RESIDENCY_V3.md", "RESIDENCY_V3.html", "KOEL — Data Residency v3", "Residency"),
+    ("TELEPHONY_V3.md", "TELEPHONY_V3.html", "KOEL — Telephony v3", "Telephony"),
+    ("PRODUCTION_MASTERPLAN_V3.md", "PRODUCTION_MASTERPLAN_V3.html",
+     "KOEL — Production Masterplan v3", "Masterplan"),
 ]
 
 TEMPLATE = """<!DOCTYPE html>
@@ -42,11 +52,11 @@ TEMPLATE = """<!DOCTYPE html>
   html{{scroll-behavior:smooth;}}
   body{{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}}
   nav{{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
-       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;}}
-  .nav-logo{{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;}}
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;gap:16px;}}
+  .nav-logo{{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;white-space:nowrap;}}
   .nav-logo small{{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}}
-  .nav-links{{display:flex;gap:8px;}}
-  .nav-links a{{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 12px;border-radius:7px;transition:.15s;}}
+  .nav-links{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}}
+  .nav-links a{{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 11px;border-radius:7px;transition:.15s;white-space:nowrap;}}
   .nav-links a:hover{{color:var(--primary);background:var(--primary-subtle);}}
   .nav-links a.active{{color:var(--primary);background:var(--primary-light);}}
   main{{max-width:880px;margin:0 auto;padding:56px 32px 120px;}}
@@ -72,22 +82,18 @@ TEMPLATE = """<!DOCTYPE html>
   .mermaid{{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}}
   .doc-meta{{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}}
   footer{{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}}
-  @media(max-width:640px){{main,nav,footer{{padding-left:18px;padding-right:18px;}} h1{{font-size:32px;}}}}
+  @media(max-width:640px){{main,nav,footer{{padding-left:18px;padding-right:18px;}} h1{{font-size:32px;}} nav{{height:auto;padding:8px 18px;flex-direction:column;align-items:flex-start;}}}}
 </style>
 </head>
 <body>
 <nav>
-  <span class="nav-logo">KOEL <small>Design Docs</small></span>
-  <span class="nav-links">
-    <a href="HLD.html"{hld_active}>HLD</a>
-    <a href="LLD.html"{lld_active}>LLD</a>
-  </span>
+  <span class="nav-logo">KOEL <small>Design Docs · v3</small></span>
+  <span class="nav-links">{nav_links}</span>
 </nav>
-<main><p class="doc-meta">{kind} · KOEL Voice Bot</p><div id="content">{content}</div></main>
+<main><p class="doc-meta">{label} · KOEL Voice Bot · v3</p><div id="content">{content}</div></main>
 <footer>Generated from <code>docs/{src}</code> · rebuild with <code>python docs/build_html.py</code></footer>
 
 <script type="module">
-  // Prose/tables are static HTML (offline-readable); only diagrams need JS.
   import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
   mermaid.initialize({{startOnLoad:false, theme:'neutral', securityLevel:'loose',
     themeVariables:{{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}}}});
@@ -97,7 +103,6 @@ TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
-
 
 _MERMAID_RE = re.compile(
     r'<pre>\s*<code[^>]*class="[^"]*language-mermaid[^"]*"[^>]*>(.*?)</code>\s*</pre>',
@@ -113,16 +118,23 @@ def _render_markdown(md: str) -> str:
     )
 
 
+def _nav_links(current_out: str) -> str:
+    parts = []
+    for _src, out, _title, label in PAGES:
+        active = ' class="active"' if out == current_out else ""
+        parts.append(f'<a href="{out}"{active}>{label}</a>')
+    return "".join(parts)
+
+
 def main() -> None:
-    for src, out, title, kind in PAGES:
+    for src, out, title, label in PAGES:
         md = (DOCS / src).read_text(encoding="utf-8")
         html = TEMPLATE.format(
             title=title,
-            kind=kind,
+            label=label,
             src=src,
             content=_render_markdown(md),
-            hld_active=' class="active"' if kind == "HLD" else "",
-            lld_active=' class="active"' if kind == "LLD" else "",
+            nav_links=_nav_links(out),
         )
         (DOCS / out).write_text(html, encoding="utf-8")
         print(f"wrote docs/{out} ({len(html):,} bytes)")

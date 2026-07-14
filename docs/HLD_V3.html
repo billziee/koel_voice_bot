@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — High-Level Design v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;gap:16px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;white-space:nowrap;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 11px;border-radius:7px;transition:.15s;white-space:nowrap;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;} nav{height:auto;padding:8px 18px;flex-direction:column;align-items:flex-start;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs · v3</small></span>
+  <span class="nav-links"><a href="HLD_V3.html" class="active">HLD</a><a href="LLD_V3.html">LLD</a><a href="PRD_V3.html">PRD</a><a href="SECURITY_V3.html">Security</a><a href="SLO_V3.html">SLO</a><a href="DEPLOY_V3.html">Deploy</a><a href="RESIDENCY_V3.html">Residency</a><a href="TELEPHONY_V3.html">Telephony</a><a href="PRODUCTION_MASTERPLAN_V3.html">Masterplan</a></span>
+</nav>
+<main><p class="doc-meta">HLD · KOEL Voice Bot · v3</p><div id="content"><h1 id="koel-voice-bot-high-level-design-v3">KOEL Voice Bot — High-Level Design v3</h1>
+<blockquote>
+<p>Supersedes <a href="./HLD_V2.md">HLD_V2.md</a> (which superseded <a href="./HLD.md">HLD.md</a>). v3
+is the current state after the latency/cost optimization pass (O-1…O-10), the
+code-quality/engineering pass (Q-1…Q-7), and the first wave of Part-C product
+features (telephony seams, human-in-the-loop, multi-tenant, BYOK model
+connections). Every table below carries a <strong>v1 / v2 / v3</strong> column so the
+evolution is legible end-to-end.</p>
+</blockquote>
+<h2 id="what-changed-since-v2-at-a-glance">What changed since v2 — at a glance</h2>
+<p>v2 made the AI pipeline fully real and deployed it live. v3 attacks the two
+things v2 flagged as open: <strong>true latency</strong> (the streaming + speculation +
+caching arc) and <strong>product/platform depth</strong> (multi-tenant, BYOK, telephony,
+human handoff). It also hardened the code surface: the 3.6k-line <code>App.tsx</code>
+monolith is decomposed + code-split, TypeScript is on full <code>strict</code>, the rate
+limiter is Redis-backed for multi-worker correctness, and the test count went
+264 → <strong>680</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>v1 (HLD.md)</th>
+<th>v2 (HLD_V2.md)</th>
+<th>v3 (now)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>STT</strong></td>
+<td>Stub (type-to-talk)</td>
+<td>Groq Whisper (pinned) + Sarvam <code>saaras</code> (batch)</td>
+<td><strong>+ Deepgram streaming</strong> (true interim partials) + <strong>per-bot STT mode</strong> <code>chunk</code>|<code>ws</code> + browser continuous-frame streaming ingest; Sarvam WS protocol verified/corrected (WAV single-shot); <strong>+ BYOK custom STT</strong></td>
+</tr>
+<tr>
+<td><strong>NLP</strong></td>
+<td>Real Groq (only real piece)</td>
+<td>Language-routed 8B/70B, JSON-mode, language-strict prompt</td>
+<td><strong>+ O-2 first-token streaming</strong> (<code>/v1/respond/stream</code>, sentence-by-sentence into TTS) behind <code>stream_nlp</code>; <strong>+ BYOK custom LLM</strong> connection</td>
+</tr>
+<tr>
+<td><strong>TTS</strong></td>
+<td>Stub (sized PCM)</td>
+<td>3 engines (Orpheus/Magpie/Sarvam), Sarvam WS default, routed</td>
+<td><strong>+ O-3 response cache</strong> (whole-clip + streaming, keyed text·voice·lang, TTL-bounded for PII); <strong>+ BYOK custom TTS</strong></td>
+</tr>
+<tr>
+<td><strong>RAG embeddings</strong></td>
+<td><code>HashEmbedder</code> stub</td>
+<td>NVIDIA <code>nv-embedqa-e5-v5</code> (1024-d)</td>
+<td><strong>+ O-4 local FastEmbed</strong> <code>bge-m3</code> (opt-in, no US hop); <strong>+ O-5 speculative retrieval</strong> on the endpointing hold</td>
+</tr>
+<tr>
+<td><strong>Turn latency</strong></td>
+<td>"sub-300ms is the product" (thesis)</td>
+<td>Renegotiated + measured; filler + sentence-streaming TTS</td>
+<td><strong>Token-bound path</strong>: O-1 warm-up + pre-synth greeting, O-2 NLP streaming, O-3 cache, O-4 local embedder, O-5 speculative RAG, O-6 streaming STT partials → first-audio no longer whole-turn-bound</td>
+</tr>
+<tr>
+<td><strong>Auth / tenancy</strong></td>
+<td>JWT REST+WS</td>
+<td>+<code>/refresh</code>; FE didn't persist (Q-2 gap)</td>
+<td><strong>Q-2 JWT persistence + silent refresh</strong>; <strong>6.4 real Users table + enforced per-login org scoping</strong> (multi-tenant registry)</td>
+</tr>
+<tr>
+<td><strong>Rate limiting</strong></td>
+<td>In-memory, single-worker</td>
+<td>Same</td>
+<td><strong>+ O-8 Redis backend</strong> (correct at &gt;1 worker), per-route namespace, fail-closed login</td>
+</tr>
+<tr>
+<td><strong>Cost controls</strong></td>
+<td>None</td>
+<td>None</td>
+<td><strong>+ O-9 per-call unit economics + per-session budget caps</strong></td>
+</tr>
+<tr>
+<td><strong>DB / retrieval</strong></td>
+<td>Default pool</td>
+<td>Default pool</td>
+<td><strong>+ O-10 pool checkout observability + pgvector <code>ef_search</code> knob + LIFO + load-test harness</strong></td>
+</tr>
+<tr>
+<td><strong>Frontend</strong></td>
+<td>Type-to-talk SPA</td>
+<td>Real mic + Silero VAD + barge-in; monolithic <code>App.tsx</code></td>
+<td><strong>Q-1 decomposed + React.lazy code-split + <code>useLiveCall</code> hook</strong>; continuous-frame streaming + live partial captions; <strong>connections manager + per-bot model selectors + conversation-flow editor</strong></td>
+</tr>
+<tr>
+<td><strong>Human-in-the-loop</strong></td>
+<td>—</td>
+<td>—</td>
+<td><strong>3.1 live agent handoff</strong> (EscalationHub), <strong>3.2 inbound bot</strong>, <strong>3.3 live supervisor monitor</strong></td>
+</tr>
+<tr>
+<td><strong>Telephony</strong></td>
+<td>Browser WS only</td>
+<td>Browser WS only</td>
+<td><strong>Streaming-session ingest seam</strong> (<code>telephony/ingest.py</code>) shared by the browser Deepgram path; Twilio/Exotel bridges are the next build on it</td>
+</tr>
+<tr>
+<td><strong>Model providers</strong></td>
+<td>Fixed (env)</td>
+<td>Fixed (env)</td>
+<td><strong>BYOK model connections</strong>: encrypted secrets (at rest) + SSRF guard + resolver; per-bot custom LLM/TTS/STT selection</td>
+</tr>
+<tr>
+<td><strong>TypeScript</strong></td>
+<td>loose</td>
+<td>loose</td>
+<td><strong>Q-4 full <code>strict</code></strong> (CI-gated)</td>
+</tr>
+<tr>
+<td><strong>CI</strong></td>
+<td>chromium-only, advisory</td>
+<td>chromium-only</td>
+<td><strong>Q-5 cross-browser gate</strong> (chromium/firefox/webkit), blocks merge</td>
+</tr>
+<tr>
+<td><strong>Tests</strong></td>
+<td>37</td>
+<td>264</td>
+<td><strong>680</strong></td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="./FUTURE_PROCEEDINGS.md">FUTURE_PROCEEDINGS.md</a> for what remains (O-7
+in-region inference, remaining Part-C themes), and <a href="./9%20june%20decisions.md">9 june decisions.md</a>
++ <a href="./O5-speculative-rag-design.md">O5-speculative-rag-design.md</a> for the v3 build log.</p>
+<hr />
+<h2 id="1-purpose-scope">1. Purpose &amp; scope</h2>
+<p>Unchanged from v1/v2: a multilingual (EN / HI / Hinglish) outbound voice-bot for
+Indian financial services — 5 FastAPI microservices (STT, NLP, TTS, CRM,
+VoiceBot orchestrator) behind a React SPA, run combined as <code>koel.combined:app</code>
+on the free tier. v3 adds a genuine multi-tenant/BYOK platform layer on top.</p>
+<h2 id="2-goals-non-functional-requirements">2. Goals &amp; non-functional requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>v1 target</th>
+<th>v2 measured/renegotiated</th>
+<th>v3 direction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>First-audio p50</td>
+<td>&lt;300ms (turn)</td>
+<td>~1.0s (perceived &lt;300ms via filler)</td>
+<td>Token-bound; O-2+O-6 shrink the true floor toward ~0.5–0.7s (US inference)</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>design-only</td>
+<td>0% err @ 10 concurrent (measured)</td>
+<td>O-8 (Redis limiter) + O-10 (pool) make &gt;1 worker correct + observable</td>
+</tr>
+<tr>
+<td>Cost visibility</td>
+<td>none</td>
+<td>none</td>
+<td>O-9 per-call estimate + hard per-session ceiling</td>
+</tr>
+<tr>
+<td>Multi-tenant</td>
+<td>seam</td>
+<td>seam</td>
+<td>Enforced org scoping at login + per-row (6.4)</td>
+</tr>
+<tr>
+<td>Never-drop-a-turn</td>
+<td>design</td>
+<td>tested (264)</td>
+<td>Preserved through every streaming/speculative path (680 tests)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-system-context">3. System context</h2>
+<p>The five services and the SPA are unchanged in shape. New <strong>external
+dependencies</strong> in v3: <strong>Deepgram</strong> (streaming STT WebSocket), <strong>Redis</strong> (rate
+limiter / warm-connection pool at &gt;1 worker), optional <strong>FastEmbed/ONNX</strong> (local
+embeddings), and <strong>per-tenant BYOK provider endpoints</strong> (validated through an
+SSRF guard before use).</p>
+<h2 id="4-component-responsibilities-v3-deltas">4. Component responsibilities (v3 deltas)</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>v2</th>
+<th>v3 additions</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VoiceBot orchestrator</td>
+<td>turn loop, resilience, filler/barge-in</td>
+<td>O-2 streaming turn (<code>_stream_bot_turn</code>), O-5 speculative-RAG hold, O-9 cost/budget guard, EscalationHub + LiveMonitor wiring</td>
+</tr>
+<tr>
+<td>WS handler</td>
+<td>buffered per-utterance STT</td>
+<td>+ browser streaming ingest (<code>ws/streaming_stt.py</code>, factory-injected, degrade-to-buffered), serialized streaming finals</td>
+</tr>
+<tr>
+<td>STT svc</td>
+<td>Groq/Sarvam batch</td>
+<td>+ Deepgram streaming provider, per-bot <code>chunk</code>|<code>ws</code> mode</td>
+</tr>
+<tr>
+<td>NLP svc</td>
+<td>batch <code>/v1/respond</code></td>
+<td>+ NDJSON <code>/v1/respond/stream</code></td>
+</tr>
+<tr>
+<td>Platform (new)</td>
+<td>—</td>
+<td>Model-connection registry (BYOK), Users/org registry, connections CRUD API</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-technology-stack-v1-v2-v3">5. Technology stack (v1 → v2 → v3)</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>STT</td>
+<td>stub</td>
+<td>Groq Whisper, Sarvam</td>
+<td>+ Deepgram (streaming)</td>
+</tr>
+<tr>
+<td>NLP</td>
+<td>Groq</td>
+<td>Groq 8B/70B</td>
+<td>+ streaming; BYOK LLM</td>
+</tr>
+<tr>
+<td>TTS</td>
+<td>stub</td>
+<td>Orpheus/Magpie/Sarvam(WS)</td>
+<td>+ response cache; BYOK TTS</td>
+</tr>
+<tr>
+<td>Embeddings</td>
+<td>hash</td>
+<td>NVIDIA</td>
+<td>+ FastEmbed local</td>
+</tr>
+<tr>
+<td>Rate limit</td>
+<td>in-mem</td>
+<td>in-mem</td>
+<td>+ Redis</td>
+</tr>
+<tr>
+<td>Secrets</td>
+<td>env</td>
+<td>env</td>
+<td>+ encrypted BYOK store + SSRF guard</td>
+</tr>
+<tr>
+<td>FE</td>
+<td>monolith SPA</td>
+<td>monolith + mic/VAD</td>
+<td>decomposed + code-split + streaming captions</td>
+</tr>
+</tbody>
+</table>
+<h2 id="6-key-data-flows">6. Key data flows</h2>
+<h3 id="61-outbound-turn-v3-streaming-happy-path">6.1 Outbound turn — v3 streaming happy path</h3>
+<p>Mic frames → (per-bot mode) <strong>Deepgram streaming session</strong> → interim
+<code>partial_transcript</code> captions + an utterance <code>final</code> → the <strong>same</strong>
+<code>handle_final_transcript</code> the buffered path uses (control-flow, barge-in,
+cost/budget unchanged) → <strong>O-2</strong>: NLP streams reply sentences → each fed to
+sentence-streaming TTS as it lands (<strong>O-3</strong> cache short-circuits repeats) →
+audio streamed back. <strong>O-5</strong> speculative RAG may have pre-fetched on the
+endpointing hold. Falls back to the v2 buffered/batch path on any streaming
+failure — a turn is never dropped.</p>
+<h3 id="62-resiliencedegradation-v3">6.2 Resilience/degradation (v3)</h3>
+<p>Every new fast path degrades: streaming STT → buffered transcribe; NLP stream →
+batch <code>respond()</code>; TTS cache miss → synth; Redis limiter → fail-open (except
+login, fail-closed); local embedder load failure → hash; BYOK resolve failure →
+env default.</p>
+<h2 id="7-cross-cutting-concerns">7. Cross-cutting concerns</h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PII egress</td>
+<td>redact before TTS/logs</td>
+<td>same</td>
+<td>+ TTS-cache TTL bounds derived-audio PII retention</td>
+</tr>
+<tr>
+<td>Secrets</td>
+<td>env only</td>
+<td>env only</td>
+<td>BYOK secrets encrypted at rest; SSRF guard on custom endpoints</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>single worker</td>
+<td>single worker</td>
+<td>Redis limiter + serialized streaming finals + pool observability</td>
+</tr>
+<tr>
+<td>Tenancy</td>
+<td>soft</td>
+<td>soft (org_id seam)</td>
+<td>enforced org scoping at login + per-row</td>
+</tr>
+</tbody>
+</table>
+<h2 id="8-deployment-view">8. Deployment view</h2>
+<p>Unchanged base (Render, <code>koel.combined:app</code> from <code>main</code>, self-migrating Alembic,
+keep-alive). v3: <strong>Q-6</strong> reconciled <code>render.yaml</code> ↔ <code>Dockerfile</code> (env-prefix + fetch-script
+fixes); optional Redis + Deepgram + BYOK config are additive and default-off.</p>
+<h2 id="9-compliance-security-posture">9. Compliance &amp; security posture</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DPDP data-minimisation</td>
+<td>design</td>
+<td>redaction</td>
+<td>+ bounded TTS-cache retention; per-tenant isolation</td>
+</tr>
+<tr>
+<td>TRAI opt-out / DND</td>
+<td>design</td>
+<td>enforced in turn loop</td>
+<td>preserved across streaming path (reconcile-or-escalate on lost final)</td>
+</tr>
+<tr>
+<td>Audit trail</td>
+<td>design</td>
+<td>per-turn</td>
+<td>partial-turn recorded even on cancellation</td>
+</tr>
+<tr>
+<td>SSRF</td>
+<td>n/a</td>
+<td>n/a</td>
+<td>guard on all BYOK provider URLs</td>
+</tr>
+</tbody>
+</table>
+<h2 id="10-scalability-resilience">10. Scalability &amp; resilience</h2>
+<p>v3 makes &gt;1 worker correct (Redis limiter O-8), observable (pool metrics O-10),
+and cost-bounded (O-9). Streaming paths add independent failure domains, all
+degrading to the proven buffered path.</p>
+<h2 id="11-current-state-real-vs-stub-v1-v2-v3">11. Current state — real vs. stub (v1 → v2 → v3)</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NLP</td>
+<td>real Groq</td>
+<td>+ language-routed</td>
+<td><strong>+ streaming + BYOK LLM</strong></td>
+</tr>
+<tr>
+<td>RAG</td>
+<td>pgvector + hash stub</td>
+<td>+ NVIDIA embedder</td>
+<td><strong>+ local FastEmbed + speculative</strong></td>
+</tr>
+<tr>
+<td>STT</td>
+<td>stub</td>
+<td>Groq+Sarvam batch</td>
+<td><strong>+ Deepgram streaming + per-bot mode</strong></td>
+</tr>
+<tr>
+<td>TTS</td>
+<td>stub</td>
+<td>3 engines + WS</td>
+<td><strong>+ cache + BYOK TTS</strong></td>
+</tr>
+<tr>
+<td>Endpointing</td>
+<td>fixed timer</td>
+<td>+ smart-turn v3.2</td>
+<td>drives O-5 speculation</td>
+</tr>
+<tr>
+<td>Barge-in</td>
+<td>design</td>
+<td>tested live</td>
+<td>unchanged across streaming path</td>
+</tr>
+<tr>
+<td>Rate limit</td>
+<td>in-mem</td>
+<td>in-mem</td>
+<td><strong>Redis (real, multi-worker)</strong></td>
+</tr>
+<tr>
+<td>Auth/tenancy</td>
+<td>JWT</td>
+<td>+refresh (FE gap)</td>
+<td><strong>persisted + refresh + enforced org scoping</strong></td>
+</tr>
+<tr>
+<td>Human handoff</td>
+<td>—</td>
+<td>—</td>
+<td><strong>real (EscalationHub + monitor)</strong></td>
+</tr>
+<tr>
+<td>Frontend</td>
+<td>type-to-talk</td>
+<td>mic+VAD monolith</td>
+<td><strong>decomposed + code-split + streaming captions</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="12-risks-future-work">12. Risks &amp; future work</h2>
+<p>See <a href="./FUTURE_PROCEEDINGS.md">FUTURE_PROCEEDINGS.md</a>. Headline remaining: <strong>O-7</strong>
+in-region inference (legal-gated), O-6 handler-ingest hardening at telephony
+scale, remaining Part-C themes (Twilio/Exotel bridges, payments, WhatsApp,
+analytics). Module-level detail: <a href="./LLD_V3.md">LLD_V3.md</a>.</p></div></main>
+<footer>Generated from <code>docs/HLD_V3.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>
