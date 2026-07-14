@@ -17,6 +17,7 @@ from koel.common.auth import ServicePrincipal
 from koel.common.errors import ApiError
 from koel.common.logging import get_logger, mask_account
 from koel.common.telemetry import span
+from koel.crm.adapters import mirror_to_webhook
 from koel.crm.schemas import CallSummaryRequest, CustomerRecord, FlagRequest, InteractionLog
 from koel.db.models import CrmCustomer, InteractionLogRow
 from koel.db.session import session_scope
@@ -48,6 +49,29 @@ async def list_customers(_: ServicePrincipal) -> list[CustomerRecord]:
     async with session_scope() as db:
         rows = (await db.execute(select(CrmCustomer))).scalars().all()
     return [_to_record(r) for r in rows]
+
+
+@router.get("/by-phone", response_model=CustomerRecord)
+async def get_customer_by_phone(
+    phone: str, _: ServicePrincipal, org_id: str | None = None
+) -> CustomerRecord:
+    """ANI lookup for inbound calls (roadmap 3.2): resolve a caller by their phone
+    number. Declared before ``/{customer_id}`` so the literal path wins over the
+    dynamic one. Org-scoped like the other customer routes — when ``org_id`` is
+    given, only that tenant's records match (multi-tenant isolation, AF)."""
+    with span("crm.get_customer_by_phone"):
+        stmt = select(CrmCustomer).where(CrmCustomer.phone == phone)
+        if org_id is not None:
+            stmt = stmt.where(CrmCustomer.org_id == org_id)
+        async with session_scope() as db:
+            row = (await db.execute(stmt)).scalars().first()
+        if row is None:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="customer_not_found",
+                message="No customer with that phone number.",
+            )
+        return _to_record(row)
 
 
 @router.get("/{customer_id}", response_model=CustomerRecord)
@@ -98,6 +122,7 @@ async def log_interaction(customer_id: str, payload: InteractionLog, _: ServiceP
         "crm_interaction",
         extra={"extra_fields": {"customer_id": mask_account(customer_id), "event": payload.event}},
     )
+    await mirror_to_webhook("interaction", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "logged", "id": row_id, "customer_id": customer_id, "event": payload.event}
 
 
@@ -119,6 +144,7 @@ async def flag_customer(customer_id: str, payload: FlagRequest, _: ServicePrinci
         if payload.flag == "opt_out":
             row.dnd = True
         row.attributes = attrs
+    await mirror_to_webhook("flag", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "flagged", "customer_id": customer_id, "flag": payload.flag}
 
 
@@ -153,6 +179,7 @@ async def add_call_summary(customer_id: str, payload: CallSummaryRequest, _: Ser
         "crm_call_summary_added",
         extra={"extra_fields": {"customer_id": mask_account(customer_id), "session_id": payload.session_id}},
     )
+    await mirror_to_webhook("call_summary", customer_id, payload.model_dump())  # 6.1: dormant w/o webhook
     return {"status": "logged", "customer_id": customer_id, "session_id": payload.session_id}
 
 

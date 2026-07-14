@@ -7,26 +7,71 @@ filler-audio cache at startup so latency masking is ready on the first slow turn
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import wave
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 
 from koel.common.app_factory import create_app
 from koel.common.auth import authenticate_websocket
-from koel.common.logging import get_logger
+from koel.common.logging import get_logger, set_correlation_id
+from koel.common.model_connections import resolve_connection
 from koel.common.schemas import Language
+from koel.db.models import BotConfig
+from koel.db.session import session_scope
+from koel.stt.config import get_stt_settings
+from koel.stt.schemas import TranscribeRequest, TranscriptResult
+from koel.stt.streaming_session import DeepgramStreamingSession
 from koel.tts.schemas import SynthesizeRequest
-from koel.voicebot.api import analytics, auth, bots, history, knowledge, operators, sessions
+from koel.voicebot.api import (
+    analytics,
+    auth,
+    bots,
+    connections,
+    exports,
+    history,
+    knowledge,
+    operators,
+    orgs,
+    sessions,
+)
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
+from koel.voicebot.inbound import build_inbound_session
 from koel.voicebot.pipeline import localization
 from koel.voicebot.pipeline.filler import FILLER_PHRASES, filler_tone_for
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
-from koel.voicebot.session.models import CallStatus
+from koel.voicebot.session.models import CallStatus, SessionState
+from koel.voicebot.telephony.bridge import TwilioMediaBridge
+from koel.voicebot.telephony.ingest import (
+    PartialCallback,
+    StreamingSessionFactory,
+    StreamingTelephonyIngest,
+    TelephonyAudioIngest,
+    TranscribeCallback,
+    UtteranceCallback,
+)
+from koel.voicebot.telephony.twilio import verify_twilio_signature
 from koel.voicebot.ws.handler import handle_connection
+from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 
 logger = get_logger("koel.voicebot")
 settings = get_voicebot_settings()
+# STT settings drive the telephony streaming-STT decision (Deepgram env default +
+# BYOK connection resolution). Module-level so tests can monkeypatch it, mirroring
+# ``settings``. lru_cached, so this is the same instance the STT service sees.
+stt_settings = get_stt_settings()
+
+# Twilio media decodes to 16 kHz PCM16 (the bridge's default ``inbound_sample_rate``);
+# the streaming Deepgram session must be opened at that same rate.
+_TELEPHONY_STT_SAMPLE_RATE = 16000
+
+# The browser's neural-VAD worklet emits raw s16le mono 16 kHz PCM (``pcm16_b64`` on
+# each audio_chunk — see ws/protocol.py), so the browser streaming Deepgram session
+# opens at the same rate.
+_BROWSER_STT_SAMPLE_RATE = 16000
 
 
 # Per-phrase warmup timeout: a slow provider must not block boot. 9 sequential
@@ -182,6 +227,9 @@ app.include_router(history.router)
 app.include_router(analytics.router)
 app.include_router(knowledge.router)
 app.include_router(operators.router)
+app.include_router(orgs.router)
+app.include_router(connections.router)
+app.include_router(exports.router)
 
 
 @app.websocket("/ws/calls/{session_id}")
@@ -222,6 +270,13 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
         return
     active_sessions.add(session_id)
 
+    # O-6 Wave 2: when this call resolves to Deepgram streaming STT, hand the
+    # CallSession a factory that opens a long-lived DeepgramStreamingSession
+    # (continuous frames → live partials + finals). None ⇒ the unchanged buffered
+    # per-utterance transcribe path (every non-streaming bot). Resolved before the
+    # socket runs; the session itself opens lazily on the first audio frame.
+    streaming_session_factory = await _browser_streaming_factory(state)
+
     # Track in-flight calls so the lifespan can drain them on SIGTERM (P).
     websocket.app.state.active_calls += 1
     try:
@@ -238,10 +293,268 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             resumed=resumed,
             background_tasks=runtime.background_tasks,
             escalations=runtime.escalations,
+            monitor=runtime.monitor,
+            streaming_session_factory=streaming_session_factory,
         )
     finally:
         websocket.app.state.active_calls -= 1
         active_sessions.discard(session_id)
+
+
+def _pcm16_to_wav_b64(pcm16: bytes, sample_rate: int) -> str:
+    """Wrap raw PCM16 mono samples in a WAV container (base64) for STT_svc.
+
+    Twilio delivers 8 kHz µ-law; the bridge decodes it to raw 16 kHz PCM16. STT
+    infers the codec from the container, so the endpointed utterance is framed as
+    a WAV — the exact inverse of the bridge's own ``_wav_to_pcm16``.
+    """
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm16)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+async def _resolve_deepgram_streaming(state: SessionState) -> tuple[str, str, str] | None:
+    """Decide whether this call runs on Deepgram *streaming* STT (O-6 Wave 2).
+
+    Returns ``(api_key, model, base_url)`` when it does, else ``None`` (→ buffered
+    ingest). A bot's own Deepgram STT :class:`ModelConnection` wins (BYOK); failing
+    that, the env default (``stream_stt_provider=deepgram`` + a configured Deepgram
+    key) applies. Any resolution error degrades to ``None`` — never raises.
+    """
+    conn_id = state.stt_connection_id
+    if conn_id:
+        try:
+            resolved = await resolve_connection(conn_id, state.org_id)
+        except Exception:  # noqa: BLE001 — a resolve failure just falls through to the env default
+            resolved = None
+        if (
+            resolved is not None
+            and resolved.kind == "stt"
+            and (resolved.provider or "").lower() == "deepgram"
+            and resolved.api_key
+        ):
+            return (
+                resolved.api_key,
+                resolved.model or stt_settings.deepgram_model,
+                resolved.base_url or stt_settings.deepgram_base_url,
+            )
+    key = stt_settings.deepgram_api_key
+    if (
+        stt_settings.stream_stt_provider.lower() == "deepgram"
+        and stt_settings.deepgram_enabled
+        and key
+    ):
+        return (key, stt_settings.deepgram_model, stt_settings.deepgram_base_url)
+    return None
+
+
+async def _browser_streaming_factory(state: SessionState) -> StreamingSessionFactory | None:
+    """A session factory for the browser (``/ws/calls``) streaming STT path (O-6 Wave 2).
+
+    Returns a factory that opens a long-lived :class:`DeepgramStreamingSession` when
+    this call resolves to Deepgram *streaming* STT (reusing the same BYOK-or-env
+    resolution as telephony via :func:`_resolve_deepgram_streaming`); ``None`` for every
+    other bot — the CallSession then runs the unchanged buffered per-utterance transcribe
+    path. The socket is opened lazily by the CallSession on the first audio frame, so a
+    connect failure degrades to the buffered path in-flight without dropping the call.
+    """
+    dg = await _resolve_deepgram_streaming(state)
+    if dg is None:
+        return None
+    api_key, model, base_url = dg
+
+    def _factory(
+        on_partial: PartialCallback, on_final: UtteranceCallback
+    ) -> DeepgramStreamingSession:
+        return DeepgramStreamingSession(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            sample_rate=_BROWSER_STT_SAMPLE_RATE,
+            on_partial=on_partial,
+            on_final=on_final,
+            language=state.language or Language.en,
+            session_id=state.session_id,
+        )
+
+    return _factory
+
+
+async def _build_telephony_ingest(
+    *,
+    state: SessionState,
+    transcribe: TranscribeCallback,
+    on_utterance: UtteranceCallback,
+    on_partial: PartialCallback,
+) -> TelephonyAudioIngest | StreamingTelephonyIngest:
+    """Pick the caller-audio ingest for this call.
+
+    Deepgram-streaming calls get a :class:`StreamingTelephonyIngest` backed by a
+    long-lived :class:`DeepgramStreamingSession` (continuous frames → live interim
+    partials + finals). Everything else — and any failure to open the streaming
+    socket — gets the buffered, RMS-endpointed :class:`TelephonyAudioIngest` (the
+    unchanged fallback + the path for every non-Deepgram provider). The streaming
+    socket is opened here, BEFORE any audio flows, so a connect failure falls back
+    cleanly instead of dropping a live turn.
+    """
+    dg = await _resolve_deepgram_streaming(state)
+    if dg is not None:
+        api_key, model, base_url = dg
+
+        def _factory(
+            partial: PartialCallback, final: UtteranceCallback
+        ) -> DeepgramStreamingSession:
+            return DeepgramStreamingSession(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                sample_rate=_TELEPHONY_STT_SAMPLE_RATE,
+                on_partial=partial,
+                on_final=final,
+                language=state.language or Language.en,
+                session_id=state.session_id,
+            )
+
+        streaming = StreamingTelephonyIngest(
+            session_factory=_factory, on_utterance=on_utterance, on_partial=on_partial
+        )
+        if await streaming.start():
+            logger.info(
+                "telephony_streaming_stt_engaged",
+                extra={"extra_fields": {"session_id": state.session_id, "model": model}},
+            )
+            return streaming
+        # Socket didn't open → release it and fall back to the buffered ingest.
+        await streaming.aclose()
+        logger.warning(
+            "telephony_streaming_stt_unavailable; using buffered ingest",
+            extra={"extra_fields": {"session_id": state.session_id}},
+        )
+    return TelephonyAudioIngest(transcribe=transcribe, on_utterance=on_utterance)
+
+
+@app.websocket("/twilio/stream")
+async def twilio_stream(websocket: WebSocket) -> None:
+    """Inbound PSTN call bridge over Twilio Media Streams (roadmap 1.1 / 1.3).
+
+    DORMANT by default. The Twilio request signature is verified FIRST and fails
+    CLOSED when no ``KOEL_TWILIO_AUTH_TOKEN`` is configured, so an unconfigured
+    deployment rejects the upgrade (1008) rather than trusting it. Browser calls
+    (``/ws/calls/{session_id}``) are entirely unaffected.
+
+    On a configured deployment: verify signature → confirm a default bot is bound
+    → accept → seed a :class:`SessionState` (shared with the HTTP path) → wire the
+    caller-audio seam through server-side endpointing (:class:`TelephonyAudioIngest`)
+    into ``orchestrator.handle_final_transcript`` → run the media bridge.
+    """
+    # (1) Fail-closed signature check. verify_twilio_signature returns False on an
+    # empty auth token, so this is the dormancy gate — no token, no inbound calls.
+    signature = websocket.headers.get("x-twilio-signature", "")
+    signed_url = f"{settings.public_base_url}/twilio/stream"
+    params = dict(websocket.query_params)
+    if not verify_twilio_signature(signed_url, params, signature, settings.twilio_auth_token):
+        await websocket.close(code=1008, reason="invalid twilio signature")
+        return
+
+    # (2) Inbound needs a bound bot: the WS URL carries no session_id (unlike the
+    # browser path), so a configured default BotConfig identifies the callee.
+    if not settings.twilio_default_bot_id:
+        await websocket.close(code=1008, reason="inbound telephony disabled")
+        return
+
+    runtime = websocket.app.state.runtime
+    async with session_scope() as db:
+        bot: BotConfig | None = await db.get(BotConfig, settings.twilio_default_bot_id)
+    if bot is None or not bot.active:
+        await websocket.close(code=1008, reason="inbound bot unavailable")
+        return
+
+    await websocket.accept()
+
+    # (4) Seed the call. The caller's number may arrive as a templated WS query
+    # param (e.g. <Stream url=".../twilio/stream?From={{From}}">). Inbound (3.2):
+    # resolve the caller by ANI → CRM lookup → intent-first session; an unknown
+    # or absent number still yields an anonymous inbound session.
+    caller_phone = websocket.query_params.get("From") or websocket.query_params.get("from")
+    state = await build_inbound_session(runtime.clients, bot, caller_phone=caller_phone)
+    set_correlation_id(state.session_id)
+    await runtime.store.save(state)
+
+    # (5) STT seam: wrap clients.transcribe (mirrors ws/handler._handle_audio —
+    # final utterance, language pinned to the bot) behind the endpointer.
+    async def _transcribe(pcm16: bytes, sample_rate: int) -> TranscriptResult | None:
+        return await runtime.clients.transcribe(
+            TranscribeRequest(
+                session_id=state.session_id,
+                audio_b64=_pcm16_to_wav_b64(pcm16, sample_rate),
+                sample_rate=sample_rate,
+                is_final=True,
+                audio_format="wav",
+                language_hint=state.language,
+                stt_connection_id=state.stt_connection_id,  # BYOK per-bot STT connection
+            )
+        )
+
+    async def _on_utterance(stt: TranscriptResult) -> None:
+        # bridge.send translates the orchestrator's reply back into Twilio frames.
+        if bridge is None:
+            return
+        await runtime.orchestrator.handle_final_transcript(state, bridge.send, stt)
+
+    async def _send_partial(text: str) -> None:
+        """Forward an interim STT partial through the transport as a best-effort
+        ``partial_transcript`` (O-6). The Twilio bridge has no carrier
+        representation for it and drops it; on a browser transport it surfaces as a
+        live caption. NEVER authoritative — the turn still runs on the final."""
+        if bridge is None or not text.strip():
+            return
+        await bridge.send(
+            ServerMessage.of(ServerMessageType.partial_transcript, text=text, speaker="customer")
+        )
+
+    # (6) STT ingest: the long-lived Deepgram streaming session (true continuous
+    # partials) when this call resolves to Deepgram streaming STT, else the
+    # buffered, RMS-endpointed TelephonyAudioIngest (fallback + non-Deepgram path).
+    # Bound to a mutable ``bridge`` the closures above read at call time (feeds only
+    # start once bridge.run() is underway, so it is always assigned by then).
+    bridge: TwilioMediaBridge | None = None
+    ingest = await _build_telephony_ingest(
+        state=state,
+        transcribe=_transcribe,
+        on_utterance=_on_utterance,
+        on_partial=_send_partial,
+    )
+
+    # (7) Run the media bridge. Constructed directly (this is exactly what
+    # run_twilio_bridge does) so on_utterance can reach the bridge's own send.
+    dtmf_map = bot.config.get("dtmf_map", {}) if isinstance(bot.config, dict) else {}
+    bridge = TwilioMediaBridge(
+        websocket=websocket,
+        orchestrator=runtime.orchestrator,
+        state=state,
+        dtmf_map=dtmf_map,
+        on_caller_audio=ingest.feed,
+    )
+
+    websocket.app.state.active_calls += 1
+    try:
+        await bridge.run()
+    finally:
+        # Drain any speech still buffered when the stream stopped — unless the
+        # call already ended normally (a `stop`/hangup already ran end_call), in
+        # which case there's no one left to answer.
+        if state.status != CallStatus.ended:
+            await ingest.flush()
+        # Always tear the ingest down: the streaming ingest owns a Deepgram socket
+        # that must close even on a normal end; the buffered ingest has no aclose.
+        aclose = getattr(ingest, "aclose", None)
+        if aclose is not None:
+            await aclose()
+        websocket.app.state.active_calls -= 1
 
 
 # Re-export the supported-language set for clients/tests.

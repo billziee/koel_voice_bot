@@ -17,13 +17,16 @@ import {
 import {
   Settings, Clock, PhoneCall,
   BarChart2, CheckCircle2, X,
-  LogOut, Sun, Moon, Menu, Edit3, BookOpen
+  LogOut, Sun, Moon, Menu, Edit3, BookOpen, Plug
 } from 'lucide-react';
 import type {
-  ViewState, UseCase, Bot, BotConfig, CallHistory,
+  ViewState, UseCase, Bot, BotConfig, CallHistory, ConnectionSelection,
 } from './types';
 import { getTheme } from './lib/theme';
 import { formatRelativeTime } from './lib/format';
+// Pure helper (no React) — safe to import on the eager path without pulling the
+// flow-editor canvas components into the initial bundle.
+import { coerceFlow } from './components/FlowEditor/flowModel';
 import { LoginView } from './views/LoginView';
 import { DashboardView } from './views/DashboardView';
 
@@ -34,6 +37,7 @@ const HistoryView = lazy(() => import('./views/HistoryView').then(m => ({ defaul
 const ConfigView = lazy(() => import('./views/ConfigView').then(m => ({ default: m.ConfigView })));
 const BotBuilderView = lazy(() => import('./views/BotBuilderView').then(m => ({ default: m.BotBuilderView })));
 const KnowledgeBaseView = lazy(() => import('./views/KnowledgeBaseView').then(m => ({ default: m.KnowledgeBaseView })));
+const ConnectionsView = lazy(() => import('./views/ConnectionsView').then(m => ({ default: m.ConnectionsView })));
 const ActiveCallView = lazy(() => import('./views/ActiveCallView').then(m => ({ default: m.ActiveCallView })));
 
 // Shared domain types now live in ./types; getTheme in ./lib/theme (Q-1 decomposition).
@@ -152,12 +156,55 @@ function configToNewBot(config: BotConfig): NewBotPayload {
     rag_index: config.ragIndex || null,
     default_tone: config.tone,
     ambient_profile: config.ambientProfile,
+    // Round-trips to the backend's bot config JSON. `stt_mode`, `flow` (6.6), and
+    // `connections` (BYOK, Phase 4) share the one blob; PATCH replaces `config`
+    // wholesale so all three must ship together. The scripted flow is consumed by
+    // the backend interpreter from exactly `config.flow`
+    // (koel/voicebot/pipeline/flow.py); the connection ids ride under
+    // `config.connections` with undefined kinds dropped.
+    config: {
+      stt_mode: config.sttMode,
+      ...(config.flow ? { flow: config.flow } : {}),
+      ...(cleanConnections(config.connections) ? { connections: cleanConnections(config.connections) } : {}),
+    },
   };
+}
+
+// Strip undefined ids from a per-bot connection selection. Returns undefined when
+// nothing is selected so we never persist an empty `connections` object.
+function cleanConnections(sel: ConnectionSelection | undefined): ConnectionSelection | undefined {
+  if (!sel) return undefined;
+  const out: ConnectionSelection = {};
+  if (sel.llm) out.llm = sel.llm;
+  if (sel.tts) out.tts = sel.tts;
+  if (sel.stt) out.stt = sel.stt;
+  return Object.keys(out).length ? out : undefined;
+}
+
+// Defensively read a persisted `config.connections` blob back into a typed
+// selection. Ignores non-string / unknown ids so a malformed blob degrades to
+// "no selection" rather than throwing.
+function readConnections(raw: unknown): ConnectionSelection | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: ConnectionSelection = {};
+  if (typeof r.llm === 'string') out.llm = r.llm;
+  if (typeof r.tts === 'string') out.tts = r.tts;
+  if (typeof r.stt === 'string') out.stt = r.stt;
+  return Object.keys(out).length ? out : undefined;
 }
 
 function backendBotToBot(b: BackendBot): Bot {
   const useCase = USE_CASE_LABEL[b.use_case] || 'Credit Card';
   const langLabel = b.language === 'hi' ? 'Hindi' : b.language === 'en' ? 'English' : 'Hinglish';
+  // Hydrate the persisted STT mode so the config form seeds the operator's choice.
+  const sttMode: Bot['sttMode'] = b.config?.stt_mode === 'ws' ? 'ws' : 'chunk';
+  // Hydrate the persisted scripted flow (6.6) — coerced defensively; a malformed
+  // or absent flow yields undefined and the editor seeds a default starter.
+  const flow = coerceFlow(b.config?.flow) ?? undefined;
+  // Hydrate the persisted BYOK model selection (Phase 4) so the per-bot selectors
+  // seed the operator's saved choice.
+  const connections = readConnections(b.config?.connections);
   return {
     id: b.id,
     name: b.name,
@@ -173,6 +220,9 @@ function backendBotToBot(b: BackendBot): Bot {
     lastActiveTs: Date.now(),
     backendId: b.id,
     backendCustomerId: USE_CASE_CUSTOMER[b.use_case],
+    sttMode,
+    flow,
+    connections,
   };
 }
 
@@ -411,6 +461,7 @@ export default function KoelApp() {
     history: 'Call History',
     builder: 'Bot Builder',
     knowledge: 'Knowledge Base',
+    connections: 'Model Connections',
   };
 
   const operateNav: { view: ViewState; icon: React.ReactNode; label: string }[] = [
@@ -423,6 +474,7 @@ export default function KoelApp() {
     { view: 'builder', icon: <Edit3 size={16} />, label: 'Bot Builder' },
     { view: 'config', icon: <Settings size={16} />, label: 'Configuration' },
     { view: 'knowledge', icon: <BookOpen size={16} />, label: 'Knowledge Base' },
+    { view: 'connections', icon: <Plug size={16} />, label: 'Model Connections' },
   ];
 
   return (
@@ -550,11 +602,13 @@ export default function KoelApp() {
               onSave={(config) => handleConfigSave(configBotId || 'new', config)}
               onCancel={() => setCurrentView('dashboard')}
               theme={theme}
+              token={token}
             />
           )}
           {currentView === 'history' && <HistoryView calls={completedCalls} onExported={() => showToast('CSV exported for QA workflows.')} theme={theme} darkMode={darkMode} />}
-          {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} />}
+          {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} token={token} />}
           {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} token={token} onToast={showToast} />}
+          {currentView === 'connections' && <ConnectionsView theme={theme} token={token} onToast={showToast} />}
           </Suspense>
         </main>
       </div>

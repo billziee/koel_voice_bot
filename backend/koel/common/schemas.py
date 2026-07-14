@@ -30,10 +30,23 @@ class Language(str, Enum):
     en = "en"  # English
     hi = "hi"  # Hindi
     hinglish = "hinglish"  # code-mixed Hindi/English
-    # A detected language outside the supported set (Marathi, Bengali, Tamil…).
-    # Only ever a *detected* id — never an operating language. Triggers the
-    # graceful fallback + escalation in the orchestrator (PRD §06).
+    # Additional Indian languages via Sarvam Bulbul TTS + Whisper STT (4.1).
+    # Operating languages only when Sarvam is enabled; require per-language
+    # operational-copy authoring + native QA before production use (see 4.1 note).
+    ta = "ta"  # Tamil
+    te = "te"  # Telugu
+    mr = "mr"  # Marathi
+    bn = "bn"  # Bengali
+    # A detected language outside the supported set. Only ever a *detected* id —
+    # never an operating language. Triggers the graceful fallback + escalation.
     other = "other"
+
+
+# Operating languages the platform can serve end to end (STT pin + Sarvam TTS).
+# Used by the orchestrator's unsupported-language fallback (PRD §06).
+SUPPORTED_LANGUAGES: frozenset[Language] = frozenset(
+    {Language.en, Language.hi, Language.hinglish, Language.ta, Language.te, Language.mr, Language.bn}
+)
 
 
 class Tone(str, Enum):

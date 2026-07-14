@@ -70,6 +70,45 @@ class CommonSettings(BaseSettings):
     turnstile_verify_url: str = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
     turnstile_timeout_s: float = 5.0
 
+    # --- Outbound messaging (2.1 SMS / 2.4 WhatsApp) + payment links ---
+    # All empty by default ⇒ the channel is DORMANT: a send is a logged no-op that
+    # returns False, so in-call actions (payment link, follow-up) degrade cleanly
+    # until a gateway + key are configured. A generic HTTP gateway is assumed
+    # ({url} POST with a bearer key); swap the adapter for Twilio/MSG91/Meta later.
+    sms_gateway_url: str = ""
+    sms_api_key: str = ""
+    whatsapp_gateway_url: str = ""
+    whatsapp_api_key: str = ""
+    messaging_timeout_s: float = 8.0
+    # Payment-link provider base URL (Razorpay/Setu). Empty ⇒ no link is minted
+    # (the action still records the intent on the CRM, just sends nothing).
+    payment_link_base_url: str = ""
+
+    # --- Live-CRM mirror (6.1) ---
+    # When set, CRM writes (interactions/flags/call-summaries) are also forwarded
+    # to a client's CRM middleware over an HMAC-signed webhook. Empty ⇒ dormant:
+    # the internal DB-backed CRM stays the source of truth and nothing is sent.
+    crm_webhook_url: str = ""
+    crm_webhook_key: str = ""
+    crm_webhook_timeout_s: float = 8.0
+
+    # --- Telephony / PSTN (1.1 Twilio, 1.4 Exotel) ---
+    # Empty ⇒ no carrier configured: the Media Streams bridge stays off and
+    # inbound webhook signatures fail closed. Set the carrier's auth token to
+    # enable + verify signed webhooks. Browser calls are unaffected.
+    twilio_auth_token: str = ""
+    # Which BotConfig an inbound PSTN call binds to (the /twilio/stream URL carries
+    # no session_id like the browser path). Empty ⇒ inbound bridge disabled.
+    twilio_default_bot_id: str = ""
+    # Public origin used to reconstruct the exact URL for Twilio signature checks
+    # behind a proxy (e.g. https://koel.example.com). Empty ⇒ verify uses the
+    # request URL as-is.
+    public_base_url: str = ""
+    # Exotel (1.4, India-hosted PSTN). Empty token ⇒ signatures fail closed /
+    # adapter dormant. media_mode: "pcm" (raw 8 kHz slin, no transcode) or "ulaw".
+    exotel_auth_token: str = ""
+    exotel_media_mode: str = "pcm"
+
     # --- Redis (PRD §08: all session state in Redis with TTL) ---
     redis_url: str = "redis://localhost:6379/0"
     # Rate-limiter backend (O-8): "memory" is per-process (fine for a single

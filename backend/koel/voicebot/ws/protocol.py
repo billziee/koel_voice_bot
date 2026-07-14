@@ -11,15 +11,19 @@ Client → Server:
   end_call           — user hung up
 
 Server → Client:
-  call_state      — status badge transitions (PRD §09 Screen 3)
-  transcript      — a completed turn (bot or customer) for the live transcript
-  audio_chunk     — synthesized bot audio to play
-  tts_kill        — flush the playback buffer NOW (barge-in confirmed, PRD §05)
-  filler          — latency-masking filler is playing
-  reconnected     — session re-bound after a drop (PRD §05)
-  ping            — heartbeat
-  error           — structured error
-  call_ended      — final outcome
+  call_state         — status badge transitions (PRD §09 Screen 3)
+  transcript         — a completed turn (bot or customer) for the live transcript
+  partial_transcript — interim (non-final) live STT of the customer's in-progress
+                       utterance (O-6 streaming STT). BEST-EFFORT / NON-AUTHORITATIVE:
+                       it may be revised or replaced by the final ``transcript`` and
+                       must never drive a turn — purely a live-caption affordance.
+  audio_chunk        — synthesized bot audio to play
+  tts_kill           — flush the playback buffer NOW (barge-in confirmed, PRD §05)
+  filler             — latency-masking filler is playing
+  reconnected        — session re-bound after a drop (PRD §05)
+  ping               — heartbeat
+  error              — structured error
+  call_ended         — final outcome
 """
 
 from __future__ import annotations
@@ -41,6 +45,11 @@ class ClientMessageType(str, enum.Enum):
 class ServerMessageType(str, enum.Enum):
     call_state = "call_state"
     transcript = "transcript"
+    # Interim, non-authoritative live STT partial (O-6 streaming). Carries at least
+    # ``text`` and ``speaker`` in ``data``; the authoritative turn still arrives as
+    # a ``transcript``. Ignored by transports without a live-caption surface (the
+    # Twilio bridge drops it — a carrier has no representation for it).
+    partial_transcript = "partial_transcript"
     audio_chunk = "audio_chunk"
     tts_kill = "tts_kill"
     filler = "filler"

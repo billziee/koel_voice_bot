@@ -24,6 +24,8 @@ from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.voicebot.deps import Runtime, get_runtime
+from koel.voicebot.pipeline.experiment import assign_variant
+from koel.voicebot.pipeline.flow import parse_flow
 from koel.voicebot.session.models import SessionState
 
 logger = get_logger("koel.voicebot.sessions")
@@ -49,6 +51,119 @@ def _minimise_attributes(use_case: str, attributes: dict) -> dict:
     if allowed is None:
         return dict(attributes)
     return {k: v for k, v in attributes.items() if k in allowed}
+
+
+def build_session_state(
+    bot: BotConfig,
+    *,
+    customer_id: str | None,
+    owner_sub: str | None = None,
+    language: Language | None = None,
+    crm_context: dict | None = None,
+) -> SessionState:
+    """Seed a fully-populated :class:`SessionState` from a bot instance's config.
+
+    Shared by the authed HTTP bootstrap (``POST /v1/sessions``) and the inbound
+    telephony route (``/twilio/stream``) so the seeding of language/tone, per-bot
+    backchannels / qa_rules / followup_templates / flow, and the A/B experiment
+    variant overrides lives in exactly ONE place (no drift between the two
+    entry points). Pure: it builds and returns the state; the caller persists it
+    (and, on the HTTP path, has already run the CRM/DND/calling-hours checks and
+    supplies the minimised ``crm_context`` + ``owner_sub``).
+
+    ``language`` defaults to the bot's configured language; pass it to override
+    (e.g. a future per-caller language). ``customer_id`` also keys the
+    deterministic A/B variant assignment, so the same customer lands in the same
+    arm across retries.
+    """
+    session_id = uuid.uuid4().hex
+    if language is None:
+        try:
+            language = Language(bot.language)
+        except ValueError:
+            language = Language.hinglish
+    try:
+        default_tone = Tone(bot.default_tone)
+    except ValueError:
+        default_tone = Tone.neutral
+
+    # Per-bot backchannel overrides for Gate 2 (PRD §05), if configured.
+    backchannels = bot.config.get("backchannels", {}) if isinstance(bot.config, dict) else {}
+    # Per-bot script-adherence QA rules (5.5), scored deterministically at call end.
+    qa_rules = bot.config.get("qa_rules", {}) if isinstance(bot.config, dict) else {}
+    # Per-bot post-call follow-up templates (2.4): outcome → WhatsApp message.
+    followup_templates = bot.config.get("followup_templates", {}) if isinstance(bot.config, dict) else {}
+    # Per-bot scripted conversation flow (6.6): raw {start, nodes} dict + entry node.
+    flow_config = bot.config.get("flow") if isinstance(bot.config, dict) else None
+    _flow = parse_flow({"flow": flow_config})
+    # Per-bot STT transport (O-6): "ws" opts into the streaming STT endpoint;
+    # anything else (absent / invalid) stays on today's "chunk" batch path.
+    # Seeded here — the one shared bootstrap — so the HTTP and telephony/inbound
+    # paths never drift.
+    raw_stt_mode = bot.config.get("stt_mode") if isinstance(bot.config, dict) else None
+    stt_mode = raw_stt_mode if raw_stt_mode in ("chunk", "ws") else "chunk"
+    # Per-bot BYOK model connections (LLM/TTS/STT). Each id, when set, routes that
+    # service to a custom provider (resolved + decrypted server-side); absent ⇒
+    # the service default. Ignore non-string entries defensively.
+    _conns = bot.config.get("connections") if isinstance(bot.config, dict) else None
+    _conns = _conns if isinstance(_conns, dict) else {}
+
+    def _conn(role: str) -> str | None:
+        v = _conns.get(role)
+        return v if isinstance(v, str) and v else None
+
+    # A/B experiment arm (6.3): deterministically assigned, overrides applied as
+    # variant → bot → default. Same customer → same arm across retries.
+    variant_id, overrides = assign_variant(bot.config, customer_id)
+    greeting_template = str(overrides.get("greeting_template", bot.greeting_template or ""))
+    prompt_preamble = overrides.get("prompt_preamble", bot.prompt_preamble)
+    voice = overrides.get("voice", bot.config.get("voice") if isinstance(bot.config, dict) else None)
+    speaking_rate = overrides.get("speaking_rate", bot.speaking_rate)
+    if "default_tone" in overrides:
+        try:
+            default_tone = Tone(str(overrides["default_tone"]))
+        except ValueError:
+            pass  # keep the bot default on a bad variant value
+
+    return SessionState(
+        session_id=session_id,
+        bot_id=bot.id,
+        owner_sub=owner_sub,
+        customer_id=customer_id,
+        use_case=bot.use_case.value,
+        org_id=bot.org_id,
+        language=language,
+        rag_enabled=bot.rag_enabled,
+        rag_index=bot.rag_index,
+        rag_top_k=bot.rag_top_k,
+        rag_score_threshold=bot.rag_score_threshold,
+        llm_model=bot.llm_model,
+        llm_temperature=bot.llm_temperature,
+        prompt_preamble=prompt_preamble,
+        default_tone=default_tone,
+        stt_mode=stt_mode,
+        llm_connection_id=_conn("llm"),
+        tts_connection_id=_conn("tts"),
+        stt_connection_id=_conn("stt"),
+        voice_gender=bot.voice_gender,
+        voice=voice,
+        speaking_rate=speaking_rate,
+        ambient_profile=bot.ambient_profile,
+        greeting_template=greeting_template,
+        variant_id=variant_id,
+        consent_disclosure_version=(
+            bot.config.get("consent_disclosure_version") if isinstance(bot.config, dict) else None
+        ),
+        crm_context=crm_context or {},
+        backchannels=backchannels if isinstance(backchannels, dict) else {},
+        qa_rules=qa_rules if isinstance(qa_rules, dict) else {},
+        followup_templates=followup_templates if isinstance(followup_templates, dict) else {},
+        flow=flow_config if isinstance(flow_config, dict) else None,
+        flow_node_id=_flow.start if _flow else None,
+        # recording_url is populated on call end with the REAL S3 object (or left
+        # NULL when recording is disabled) — never a phantom URL (audit finding).
+        recording_url=None,
+    )
 
 
 class StartSessionRequest(BaseModel):
@@ -123,44 +238,13 @@ async def start_session(
             **_minimise_attributes(bot.use_case.value, customer.attributes),
         }
 
-    session_id = uuid.uuid4().hex
-    try:
-        language = Language(bot.language)
-    except ValueError:
-        language = Language.hinglish
-    try:
-        default_tone = Tone(bot.default_tone)
-    except ValueError:
-        default_tone = Tone.neutral
-
-    # Per-bot backchannel overrides for Gate 2 (PRD §05), if configured.
-    backchannels = bot.config.get("backchannels", {}) if isinstance(bot.config, dict) else {}
-
-    state = SessionState(
-        session_id=session_id,
-        bot_id=bot.id,
-        owner_sub=user.sub,
+    # Seed the full call state via the shared bootstrap (reused by /twilio/stream)
+    # so backchannel/qa/followup/flow/variant seeding never drifts between paths.
+    state = build_session_state(
+        bot,
         customer_id=payload.customer_id,
-        use_case=bot.use_case.value,
-        org_id=bot.org_id,
-        language=language,
-        rag_enabled=bot.rag_enabled,
-        rag_index=bot.rag_index,
-        rag_top_k=bot.rag_top_k,
-        rag_score_threshold=bot.rag_score_threshold,
-        llm_model=bot.llm_model,
-        llm_temperature=bot.llm_temperature,
-        prompt_preamble=bot.prompt_preamble,
-        default_tone=default_tone,
-        voice_gender=bot.voice_gender,
-        speaking_rate=bot.speaking_rate,
-        ambient_profile=bot.ambient_profile,
-        greeting_template=bot.greeting_template or "",
+        owner_sub=user.sub,
         crm_context=crm_context,
-        backchannels=backchannels if isinstance(backchannels, dict) else {},
-        # recording_url is populated on call end with the REAL S3 object (or left
-        # NULL when recording is disabled) — never a phantom URL (audit finding).
-        recording_url=None,
     )
     await runtime.store.save(state)
 
@@ -169,7 +253,7 @@ async def start_session(
         "session_started",
         extra={
             "extra_fields": {
-                "session_id": session_id,
+                "session_id": state.session_id,
                 "bot_id": bot.id,
                 "customer": mask_account(payload.customer_id),
                 "customer_name": mask_name(crm_context.get("name")),
@@ -179,10 +263,10 @@ async def start_session(
     )
 
     return StartSessionResponse(
-        session_id=session_id,
+        session_id=state.session_id,
         ws_token=issue_token(user.sub, kind="ws", role=user.role, org_id=user.org_id),
-        ws_url=f"/ws/calls/{session_id}",
+        ws_url=f"/ws/calls/{state.session_id}",
         crm_context=crm_context,
-        language=language.value,
+        language=state.language.value,
         use_case=bot.use_case.value,
     )

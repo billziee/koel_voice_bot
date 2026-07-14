@@ -200,6 +200,9 @@ class GroqOrpheusProvider(TtsProvider):
     _VOICE_BY_GENDER = {"female": "autumn", "male": "austin"}
 
     def _voice_for(self, request: SynthesizeRequest) -> str:
+        # An explicit per-bot voice (4.2) wins over the gender-derived default.
+        if request.voice:
+            return request.voice
         return self._VOICE_BY_GENDER.get((request.voice_gender or "").lower(), self._voice)
 
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
@@ -352,7 +355,11 @@ class SarvamTtsProvider(TtsProvider):
     Magpie would mangle romanized text). Never drops a turn either way.
     """
 
-    _LANG_CODE = {"hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN"}
+    _LANG_CODE = {
+        "hi": "hi-IN", "hinglish": "hi-IN", "en": "en-IN",
+        # Additional Indian languages (4.1) — Sarvam Bulbul supports all of these.
+        "ta": "ta-IN", "te": "te-IN", "mr": "mr-IN", "bn": "bn-IN",
+    }
 
     def __init__(
         self,
@@ -399,7 +406,7 @@ class SarvamTtsProvider(TtsProvider):
                 json={
                     "text": request.text,
                     "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
-                    "speaker": self._speaker,
+                    "speaker": request.voice or self._speaker,  # per-bot persona (4.2)
                     "model": self._model,
                     "speech_sample_rate": self._sr,
                     "audio_format": self._format,
@@ -473,7 +480,7 @@ class SarvamTtsProvider(TtsProvider):
         ) as ws:
             config = {
                 "target_language_code": self._LANG_CODE.get(request.language.value, "hi-IN"),
-                "speaker": self._speaker,
+                "speaker": request.voice or self._speaker,  # per-bot persona (4.2)
                 "speech_sample_rate": str(self._sr),
                 "output_audio_codec": "linear16",
                 "model": self._model,
@@ -505,6 +512,174 @@ class SarvamTtsProvider(TtsProvider):
                     raise ValueError(f"sarvam ws error: {msg.get('data')}")
         if seq == 0:
             raise ValueError("Sarvam WS returned no audio")
+
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+class DeepgramTtsProvider(TtsProvider):
+    """BYOK neural TTS via Deepgram Aura (``POST /v1/speak``).
+
+    Aura returns raw ``linear16`` PCM at the requested sample rate (not a WAV
+    container), so we wrap it to a WAV at that rate — matching the canonical
+    contract the ambient mixer, sentence concat, and browser scheduler assume.
+    The Aura ``model`` query param IS the voice (e.g. ``aura-2-thalia-en``); a
+    per-bot ``voice`` (4.2) or a connection ``params['voice']`` overrides it. Any
+    error degrades to the wrapped ``fallback`` (the service default), so a live
+    call never drops. Only ever built from a resolved BYOK connection.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "aura-2-thalia-en",
+        base_url: str = "https://api.deepgram.com",
+        voice: str | None = None,
+        sample_rate: int = CANONICAL_SAMPLE_RATE,
+        timeout_s: float = 30.0,
+        fallback: TtsProvider,
+    ) -> None:
+        self._model = model
+        self._voice = voice
+        self._sr = sample_rate
+        self._url = f"{base_url.rstrip('/')}/v1/speak"
+        self._headers = {"Authorization": f"Token {api_key}", "Content-Type": "application/json"}
+        self._client = make_async_client(timeout_s=timeout_s)
+        self._fallback = fallback
+        self._warned = False
+
+    def _model_for(self, request: SynthesizeRequest) -> str:
+        # An explicit per-bot voice (4.2) wins; else the connection voice; else model.
+        return request.voice or self._voice or self._model
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            resp = await self._client.post(
+                self._url,
+                headers=self._headers,
+                params={
+                    "model": self._model_for(request),
+                    "encoding": "linear16",
+                    "sample_rate": self._sr,
+                },
+                json={"text": request.text},
+            )
+            resp.raise_for_status()
+            pcm = resp.content
+            if not pcm:
+                raise ValueError("Deepgram Aura returned no audio")
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning("deepgram_tts_failed; falling back", exc_info=True)
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True
+            return result
+
+        wav = _pcm_to_wav(pcm, self._sr)
+        if request.ambient and request.ambient_profile:
+            wav = mix_into_wav(wav, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(wav).decode(),
+            duration_ms=int(len(pcm) / 2 / self._sr * 1000),  # 16-bit mono → exact
+            prosody=prosody,
+            sample_rate=self._sr,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # Aura returns a whole clip per call, so stream by SENTENCE (Tier 2): the
+        # first sentence plays while later ones synthesize.
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
+
+    async def warm(self) -> None:
+        await warm_connection(self._client, self._url)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+class OpenAiCompatibleTtsProvider(TtsProvider):
+    """BYOK neural TTS via any OpenAI-compatible ``POST /audio/speech`` endpoint
+    (Bearer auth, ``{"model","input","voice"}`` → audio bytes).
+
+    Requests ``response_format=wav`` so the clip carries a duration header and
+    decodes everywhere. A per-bot ``voice`` (4.2) overrides the connection voice.
+    Any error degrades to the wrapped ``fallback`` (the service default). Only
+    ever built from a resolved BYOK connection.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str,
+        voice: str | None = None,
+        audio_format: str = "wav",
+        timeout_s: float = 30.0,
+        fallback: TtsProvider,
+    ) -> None:
+        self._model = model
+        self._voice = voice or "alloy"
+        self._format = audio_format
+        self._url = f"{base_url.rstrip('/')}/audio/speech"
+        self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        self._client = make_async_client(timeout_s=timeout_s)
+        self._fallback = fallback
+        self._warned = False
+
+    def _voice_for(self, request: SynthesizeRequest) -> str:
+        return request.voice or self._voice
+
+    async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
+        prosody = resolve_prosody(request)
+        try:
+            resp = await self._client.post(
+                self._url,
+                headers=self._headers,
+                json={
+                    "model": self._model,
+                    "input": request.text,
+                    "voice": self._voice_for(request),
+                    "response_format": self._format,
+                },
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            if not audio or not resp.headers.get("content-type", "").startswith("audio"):
+                raise ValueError("openai-compatible TTS returned no audio")
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to fallback
+            if not self._warned:
+                self._warned = True
+                logger.warning("openai_compatible_tts_failed; falling back", exc_info=True)
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True
+            return result
+
+        if request.ambient and request.ambient_profile:
+            audio = mix_into_wav(audio, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(audio).decode(),
+            duration_ms=(
+                _wav_duration_ms(audio)
+                or max(200, int(len(request.text) * _MS_PER_CHAR / max(prosody.rate, 0.1)))
+            ),
+            prosody=prosody,
+            sample_rate=wav_sample_rate(audio) or CANONICAL_SAMPLE_RATE,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # /audio/speech returns a whole clip per call → sentence-stream (Tier 2).
+        async for chunk in self._stream_by_sentence(request):
+            yield chunk
 
     async def warm(self) -> None:
         await warm_connection(self._client, self._url)

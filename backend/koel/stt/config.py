@@ -35,6 +35,17 @@ class SttSettings(CommonSettings):
     # the WS handler ingest is rewired against a live Sarvam WS STT endpoint.
     stream_stt: bool = False
 
+    # --- Deepgram realtime STT (O-6 true-partials — nova-3) ---
+    # Which provider backs the STREAMING seam (/v1/transcribe/stream). "sarvam"
+    # (default) keeps the existing Sarvam WS path; "deepgram" wraps the base
+    # provider with DeepgramSttProvider so stream_transcribe() upgrades to
+    # Deepgram's genuine interim partials. The batch /v1/transcribe path is
+    # unaffected either way. Deepgram only engages when its key is also set.
+    stream_stt_provider: str = "sarvam"  # "sarvam" | "deepgram"
+    deepgram_api_key: str | None = None
+    deepgram_model: str = "nova-3"
+    deepgram_base_url: str = "https://api.deepgram.com"
+
     @property
     def groq_enabled(self) -> bool:
         return self.stt_provider.lower() == "groq" and bool(self.groq_api_key)
@@ -42,6 +53,10 @@ class SttSettings(CommonSettings):
     @property
     def sarvam_enabled(self) -> bool:
         return bool(self.sarvam_api_key)
+
+    @property
+    def deepgram_enabled(self) -> bool:
+        return bool(self.deepgram_api_key)
 
 
 @lru_cache

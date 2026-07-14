@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
-import type { BotConfig } from '../types';
+import type { BotConfig, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
+import { SttModeSelector } from '../components/SttModeSelector';
+import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
+import { useConnections } from '../hooks/useConnections';
+import { FlowEditor, defaultFlow, validateFlow } from '../components/FlowEditor';
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
 const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
@@ -14,19 +18,7 @@ const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
   { num: 5, title: 'Review & deploy', sub: 'Preflight checks' },
 ];
 
-const FLOW_NODES = [
-  { type: 'greet', label: 'Greeting', title: 'Personalised opener', detail: 'CRM: name, bank, product, offer' },
-  { type: 'listen', label: 'Listen', title: 'Capture & classify intent', detail: 'STT → Groq intent tag' },
-];
-
-const FLOW_BRANCHES = [
-  { type: 'rag', label: 'RAG response', title: 'Pitch benefits', detail: 'on intent = INTERESTED' },
-  { type: 'rag', label: 'RAG response', title: 'Handle objection', detail: 'on intent = OBJECTION' },
-  { type: 'escalate', label: 'Escalate', title: 'Hand to specialist', detail: 'on intent = HIGH_INTEREST' },
-  { type: 'end', label: 'End', title: 'Log & close', detail: 'on intent = REJECTION · suppress 30d' },
-];
-
-export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (config: BotConfig) => void; onCancel: () => void; theme: Theme }) {
+export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy: (config: BotConfig) => void; onCancel: () => void; theme: Theme; token: string | null }) {
   const [step, setStep] = useState<BuilderStep>(1);
   const [botName, setBotName] = useState('');
   const [useCase, setUseCase] = useState('Credit Card Cross-Sell');
@@ -35,27 +27,62 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
   const [voiceSpeed, setVoiceSpeed] = useState(1.05);
   const [disclosure, setDisclosure] = useState(true);
   const [ambientEnabled, setAmbientEnabled] = useState(true);
+  const [sttMode, setSttMode] = useState<SttMode>('chunk'); // Chunk = default
+  // Per-bot BYOK model selection (Phase 4). Available list fetched via the token;
+  // degrades to Default-only when the backend is offline or the fetch fails.
+  const availableConnections = useConnections(token);
+  const [connectionSel, setConnectionSel] = useState<ConnectionSelection>({});
   const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
-  const [selectedNode, setSelectedNode] = useState<string | null>('Handle objection');
-  const [nodeScript, setNodeScript] = useState('Bilkul samajh sakti hoon. Yeh card {benefit_1} aur {benefit_2} deta hai — aapke existing cards se alag benefit. {fee_clause}. Interested hain?');
+  // Real scripted flow (6.6): seeded with a minimal single-node starter, edited
+  // in place, and shipped in config.flow on deploy.
+  const [flow, setFlow] = useState<Flow>(() => defaultFlow());
 
-  const nodeColor = (type: string) => {
-    switch (type) {
-      case 'greet': return theme.primary;
-      case 'listen': return theme.faint;
-      case 'rag': return theme.greenMid;
-      case 'escalate': return theme.accent;
-      case 'end': return theme.destructive;
-      default: return theme.faint;
-    }
-  };
+  // Flow shape stats + validation feed the footer, review panel, and preflight.
+  const flowNodeCount = Object.keys(flow.nodes).length;
+  const flowBranchCount = Object.values(flow.nodes).reduce((n, node) => n + Object.keys(node.branches).length, 0);
+  const flowErrors = validateFlow(flow).filter((i) => i.level === 'error').length;
 
+  // Variables the CRM context can fill at call time. A prompt token outside this
+  // set has no data source, so it would render literally on the call. Scanned
+  // across ALL node prompts so the check tracks the real flow, not one node.
+  const CRM_MAPPED_VARS = new Set([
+    'customer_name', 'name', 'bank', 'product', 'offer', 'offer_amount',
+    'benefit_1', 'benefit_2', 'fee_clause',
+  ]);
+  const flowPromptText = Object.values(flow.nodes).map((n) => n.prompt).join(' ');
+  const scriptVars = Array.from(flowPromptText.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim());
+  const unmappedVars = scriptVars.filter((v) => !CRM_MAPPED_VARS.has(v));
+
+  // Real preflight (Q-3): each row reflects the builder's ACTUAL state rather
+  // than a hardcoded pass. Variable-mapping, flow validity, and index checks are
+  // deterministic client-side; a live index-reachability probe is a deploy-time
+  // follow-up.
   const preflight = [
-    { label: 'All script variables mapped to CRM', ok: true },
-    { label: 'Knowledge base index reachable', ok: true },
+    {
+      label:
+        flowErrors === 0
+          ? 'Conversation flow is valid'
+          : `Conversation flow has ${flowErrors} error${flowErrors === 1 ? '' : 's'}`,
+      ok: flowErrors === 0,
+    },
+    {
+      label:
+        unmappedVars.length === 0
+          ? 'All prompt variables mapped to CRM'
+          : `Unmapped prompt variables: ${unmappedVars.map((v) => `{${v}}`).join(', ')}`,
+      ok: unmappedVars.length === 0,
+    },
+    { label: 'Knowledge base index configured', ok: ragIndex.trim().length > 0 },
     { label: 'Compliance disclosure block present', ok: disclosure },
     { label: 'Call-hours window not yet set (RBI)', ok: false },
   ];
+
+  // Resolve a selected connection id to its display name for the review panel;
+  // an unset id reads as the built-in default.
+  const connName = (id?: string): string => {
+    if (!id) return 'Default';
+    return availableConnections.find((c) => c.id === id)?.name ?? id;
+  };
 
   const handleDeploy = () => {
     onDeploy({
@@ -71,6 +98,9 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
       ragIndex,
       greeting: '',
       tone: 'cheerful',
+      sttMode,
+      flow,
+      connections: connectionSel,
     });
   };
 
@@ -199,68 +229,18 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                     <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all" style={{ left: ambientEnabled ? '18px' : '2px' }} />
                   </button>
                 </div>
+                <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
+                <div>
+                  <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Model connections</label>
+                  <ModelConnectionSelectors connections={availableConnections} value={connectionSel} onChange={setConnectionSel} theme={theme} />
+                  <p className="text-[11px] mt-1.5" style={{ color: theme.faint }}>Pick a BYOK provider per stage, or leave on Default (built-in). Add providers under Model Connections.</p>
+                </div>
               </div>
             )}
 
-            {/* Step 3: Conversation flow */}
+            {/* Step 3: Conversation flow — real editor (canvas + form) */}
             {step === 3 && (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex gap-4 text-[11.5px]" style={{ color: theme.faint }}>
-                    {[{ c: theme.primary, l: 'Greeting' }, { c: theme.faint, l: 'Listen' }, { c: theme.greenMid, l: 'RAG response' }, { c: theme.accent, l: 'Escalate' }, { c: theme.destructive, l: 'End' }].map(lg => (
-                      <span key={lg.l} className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: lg.c }} />{lg.l}</span>
-                    ))}
-                  </div>
-                  <button className="text-[12.5px] font-medium px-3 py-1 border rounded-md" style={{ borderColor: theme.rule, color: theme.inkMuted }}>Test flow</button>
-                </div>
-
-                <div className="p-4 rounded-lg" style={{ backgroundColor: theme.inset }}>
-                  {/* Linear nodes */}
-                  {FLOW_NODES.map((n, i) => (
-                    <React.Fragment key={i}>
-                      <div className="p-3 rounded-md border cursor-pointer" style={{ borderColor: theme.ruleSubtle, backgroundColor: theme.surfaceCard }} onClick={() => setSelectedNode(n.title)}>
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: nodeColor(n.type) }}>
-                          <span className="w-[5px] h-[5px] rounded-full" style={{ backgroundColor: nodeColor(n.type) }} />{n.label}
-                        </span>
-                        <div className="text-[13px] font-medium" style={{ color: theme.ink }}>{n.title}</div>
-                        <div className="text-[11.5px]" style={{ color: theme.faint }}>{n.detail}</div>
-                      </div>
-                      <div className="w-px h-4 mx-auto" style={{ backgroundColor: theme.rule }} />
-                    </React.Fragment>
-                  ))}
-
-                  {/* Branches */}
-                  <div className="grid grid-cols-4 gap-3 mt-1">
-                    {FLOW_BRANCHES.map((b, i) => (
-                      <div key={i} className="p-3 rounded-md border cursor-pointer" style={{ borderColor: selectedNode === b.title ? theme.primary : theme.ruleSubtle, backgroundColor: selectedNode === b.title ? theme.primarySubtle : theme.surfaceCard }} onClick={() => { setSelectedNode(b.title); setNodeScript(b.detail); }}>
-                        <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: nodeColor(b.type) }}>
-                          <span className="w-[5px] h-[5px] rounded-full" style={{ backgroundColor: nodeColor(b.type) }} />{b.label}
-                        </span>
-                        <div className="text-[12.5px] font-medium" style={{ color: theme.ink }}>{b.title}</div>
-                        <div className="text-[11px]" style={{ color: theme.faint }}>{b.detail}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedNode && (
-                  <div className="flex gap-4 mt-4">
-                    <div className="flex-1">
-                      <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Selected node — {selectedNode}</label>
-                      <textarea value={nodeScript} onChange={e => setNodeScript(e.target.value)} className="w-full border rounded-md px-3 py-2 text-[13px] outline-none min-h-[64px] resize-y" style={{ borderColor: theme.rule, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }} />
-                    </div>
-                    <div className="w-[200px]">
-                      <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Knowledge source</label>
-                      <select value={ragIndex} onChange={e => setRagIndex(e.target.value)} className="w-full border rounded-md px-3 py-2 text-[13px]" style={{ borderColor: theme.rule, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }}>
-                        <option>kb_hdfc_regalia_v3</option>
-                        <option>kb_hdfc_millennia_v1</option>
-                        <option>kb_icici_plat_v2</option>
-                      </select>
-                      <p className="text-[11px] mt-2" style={{ color: theme.faint }}>Retrieved per utterance — no hallucinated product details.</p>
-                    </div>
-                  </div>
-                )}
-              </div>
+              <FlowEditor value={flow} onChange={setFlow} theme={theme} />
             )}
 
             {/* Step 4: Knowledge & CRM */}
@@ -321,12 +301,16 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
                   <KV k="Speed" v={`${voiceSpeed.toFixed(2)}×`} theme={theme} />
                   <KV k="Greeting" v="Personalised template" theme={theme} />
                   <KV k="Disclosure block" v={disclosure ? 'Enabled' : 'Disabled'} theme={theme} />
+                  <KV k="STT mode" v={sttMode === 'ws' ? 'WebSocket streaming' : 'Chunk (batch)'} theme={theme} />
+                  <KV k="LLM model" v={connName(connectionSel.llm)} theme={theme} />
+                  <KV k="TTS voice" v={connName(connectionSel.tts)} theme={theme} />
+                  <KV k="STT model" v={connName(connectionSel.stt)} theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Flow & knowledge" theme={theme}>
-                  <KV k="Script nodes" v={`${FLOW_NODES.length + FLOW_BRANCHES.length}`} theme={theme} />
-                  <KV k="Branches" v={`${FLOW_BRANCHES.length}`} theme={theme} />
+                  <KV k="Flow nodes" v={`${flowNodeCount}`} theme={theme} />
+                  <KV k="Branches" v={`${flowBranchCount}`} theme={theme} />
+                  <KV k="Start node" v={flow.start || '—'} theme={theme} mono />
                   <KV k="RAG index" v={ragIndex} theme={theme} mono />
-                  <KV k="Escalation rules" v="4" theme={theme} />
                 </ReviewBlock>
                 <ReviewBlock title="Preflight checks" theme={theme}>
                   {preflight.map((pf, i) => (
@@ -350,8 +334,11 @@ export function BotBuilderView({ onDeploy, onCancel, theme }: { onDeploy: (confi
               ← Back
             </button>
             <span className="text-[12px]" style={{ color: theme.faint }}>
-              {step === 3 && `${FLOW_BRANCHES.length} branches · ${FLOW_NODES.length + FLOW_BRANCHES.length} nodes · 0 unmapped variables`}
-              {step === 5 && `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${preflight.filter(p => !p.ok).length} warning`}
+              {step === 3 && `${flowNodeCount} node${flowNodeCount === 1 ? '' : 's'} · ${flowBranchCount} branch${flowBranchCount === 1 ? '' : 'es'} · ${flowErrors} error${flowErrors === 1 ? '' : 's'}`}
+              {step === 5 && (() => {
+                const warnings = preflight.filter(p => !p.ok).length;
+                return `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${warnings} warning${warnings === 1 ? '' : 's'}`;
+              })()}
             </span>
             {step < 5 ? (
               <button onClick={() => setStep((step + 1) as BuilderStep)} className="text-[13px] font-bold px-5 py-2 rounded-md text-white" style={{ backgroundColor: theme.primary }}>

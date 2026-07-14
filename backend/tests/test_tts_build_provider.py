@@ -35,7 +35,10 @@ async def test_sarvam_and_magpie_both_enabled_routes_hi_and_hinglish(monkeypatch
         KOEL_NVIDIA_API_KEY="nvapi-test",
     )
     assert isinstance(provider, RoutingTtsProvider)
-    assert provider._langs == {"hi", "hinglish"}  # noqa: SLF001
+    # With Sarvam enabled it handles its full language set (hi/hinglish + the 4.1
+    # Indian languages), not just the NVIDIA/Magpie set.
+    assert {"hi", "hinglish"} <= provider._langs  # noqa: SLF001
+    assert {"ta", "te", "mr", "bn"} <= provider._langs  # noqa: SLF001
     assert isinstance(provider._hindi, SarvamTtsProvider)  # noqa: SLF001
     assert isinstance(provider._hindi._hi_fallback, NvidiaMagpieTtsProvider)  # noqa: SLF001
 

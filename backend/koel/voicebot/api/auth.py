@@ -9,6 +9,7 @@ from __future__ import annotations
 import bcrypt
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from koel.common.auth import CurrentUser, issue_token
 from koel.common.config import get_common_settings
@@ -16,6 +17,8 @@ from koel.common.errors import ApiError
 from koel.common.http import make_async_client
 from koel.common.logging import get_logger
 from koel.common.ratelimit import rate_limit
+from koel.db.models import User
+from koel.db.session import session_scope
 
 logger = get_logger("koel.voicebot.auth")
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -39,9 +42,22 @@ def _verify(password: str, hashed: bytes) -> bool:
         return False
 
 
-# Seeded demo credentials (acceptable for showcases per PRD §08). Hashed at
-# import so no plaintext password sits in memory beyond startup.
-_DEMO_USERS: dict[str, bytes] = {"demo": _hash("koel-demo")}
+# Constant-work decoy for the unknown-user branch: verifying the presented
+# password against a throwaway hash keeps login's timing (and thus its 401)
+# indistinguishable between "no such user" and "wrong password", so an attacker
+# can't enumerate valid usernames by response time.
+_DECOY_HASH: bytes = _hash("koel-nonexistent-user-timing-guard")
+
+
+def _invalid_credentials() -> ApiError:
+    """The one 401 both bad-username and bad-password raise — identical code +
+    message so login never leaks WHICH half of the credential was wrong (PRD §08).
+    Built fresh per call so each raise carries its own traceback."""
+    return ApiError(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        code="invalid_credentials",
+        message="Invalid username or password.",
+    )
 
 
 class LoginRequest(BaseModel):
@@ -99,14 +115,26 @@ async def login(payload: LoginRequest) -> TokenResponse:
                 code="turnstile_failed",
                 message="Human verification failed. Please retry the challenge.",
             )
-    hashed = _DEMO_USERS.get(payload.username)
-    if not hashed or not _verify(payload.password, hashed):
-        raise ApiError(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            code="invalid_credentials",
-            message="Invalid username or password.",
+    # Look the user up in the Users table (6.4 follow-up). The token is minted
+    # carrying THIS user's org_id + role, so a logged-in operator is scoped to
+    # their tenant. org_id=None (platform-admin, e.g. the demo user) mints the
+    # unscoped "sees all" principal — the convention every scoped router honours.
+    async with session_scope() as db:
+        user = (
+            await db.execute(select(User).where(User.username == payload.username))
+        ).scalar_one_or_none()
+    if user is None or not user.active:
+        # Decoy verify keeps timing constant so an unknown username can't be told
+        # apart from a wrong password; both raise the identical 401.
+        _verify(payload.password, _DECOY_HASH)
+        raise _invalid_credentials()
+    if not _verify(payload.password, user.password_hash):
+        raise _invalid_credentials()
+    return TokenResponse(
+        access_token=issue_token(
+            user.username, kind="access", role=user.role, org_id=user.org_id
         )
-    return TokenResponse(access_token=issue_token(payload.username, kind="access"))
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(_token_limit)])

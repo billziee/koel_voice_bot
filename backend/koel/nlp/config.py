@@ -15,8 +15,9 @@ from koel.common.config import CommonSettings
 
 class NlpSettings(CommonSettings):
     # --- Provider selection ---
-    # "stub"  → deterministic heuristic generator (CI / offline demo)
-    # "groq"  → live Groq inference (OpenAI-compatible chat completions)
+    # "stub"   → deterministic heuristic generator (CI / offline demo)
+    # "groq"   → live Groq inference (OpenAI-compatible chat completions, US-hosted)
+    # "sarvam" → live Sarvam inference (India-hosted; O-7 Track A residency path)
     nlp_provider: str = "stub"
 
     # --- Groq (https://console.groq.com) ---
@@ -39,6 +40,18 @@ class NlpSettings(CommonSettings):
     # Spoken turns are 1-3 sentences; a tight cap ends generation sooner (latency).
     groq_max_tokens: int = 160
     groq_timeout_s: float = 8.0
+
+    # --- Sarvam (O-7 Track A: India-hosted NLP for DPDP/RBI residency) ---
+    # Sarvam's chat API is OpenAI-compatible in body (messages + JSON mode), so
+    # SarvamNlpProvider reuses all of GroqNlpProvider's prompt/parse/stream logic —
+    # only the endpoint + auth header differ. Empty key ⇒ never selected.
+    sarvam_api_key: str | None = None
+    sarvam_base_url: str = "https://api.sarvam.ai"
+    sarvam_model: str = "sarvam-m"
+
+    @property
+    def sarvam_nlp_enabled(self) -> bool:
+        return self.nlp_provider.lower() == "sarvam" and bool(self.sarvam_api_key)
 
     # --- RAG embeddings (Groq has NO embedding model) ---
     # "hash"      → deterministic stub (CI/offline; semantically weak)

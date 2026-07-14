@@ -44,6 +44,20 @@ class VoiceBotSettings(CommonSettings):
     smart_turn_threshold: float = 0.5
     smart_turn_hold_ms: int = 1500
 
+    # Speculative RAG (O-5): while the smart-turn gate HOLDS a mid-thought
+    # transcript, fire RAG retrieval in the background on the held text so the
+    # chunks are already in hand when the turn runs — hiding retrieval latency.
+    # Reused only when the final transcript hasn't diverged from the speculative
+    # query (see pipeline/specrag.py); a miss/divergence/error silently degrades
+    # to NLP-side retrieval. Only ever fires on the hold path, so the batch /
+    # no-smart-turn path is unaffected. On by default; a kill-switch for safety.
+    speculative_rag_enabled: bool = True
+    # Upper bound (ms) the turn will wait for the in-flight speculative pre-fetch
+    # to finish before giving up and letting NLP_svc retrieve. It normally
+    # completed during the hold window; this only caps a straggler so the turn is
+    # never blocked on it.
+    spec_retrieval_await_ms: int = 500
+
     # Silence / timeout rules (PRD §05 table).
     # Silence AFTER the bot's audio finishes before a re-prompt/close. 5s felt
     # impatient on real calls (fired while the caller was still thinking), so the

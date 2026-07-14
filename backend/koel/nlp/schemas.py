@@ -35,6 +35,12 @@ class Sentiment(str, Enum):
     negative = "negative"
 
 
+class RetrievedChunk(BaseModel):
+    title: str
+    content: str
+    score: float
+
+
 class TurnContext(BaseModel):
     """One customer turn handed to NLP_svc, with the context VB_Svc has gathered."""
 
@@ -58,12 +64,16 @@ class TurnContext(BaseModel):
     llm_model: str | None = None
     llm_temperature: float | None = None
     prompt_preamble: str | None = None
-
-
-class RetrievedChunk(BaseModel):
-    title: str
-    content: str
-    score: float
+    # BYOK: id of the org's custom LLM ModelConnection to run this turn on. NLP_svc
+    # resolves it server-side (decrypts the key) and builds an OpenAI-compatible
+    # provider; None ⇒ the service-default provider. Only the id crosses the wire.
+    llm_connection_id: str | None = None
+    # Speculative RAG (O-5): KB chunks VB_Svc pre-fetched during the endpointing
+    # hold window, before the final transcript triggered the turn. When non-empty
+    # NLP_svc USES these and SKIPS its own retrieval (no double retrieval); empty
+    # ⇒ NLP_svc retrieves as usual. Defaulted so existing callers/serialized
+    # bodies stay valid.
+    retrieved: list[RetrievedChunk] = Field(default_factory=list)
 
 
 class Citation(BaseModel):
@@ -86,6 +96,11 @@ class NlpResponse(BaseModel):
     escalate: bool = False
     escalation_reason: str | None = None
     end_call: bool = False
+    # Structured in-call actions the model requests (2.1): e.g.
+    # {"type": "send_payment_link", "amount": 4500} / {"type": "promise_to_pay",
+    # "amount": 4500, "date": "2026-07-20"}. The orchestrator dispatches them
+    # deterministically after the turn; unknown/malformed entries are ignored.
+    actions: list[dict] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0, default=0.8)
     retrieved: list[RetrievedChunk] = Field(default_factory=list)
     # KB chunks the reply cited; empty when the turn asserts no product fact.

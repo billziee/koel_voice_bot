@@ -1,16 +1,20 @@
 import { useState } from 'react';
 import { Lock } from 'lucide-react';
 
-import type { Bot, BotConfig, AmbientProfile, Tone, UseCase } from '../types';
+import type { Bot, BotConfig, AmbientProfile, Tone, UseCase, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
 import { KV } from '../components/KV';
+import { SttModeSelector } from '../components/SttModeSelector';
+import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
+import { useConnections } from '../hooks/useConnections';
+import { FlowEditor, defaultFlow } from '../components/FlowEditor';
 
 // Default config seed per use case (ConfigView-only).
 const DEFAULT_CONFIGS: Record<UseCase, BotConfig> = {
-  'Credit Card': { name: 'HDFC Card Cross-Sell', useCase: 'Credit Card Cross-Sell', language: 'Hinglish', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'hdfc_regalia_benefits_v2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai. Aapke account par ek pre-approved {offer.product} offer hai. Do minute baat kar sakte hain?', tone: 'cheerful' },
-  'Collections': { name: 'ICICI Pre-Due Collections', useCase: 'Collections — Pre-Due (DPD 0–30)', language: 'Hindi', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'icici_collection_guidelines_2026', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated reminder call hai.', tone: 'firm' },
-  'Insurance': { name: 'MaxLife Term Pitch', useCase: 'Life Insurance Sell (IRDAI flow)', language: 'English', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'okay', 'yeah', 'right', 'I see'], ragEnabled: true, ragIndex: 'maxlife_term_disclosures', greeting: 'Hello {customer.name} sir, this is KOEL calling from MaxLife — this is an automated call.', tone: 'cheerful' },
-  'Personal Loan': { name: 'Axis Loan Origination', useCase: 'Personal Loan Sell', language: 'Hinglish', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'axis_pl_rate_card_q2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai.', tone: 'cheerful' },
+  'Credit Card': { name: 'HDFC Card Cross-Sell', useCase: 'Credit Card Cross-Sell', language: 'Hinglish', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'hdfc_regalia_benefits_v2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai. Aapke account par ek pre-approved {offer.product} offer hai. Do minute baat kar sakte hain?', tone: 'cheerful', sttMode: 'chunk' },
+  'Collections': { name: 'ICICI Pre-Due Collections', useCase: 'Collections — Pre-Due (DPD 0–30)', language: 'Hindi', persona: 'Kore — Female, Firm & Professional', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'icici_collection_guidelines_2026', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated reminder call hai.', tone: 'firm', sttMode: 'chunk' },
+  'Insurance': { name: 'MaxLife Term Pitch', useCase: 'Life Insurance Sell (IRDAI flow)', language: 'English', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'okay', 'yeah', 'right', 'I see'], ragEnabled: true, ragIndex: 'maxlife_term_disclosures', greeting: 'Hello {customer.name} sir, this is KOEL calling from MaxLife — this is an automated call.', tone: 'cheerful', sttMode: 'chunk' },
+  'Personal Loan': { name: 'Axis Loan Origination', useCase: 'Personal Loan Sell', language: 'Hinglish', persona: 'Zephyr — Female, Bright & Cheerful', speed: 1.0, ambientVolume: 20, ambientProfile: 'callfloor', backchannels: ['hmm', 'haan', 'okay', 'achha', 'theek hai', 'yeah'], ragEnabled: true, ragIndex: 'axis_pl_rate_card_q2', greeting: 'Namaste {customer.name} ji, main {bank} ki taraf se KOEL bol rahi hoon — yeh ek automated call hai.', tone: 'cheerful', sttMode: 'chunk' },
 };
 
 interface ConfigViewProps {
@@ -20,9 +24,14 @@ interface ConfigViewProps {
   onSave: (config: BotConfig) => void;
   onCancel: () => void;
   theme: Theme;
+  token: string | null;
 }
 
-export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: ConfigViewProps) {
+// Normalise a selection so comparisons ignore key ordering / undefined kinds.
+const connKey = (sel: ConnectionSelection): string =>
+  JSON.stringify({ llm: sel.llm ?? null, tts: sel.tts ?? null, stt: sel.stt ?? null });
+
+export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme, token }: ConfigViewProps) {
   // Seed from existing config > bot defaults > empty
   const seed = existingConfig || (bot ? DEFAULT_CONFIGS[bot.useCase] : undefined);
 
@@ -38,10 +47,43 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
   const [ragIndex, setRagIndex] = useState(seed?.ragIndex || 'hdfc_regalia_benefits_v2');
   const [greeting, setGreeting] = useState(seed?.greeting || '');
   const [tone] = useState<Tone>(seed?.tone || 'cheerful');
+  // Seed priority: config saved this session > backend-persisted config.stt_mode
+  // (carried on the Bot) > default. Chunk is the default when nothing is set.
+  const initialSttMode: SttMode = existingConfig?.sttMode ?? bot?.sttMode ?? 'chunk';
+  const [sttMode, setSttMode] = useState<SttMode>(initialSttMode);
+  // Scripted flow (6.6): seed priority mirrors sttMode — config saved this
+  // session > backend-hydrated bot.flow > a minimal default starter.
+  const seedFlow: Flow = existingConfig?.flow ?? bot?.flow ?? defaultFlow();
+  const [flow, setFlow] = useState<Flow>(seedFlow);
+  // Per-bot BYOK model selection (Phase 4). Seed priority mirrors sttMode/flow:
+  // config saved this session > backend-hydrated bot.connections > none. The
+  // available list is fetched via the token; it degrades to Default-only on failure.
+  const availableConnections = useConnections(token);
+  const seedConnections: ConnectionSelection = existingConfig?.connections ?? bot?.connections ?? {};
+  const [connectionSel, setConnectionSel] = useState<ConnectionSelection>(seedConnections);
 
   const handleSave = () => {
-    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone });
+    onSave({ name, useCase, language, persona, speed, ambientVolume, ambientProfile, backchannels, ragEnabled, ragIndex, greeting, tone, sttMode, flow, connections: connectionSel });
   };
+
+  // Truthful status badge (Q-3): only claim "unsaved changes" when an editable
+  // field actually diverges from what was seeded. Mirrors the useState defaults
+  // so a freshly-opened, untouched form reads as clean. A brand-new bot is
+  // inherently unsaved until the first save.
+  const isDirty =
+    name !== (seed?.name || '') ||
+    useCase !== (seed?.useCase || 'Credit Card Cross-Sell') ||
+    language !== (seed?.language || 'Hinglish') ||
+    persona !== (seed?.persona || 'Kore — Female, Firm & Professional') ||
+    speed !== (seed?.speed || 1.0) ||
+    ambientProfile !== (seed?.ambientProfile || 'callfloor') ||
+    ragEnabled !== (seed?.ragEnabled ?? true) ||
+    ragIndex !== (seed?.ragIndex || 'hdfc_regalia_benefits_v2') ||
+    greeting !== (seed?.greeting || '') ||
+    sttMode !== initialSttMode ||
+    JSON.stringify(flow) !== JSON.stringify(seedFlow) ||
+    connKey(connectionSel) !== connKey(seedConnections);
+  const showDraft = isNew || isDirty;
 
   const [disclosureEnabled, setDisclosureEnabled] = useState(true);
 
@@ -70,7 +112,13 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
             {bot?.name || name || 'HDFC Credit Card'} · {useCase || 'Cross-sell template'}
           </p>
         </div>
-        <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.primaryLight, color: theme.primary }}>Draft — unsaved changes</span>
+        {showDraft ? (
+          <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.primaryLight, color: theme.primary }}>
+            {isNew ? 'New — unsaved' : 'Unsaved changes'}
+          </span>
+        ) : (
+          <span className="px-3 py-1 rounded-md text-[12px] font-medium" style={{ backgroundColor: theme.ruleSubtle, color: theme.faint }}>Saved</span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -112,6 +160,12 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
                 <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Greeting script template</label>
                 <textarea className="w-full border rounded-md px-3 py-2 text-[13px] outline-none focus:ring-2 min-h-[80px] resize-y" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard, color: theme.ink, fontFamily: '"DM Sans", sans-serif' }} value={greeting} onChange={e => setGreeting(e.target.value)} placeholder="Namaste {customer_name} ji, main {bank_name} ki taraf se KOEL bol rahi hoon..." />
                 <p className="text-[11px] mt-1" style={{ color: theme.faint }}>Variables in braces resolve from CRM at session start.</p>
+              </div>
+              <SttModeSelector value={sttMode} onChange={setSttMode} theme={theme} />
+              <div>
+                <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>Model connections</label>
+                <ModelConnectionSelectors connections={availableConnections} value={connectionSel} onChange={setConnectionSel} theme={theme} />
+                <p className="text-[11px] mt-1.5" style={{ color: theme.faint }}>Choose a BYOK provider per stage, or leave on Default (built-in). Manage providers under Model Connections.</p>
               </div>
             </div>
           </div>
@@ -232,6 +286,17 @@ export function ConfigView({ bot, existingConfig, onSave, onCancel, theme }: Con
               <KV k="Hard rejection handling" v="Log + suppress 30 days" theme={theme} />
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* Conversation flow — real editor (canvas + form), full width */}
+      <div className="mt-4 rounded-lg border overflow-hidden" style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard }}>
+        <div className="p-4 border-b" style={{ borderColor: theme.ruleSubtle }}>
+          <div className="text-[14px] font-semibold" style={{ color: theme.ink }}>Conversation flow</div>
+          <div className="text-[12px]" style={{ color: theme.faint }}>Scripted state machine that scaffolds the LLM — nodes carry per-turn guidance, branches route on detected intent.</div>
+        </div>
+        <div className="p-4">
+          <FlowEditor value={flow} onChange={setFlow} theme={theme} />
         </div>
       </div>
 

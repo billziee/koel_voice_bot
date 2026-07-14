@@ -66,14 +66,46 @@ class SessionState(BaseModel):
     llm_temperature: float | None = None
     prompt_preamble: str | None = None
     default_tone: Tone = Tone.neutral
+    # Per-bot STT transport (roadmap O-6): "chunk" (default — today's batch
+    # POST /v1/transcribe path) or "ws" (opt-in — consume the streaming STT
+    # endpoint that runs Sarvam's verified /speech-to-text/ws, degrading to
+    # batch on any error). Plain Redis-safe string; seeded from BotConfig.config
+    # ["stt_mode"] in build_session_state and defaulted so existing serialized
+    # Redis states stay valid.
+    stt_mode: str = "chunk"
     # Persona (G): carried from bot config into every SynthesizeRequest.
     voice_gender: str = "female"
+    voice: str | None = None  # per-bot persona voice id (4.2); None → engine default
     speaking_rate: float = 1.0
     ambient_profile: str = "callfloor"
     greeting_template: str = ""  # from bot config; rendered with CRM fields at greet
     # Per-bot backchannel overrides (PRD §05): {language: [words…]} merged on top
     # of the default dictionary so a bot instance can tune its Gate-2 vocabulary.
     backchannels: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-bot script-adherence QA rules (5.5): required_disclosures /
+    # prohibited_phrases / required_intents. Empty ⇒ QA is skipped at call end.
+    qa_rules: dict = Field(default_factory=dict)
+    # Per-bot post-call follow-up templates (2.4): outcome → message text.
+    followup_templates: dict = Field(default_factory=dict)
+    # Per-bot scripted conversation flow (6.6): the raw {start, nodes} dict from
+    # BotConfig.config["flow"]. None ⇒ unscripted (LLM-only). Re-parsed per turn
+    # (parse_flow is pure/cheap) since the parsed Flow isn't Redis-serializable.
+    flow: dict | None = None
+    # Current position in that flow; None ⇒ no/invalid flow. Advances once per
+    # completed customer turn on the returned intent.
+    flow_node_id: str | None = None
+    # BYOK model-connection ids per role (custom LLM/TTS/STT). Seeded from
+    # BotConfig.config["connections"]; None ⇒ the service-default provider. Only
+    # the id is carried (to TurnContext / SynthesizeRequest / TranscribeRequest);
+    # each service resolves + decrypts the key server-side.
+    llm_connection_id: str | None = None
+    tts_connection_id: str | None = None
+    stt_connection_id: str | None = None
+    # A/B experiment arm this call was assigned (6.3), "<exp>:<variant>" or None.
+    variant_id: str | None = None
+    # Consent-required bots (2.3): the disclosure version read this call. Set ⇒ an
+    # evidentiary ConsentRecord is written at call end when the customer affirms.
+    consent_disclosure_version: str | None = None
     # Audit fields (PRD §11 / §14). recording_url is the intended S3 object;
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None

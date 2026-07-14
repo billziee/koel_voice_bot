@@ -13,7 +13,7 @@ from koel.common.logging import get_logger
 from koel.common.schemas import Tone
 from koel.common.telemetry import span
 from koel.nlp.config import get_nlp_settings
-from koel.nlp.providers import GroqNlpProvider, NlpProvider, StubNlpProvider
+from koel.nlp.providers import GroqNlpProvider, NlpProvider, SarvamNlpProvider, StubNlpProvider
 from koel.nlp.rag import build_embedder, retrieve
 from koel.nlp.schemas import Intent, NlpResponse, NlpStreamFrame, RetrievedChunk, TurnContext
 
@@ -23,8 +23,9 @@ logger = get_logger("koel.nlp_svc")
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     yield
-    # Release provider + embedder HTTP client pools on shutdown.
-    for obj in (_provider, _embedder):
+    # Release provider + embedder + any BYOK per-connection HTTP client pools.
+    byok = [p for _, p in _conn_providers.values()]
+    for obj in (_provider, _embedder, *byok):
         aclose = getattr(obj, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -40,6 +41,17 @@ app = create_app(
 
 def _build_provider() -> NlpProvider:
     settings = get_nlp_settings()
+    if settings.sarvam_nlp_enabled:
+        # O-7 Track A: India-hosted NLP. Reuses the Groq JSON-mode contract.
+        return SarvamNlpProvider(
+            api_key=settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_nlp_enabled guards None
+            model=settings.sarvam_model,
+            base_url=settings.sarvam_base_url,
+            hinglish_script=settings.hinglish_script,
+            temperature=settings.groq_temperature,
+            max_tokens=settings.groq_max_tokens,
+            timeout_s=settings.groq_timeout_s,
+        )
     if settings.groq_enabled:
         return GroqNlpProvider(
             api_key=settings.groq_api_key,  # type: ignore[arg-type]  # groq_enabled guards None
@@ -59,6 +71,57 @@ _settings = get_nlp_settings()
 _provider = _build_provider()
 _embedder = build_embedder(_settings)
 router = APIRouter(prefix="/v1", tags=["nlp"])
+
+# BYOK per-connection LLM providers, cached by a signature of the resolved
+# connection so an edit (new key/url/model/params) rebuilds instead of serving a
+# stale client. Bounded implicitly by the number of distinct custom connections.
+_conn_providers: dict[str, tuple[str, NlpProvider]] = {}
+
+
+def _conn_signature(resolved) -> str:  # noqa: ANN001 — ResolvedConnection
+    p = resolved.params or {}
+    return (
+        f"{resolved.base_url}|{resolved.model}|{hash(resolved.api_key)}"
+        f"|{p.get('temperature')}|{p.get('max_tokens')}"
+    )
+
+
+async def _provider_for(ctx: TurnContext) -> NlpProvider:
+    """The LLM provider for this turn: a per-bot BYOK connection when set, else
+    the service default. BYOK never breaks a turn — any resolve/build failure
+    (no key, inactive, undecryptable, secrets disabled) falls back to the default."""
+    if not ctx.llm_connection_id:
+        return _provider
+    try:
+        from koel.common.model_connections import resolve_connection
+
+        resolved = await resolve_connection(ctx.llm_connection_id, ctx.org_id)
+        if resolved is None or resolved.kind != "llm":
+            return _provider
+        sig = _conn_signature(resolved)
+        cached = _conn_providers.get(ctx.llm_connection_id)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        params = resolved.params or {}
+        provider = GroqNlpProvider(
+            api_key=resolved.api_key,
+            model=resolved.model or _settings.groq_model,
+            base_url=resolved.base_url or _settings.groq_base_url,
+            temperature=float(params.get("temperature", _settings.groq_temperature)),
+            max_tokens=int(params.get("max_tokens", _settings.groq_max_tokens)),
+            timeout_s=_settings.groq_timeout_s,
+            hinglish_script=_settings.hinglish_script,
+        )
+        if cached is not None:  # rebuild on edit → release the stale client
+            old = cached[1]
+            aclose = getattr(old, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        _conn_providers[ctx.llm_connection_id] = (sig, provider)
+        return provider
+    except Exception:  # noqa: BLE001 — BYOK is best-effort; never break the turn
+        logger.warning("byok_llm_provider_failed conn=%s; using default", ctx.llm_connection_id)
+        return _provider
 
 
 async def _retrieve_for(ctx: TurnContext) -> list[RetrievedChunk]:
@@ -86,12 +149,25 @@ async def _retrieve_for(ctx: TurnContext) -> list[RetrievedChunk]:
             return []
 
 
+@router.post("/retrieve", response_model=list[RetrievedChunk])
+async def retrieve_route(ctx: TurnContext, _: ServicePrincipal) -> list[RetrievedChunk]:
+    """Speculative RAG retrieval (O-5): VB_Svc pre-fetches the KB chunks for a
+    held transcript DURING the endpointing hold window, so they are already in
+    hand when the turn runs (hiding retrieval latency). Same body shape + auth as
+    ``/respond``; RAG-disabled or an empty index ⇒ ``[]`` (degrade-safe)."""
+    with span("nlp.retrieve", session_id=ctx.session_id, rag_index=ctx.rag_index):
+        return await _retrieve_for(ctx)
+
+
 @router.post("/respond", response_model=NlpResponse)
 async def respond(ctx: TurnContext, _: ServicePrincipal) -> NlpResponse:
     """Classify intent, retrieve RAG context, generate the next bot turn."""
-    retrieved = await _retrieve_for(ctx)
+    # O-5: honour chunks VB_Svc pre-fetched during the hold window — using them
+    # skips a second retrieval. Empty ⇒ retrieve now, exactly as before.
+    retrieved = ctx.retrieved or await _retrieve_for(ctx)
+    provider = await _provider_for(ctx)  # BYOK per-bot LLM connection or the default
     with span("nlp.generate", session_id=ctx.session_id, intent_known=bool(ctx.customer_text)):
-        return await _provider.generate(ctx, retrieved)
+        return await provider.generate(ctx, retrieved)
 
 
 @router.post("/respond/stream")
@@ -100,13 +176,15 @@ async def respond_stream(ctx: TurnContext, _: ServicePrincipal) -> StreamingResp
     then a terminal ``final`` frame with the full NlpResponse. VB_Svc feeds each
     sentence into sentence-streaming TTS as it arrives instead of waiting for the
     whole completion; the batch /respond route stays the fallback."""
-    retrieved = await _retrieve_for(ctx)
+    # O-5: use VB_Svc's pre-fetched chunks when present; else retrieve now.
+    retrieved = ctx.retrieved or await _retrieve_for(ctx)
+    provider = await _provider_for(ctx)  # BYOK per-bot LLM connection or the default
 
     async def _gen():
         with span("nlp.generate_stream", session_id=ctx.session_id):
             emitted_final = False
             try:
-                async for frame in _provider.generate_stream(ctx, retrieved):
+                async for frame in provider.generate_stream(ctx, retrieved):
                     emitted_final = emitted_final or frame.type == "final"
                     yield frame.model_dump_json() + "\n"
             except Exception:  # noqa: BLE001 — the consumer's contract needs a terminal frame

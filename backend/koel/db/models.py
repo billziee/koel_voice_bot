@@ -23,6 +23,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -81,6 +82,87 @@ class UseCase(str, enum.Enum):
     personal_loan = "personal_loan"
     insurance = "insurance"
     custom = "custom"
+
+
+# --- Tenant registry (6.4 Multi-tenant enablement) --------------------------
+
+
+class Org(Base):
+    """Authoritative tenant (organization) registry.
+
+    Org scoping is already pervasive — every table carries a nullable indexed
+    ``org_id`` and the read/list routers filter by it (AF). What was missing to
+    actually *enable* multi-tenancy is the registry those ids point at. Adding
+    it (plus the cross-tenant isolation gate proven in the test suite) is what
+    turns the dormant scoping into real multi-tenancy; it is deliberately NOT a
+    destructive backfill — single-tenant pilot rows keep ``org_id=NULL``.
+    """
+
+    __tablename__ = "orgs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class User(Base):
+    """Operator/admin login identity, mapped to an org (6.4 follow-up).
+
+    This closes the last gap in tenant scoping: login (``koel.voicebot.api.auth``)
+    looks the user up by ``username``, verifies the bcrypt ``password_hash``, and
+    mints a token carrying this user's ``org_id`` + ``role`` — so a logged-in
+    operator is scoped to their tenant instead of the unscoped "sees all"
+    principal every prior login minted.
+
+    ``org_id=None`` is the platform-admin / single-tenant "sees all" principal —
+    the SAME convention every scoped table's nullable ``org_id`` already uses
+    (None = no tenant filter). A tenant-scoped user carries their org's id.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[bytes] = mapped_column(LargeBinary)  # bcrypt hash — never plaintext
+    # Tenant scope. None = platform-admin / single-tenant "sees all" (AF convention).
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="operator")
+    active: Mapped[bool] = mapped_column(default=True)  # soft-disable without deletion
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# --- BYOK model connections (custom LLM/TTS/STT) ----------------------------
+
+
+class ModelConnection(Base):
+    """A reusable, org-scoped connection to a customer-supplied model provider
+    (BYOK): an OpenAI-compatible or vendor LLM / TTS / STT endpoint. Bots select
+    one per role via ``BotConfig.config['connections']``.
+
+    The ``api_key_encrypted`` column stores the provider key encrypted at rest
+    (Fernet, see ``koel.common.crypto``) — never plaintext, never returned by the
+    API, never sent on the inter-service wire (only the connection id travels;
+    each service decrypts server-side to build its provider).
+    """
+
+    __tablename__ = "model_connections"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # AF; None = shared
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(8))  # "llm" | "tts" | "stt"
+    provider: Mapped[str] = mapped_column(String(32), default="openai_compatible")
+    base_url: Mapped[str] = mapped_column(String(256), default="")
+    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    # Role-specific tuning: temperature/top_p/max_tokens (llm), voice/encoding
+    # (tts), language/interim (stt), plus persona/preamble. Free-form so a new
+    # provider needs no migration.
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 # --- CRM (Dummy CRM, PRD §06 / §10) -----------------------------------------
@@ -222,6 +304,92 @@ class EscalationRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExportJob(Base):
+    """Audit trail of a regulatory export (6.5). The export itself is a JSONL
+    bundle + SHA-256 manifest; this row records who exported which range, how
+    many records, the manifest hash, and where the bundle landed — the export
+    action is itself audit-relevant (PRD §10 / §11)."""
+
+    __tablename__ = "export_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    range_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    range_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    record_count: Mapped[int] = mapped_column(Integer, default=0)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), default="")
+    object_url: Mapped[str | None] = mapped_column(String(256), nullable=True)  # None ⇒ returned inline
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ConsentRecord(Base):
+    """Evidentiary verbal-consent record (2.3, PRD §04 insurance / §11 IRDAI).
+
+    Links the exact transcript turn where the customer affirmed consent to the
+    call recording + the disclosure version read to them, so the consent is
+    verifiable after the fact. Written at call end only for consent-required bots."""
+
+    __tablename__ = "consent_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    call_id: Mapped[str] = mapped_column(String(32), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    disclosure_version: Mapped[str] = mapped_column(String(64), default="")
+    turn_index: Mapped[int] = mapped_column(Integer, default=-1)  # transcript turn that affirmed
+    consent_text: Mapped[str] = mapped_column(Text, default="")  # the customer's affirmative words
+    recording_url: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DialAttemptStatus(str, enum.Enum):
+    """Lifecycle of one outbound dial (1.2)."""
+
+    pending = "pending"  # due at scheduled_at, not yet claimed
+    in_progress = "in_progress"  # a worker claimed it and is dialing
+    done = "done"  # connected + completed (terminal)
+    failed = "failed"  # exhausted retries / non-retryable outcome (terminal)
+
+
+class Campaign(Base):
+    """An outbound campaign (1.2): a bot dialing a segment within a window, with a
+    retry policy. The dialer worker originates ``DialAttempt`` rows for it."""
+
+    __tablename__ = "campaigns"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    bot_id: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(128), default="")
+    active: Mapped[bool] = mapped_column(default=True)
+    # {max_attempts, backoff_seconds, retry_outcomes: [...]} — see pipeline/dialer.py.
+    retry_policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DialAttempt(Base):
+    """One scheduled outbound dial (1.2) — also backs scheduled callbacks (2.5).
+    A worker claims due rows (``pending`` + ``scheduled_at`` <= now) with
+    FOR UPDATE SKIP LOCKED so multiple workers don't double-dial."""
+
+    __tablename__ = "dial_attempts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    campaign_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phone: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[DialAttemptStatus] = mapped_column(
+        Enum(DialAttemptStatus), default=DialAttemptStatus.pending, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+    last_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 # --- RAG knowledge base (pgvector) ------------------------------------------

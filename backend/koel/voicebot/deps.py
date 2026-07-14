@@ -14,6 +14,7 @@ from fastapi import Request
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.escalation import EscalationHub
+from koel.voicebot.monitor import LiveMonitor
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer
 from koel.voicebot.pipeline.filler import FillerCache
@@ -34,6 +35,8 @@ class Runtime:
     # Live operator↔caller bridge for human handoff (3.1). Shared across the WS
     # handler (caller side) and the operator REST API (operator side).
     escalations: EscalationHub = field(default_factory=EscalationHub)
+    # Read-only live view of in-flight calls for supervisor oversight (3.3).
+    monitor: LiveMonitor = field(default_factory=LiveMonitor)
     # Strong refs to detached grace-window finalizers (PRD §05 dropped calls),
     # so they survive after the WebSocket handler returns.
     background_tasks: set[asyncio.Task] = field(default_factory=set)

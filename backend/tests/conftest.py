@@ -21,12 +21,20 @@ from koel.db.models import (
     BotConfig,
     BotConfigAudit,
     CallLog,
+    Campaign,
+    ConsentRecord,
     CrmCustomer,
+    DialAttempt,
     EscalationRequest,
+    ExportJob,
     InteractionLogRow,
+    ModelConnection,
+    Org,
     TranscriptTurn,
     UseCase,
+    User,
 )
+from koel.db.seed_users import seed_users
 from koel.tts.providers import StubOrpheusProvider
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline.bargein import BargeInClassifier
@@ -48,6 +56,9 @@ def _clear_tts_cache():
 
 # Tables we can create on SQLite (excludes KnowledgeChunk — pgvector Vector type).
 _SQLITE_TABLES = [
+    Org.__table__,
+    User.__table__,
+    ModelConnection.__table__,
     CrmCustomer.__table__,
     BotConfig.__table__,
     CallLog.__table__,
@@ -55,16 +66,28 @@ _SQLITE_TABLES = [
     InteractionLogRow.__table__,
     BotConfigAudit.__table__,
     EscalationRequest.__table__,
+    ExportJob.__table__,
+    ConsentRecord.__table__,
+    Campaign.__table__,
+    DialAttempt.__table__,
 ]
 
 
 @pytest.fixture
 async def test_db(monkeypatch):
-    """In-memory SQLite bound into koel.db.session for the duration of a test."""
+    """In-memory SQLite bound into koel.db.session for the duration of a test.
+
+    Seeds the demo login users (``demo`` platform-admin + the two org-scoped
+    operators) so the DB-backed ``/v1/auth/login`` works against the in-memory DB
+    the same way it would against a bootstrapped Postgres.
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: CallLog.metadata.create_all(c, tables=_SQLITE_TABLES))
     maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as s:
+        await seed_users(s)
+        await s.commit()
     monkeypatch.setattr("koel.db.session.get_sessionmaker", lambda: maker)
     yield maker
     await engine.dispose()
@@ -132,6 +155,12 @@ class FakeClients:
     async def transcribe(self, request):  # noqa: ANN001
         raise NotImplementedError
 
+    async def stream_transcribe(self, request):  # noqa: ANN001 — O-6 ws-mode STT stand-in
+        # Mirror the real client's batch-fallback shape: yield one final result
+        # from transcribe(). Subclasses that only override transcribe() get a
+        # working stream_transcribe for free; ws-mode tests override this directly.
+        yield await self.transcribe(request)
+
     async def warm_up(self) -> None:  # O-1 session warm-up — no-op in tests
         pass
 
@@ -178,6 +207,37 @@ async def app_client(test_db):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, runtime
     app.dependency_overrides.clear()
+
+
+async def seed_user(
+    maker,
+    *,
+    username: str,
+    password: str,
+    org_id: str | None = None,
+    role: str = "operator",
+    active: bool = True,
+) -> str:
+    """Insert a login User into the test DB with a real bcrypt hash; return username.
+
+    For tests that need a user beyond the default seeded set (``demo`` +
+    ``orga_operator`` / ``orgb_operator``). Hashing is real so the row exercises
+    the same ``/v1/auth/login`` verify path as production.
+    """
+    import bcrypt
+
+    async with maker() as s:
+        s.add(
+            User(
+                username=username,
+                password_hash=bcrypt.hashpw(password.encode(), bcrypt.gensalt()),
+                org_id=org_id,
+                role=role,
+                active=active,
+            )
+        )
+        await s.commit()
+    return username
 
 
 async def seed_bot(maker, **overrides) -> str:

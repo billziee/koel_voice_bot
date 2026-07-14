@@ -20,7 +20,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from koel.common.logging import get_logger
-from koel.common.schemas import Language, Tone
+from koel.common.messaging import Channel, send_message
+from koel.common.schemas import SUPPORTED_LANGUAGES, Language, Tone
 from koel.common.telemetry import (
     current_trace_id,
     record_hop_latency,
@@ -28,20 +29,36 @@ from koel.common.telemetry import (
     span,
 )
 from koel.common.text_guard import redact_pii
-from koel.nlp.schemas import Intent, NlpResponse, Sentiment, TurnContext
+from koel.nlp.schemas import Intent, NlpResponse, RetrievedChunk, Sentiment, TurnContext
 from koel.stt.schemas import TranscriptResult
 from koel.tts.schemas import SynthesizeRequest
+from koel.voicebot.campaigns import schedule_callback
 from koel.voicebot.clients import ServiceClients
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.pipeline import localization
+from koel.voicebot.pipeline.callback import parse_callback_time
 from koel.voicebot.pipeline.cost import estimate_turn_cost_usd
 from koel.voicebot.pipeline.filler import FillerCache, filler_tone_for
+from koel.voicebot.pipeline.flow import Flow, advance, current_prompt, parse_flow
 from koel.voicebot.session.models import CallStatus, SessionState, Turn
 from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 
 logger = get_logger("koel.voicebot.orchestrator")
 
 Sender = Callable[[ServerMessage], Awaitable[None]]
+
+
+def _coerce_iso(value: object) -> datetime | None:
+    """Parse an NLP-supplied ISO timestamp for a scheduled callback (2.5),
+    normalising to timezone-aware UTC. Returns ``None`` on anything unparseable —
+    a bad time must never crash the turn or become an immediate dial."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 # Explicit "switch language" request in the caller's words (reliable, unlike STT
 # language guessing). A request cue + a language word → lock that language.
@@ -213,10 +230,12 @@ class Orchestrator:
             language=state.language,
             tone=tone,
             voice_gender=state.voice_gender,
+            voice=state.voice,
             speaking_rate=state.speaking_rate,
             ambient=use_ambient,
             ambient_profile=state.ambient_profile if use_ambient else None,
             telephony=self._settings.telephony_mode,
+            tts_connection_id=state.tts_connection_id,  # BYOK per-bot TTS connection
         )
         with span("tts.synthesize", session_id=state.session_id, tone=tone.value) as tts_span:
             # Capture the trace id for the §11 audit / §14 latency dashboards.
@@ -306,18 +325,28 @@ class Orchestrator:
         return out
 
     async def handle_final_transcript(
-        self, state: SessionState, send: Sender, stt: TranscriptResult
+        self, state: SessionState, send: Sender, stt: TranscriptResult,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
     ) -> None:
-        """Process one completed customer utterance through the pipeline."""
+        """Process one completed customer utterance through the pipeline.
+
+        ``prefetched_chunks`` (O-5): KB chunks VB_Svc speculatively retrieved
+        during the endpointing hold window. When provided they ride in the
+        TurnContext so NLP_svc reuses them instead of retrieving again; ``None``
+        (no speculation / diverged / miss) keeps today's behaviour exactly.
+        """
         turn_start = time.monotonic()
         try:
-            await self._handle_final_transcript(state, send, stt)
+            await self._handle_final_transcript(
+                state, send, stt, prefetched_chunks=prefetched_chunks
+            )
         finally:
             # End-to-end audio-in→audio-out turn latency vs the §14 <300ms budget (Q).
             record_turn_latency((time.monotonic() - turn_start) * 1000)
 
     async def _handle_final_transcript(
-        self, state: SessionState, send: Sender, stt: TranscriptResult
+        self, state: SessionState, send: Sender, stt: TranscriptResult,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
     ) -> None:
         # Reset no-input bookkeeping — the customer spoke.
         state.no_input_strikes = 0
@@ -358,7 +387,7 @@ class Orchestrator:
         elif (
             self._settings.adapt_language_to_caller
             and stt.language_id
-            and stt.language_id in (Language.en, Language.hi, Language.hinglish)
+            and stt.language_id in SUPPORTED_LANGUAGES
         ):
             state.language = stt.language_id
 
@@ -373,9 +402,20 @@ class Orchestrator:
         # turn is spoken by the _send_bot_turn calls below. Batch is the fallback.
         stream_turn = self._settings.stream_nlp and self._settings.stream_tts
         if stream_turn:
-            nlp = await self._stream_bot_turn(state, send, self._build_turn_context(state))
+            ctx = self._build_turn_context(state, prefetched_chunks=prefetched_chunks)
+            nlp = await self._stream_bot_turn(state, send, ctx)
         else:
-            nlp = await self._respond_with_filler(state, send)
+            nlp = await self._respond_with_filler(
+                state, send, prefetched_chunks=prefetched_chunks
+            )
+
+        # Scripted-flow advance (6.6): move to the next node on the returned intent
+        # so the NEXT turn's context injects that node's prompt. Guarded so an
+        # absent/malformed flow is a no-op (the call runs unscripted).
+        if state.flow_node_id is not None:
+            flow = self._flow_for(state)
+            if flow is not None:
+                state.flow_node_id = advance(flow, state.flow_node_id, nlp.intent.value)
 
         # In-call tone adaptation (roadmap 4.3): fold this turn's customer sentiment
         # into a rolling window and soften the bot's tone when the trend is negative.
@@ -404,12 +444,19 @@ class Orchestrator:
             await self.end_call(state, send, outcome="declined")
             return
         if nlp.intent == Intent.busy:
-            # Deferral → schedule a callback rather than treat it as a loss.
-            await self._flag_best_effort(state.customer_id, "callback", "customer busy")
+            # Deferral → book a concrete callback from what they said ("call me
+            # tomorrow at 5"); fall back to just flagging the intent when the
+            # utterance carried no parseable time.
+            if not await self._schedule_callback(state, {}):
+                await self._flag_best_effort(state.customer_id, "callback", "customer busy")
         if not stream_turn:
             await self._send_bot_turn(
                 state, send, text=nlp.response_text, tone=tone, intent=nlp.intent.value
             )
+
+        # In-call revenue actions (2.1): payment-link SMS, promise-to-pay capture.
+        if nlp.actions:
+            await self._dispatch_actions(state, nlp.actions)
 
         if nlp.escalate:
             await self._escalate(state, send, reason=nlp.escalation_reason or "intent")
@@ -450,8 +497,97 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — best-effort; the turn proceeds regardless
             logger.warning("crm_flag_failed flag=%s customer=%s", flag, customer_id, exc_info=True)
 
-    def _build_turn_context(self, state: SessionState) -> TurnContext:
-        """The NLP TurnContext for this turn (shared by the batch + streaming paths)."""
+    def _payment_link(self, customer_id: str | None, amount: object) -> str | None:
+        """Mint a payment-link URL when a provider base URL is configured (2.1);
+        None otherwise (the action still records intent, just sends no link)."""
+        base = self._settings.payment_link_base_url
+        if not base or amount is None or not customer_id:
+            return None
+        return f"{base.rstrip('/')}/pay?ref={customer_id}&amt={amount}"
+
+    async def _dispatch_actions(self, state: SessionState, actions: list[dict]) -> None:
+        """Execute the NLP's structured in-call actions (2.1) after the bot turn.
+        Each is best-effort and idempotency-keyed; a failure never breaks the call."""
+        phone = state.crm_context.get("phone") if isinstance(state.crm_context, dict) else None
+        for i, action in enumerate(actions):
+            atype = str(action.get("type", ""))
+            try:
+                if atype == "promise_to_pay":
+                    detail = f"amount={action.get('amount')} date={action.get('date')}"
+                    await self._flag_best_effort(state.customer_id, "promise_to_pay", detail)
+                elif atype == "send_payment_link":
+                    amount = action.get("amount")
+                    link = self._payment_link(state.customer_id, amount)
+                    await self._flag_best_effort(
+                        state.customer_id, "payment_link_sent",
+                        f"amount={amount} link={link or 'n/a'}",
+                    )
+                    if link and phone:
+                        await send_message(
+                            Channel.sms, str(phone),
+                            f"Here is your secure payment link: {link}",
+                            idempotency_key=f"{state.session_id}:paylink:{i}",
+                        )
+                elif atype == "schedule_callback":
+                    await self._schedule_callback(state, action)
+                else:
+                    logger.info("ignored_unknown_action type=%s", atype)
+            except Exception:  # noqa: BLE001 — actions are best-effort, never break the turn
+                logger.warning("action_dispatch_failed type=%s", atype, exc_info=True)
+
+    async def _schedule_callback(self, state: SessionState, action: dict) -> bool:
+        """Queue a customer-requested callback (2.5). Time source, in order: the
+        NLP's structured ``at`` (ISO), else deterministic parsing of the last
+        customer utterance so it works even when NLP is dormant (no key). Returns
+        True iff a concrete dial was booked; no phone or no parseable future time
+        → logged no-op (never a bogus immediate dial)."""
+        now = datetime.now(UTC)
+        phone = state.crm_context.get("phone") if isinstance(state.crm_context, dict) else None
+        at = _coerce_iso(action.get("at"))
+        if at is None and state.transcript:
+            at = parse_callback_time(
+                state.transcript[-1].text, now, self._settings.calling_hours_tz
+            )
+        if at is None or not phone:
+            logger.info(
+                "callback_not_scheduled session_id=%s has_time=%s has_phone=%s",
+                state.session_id, at is not None, bool(phone),
+            )
+            return False
+        attempt_id = await schedule_callback(
+            org_id=state.org_id, customer_id=state.customer_id, phone=str(phone), at=at, now=now
+        )
+        if attempt_id is None:
+            return False
+        await self._flag_best_effort(
+            state.customer_id, "callback", f"at={at.isoformat()} attempt={attempt_id}"
+        )
+        return True
+
+    def _flow_for(self, state: SessionState) -> Flow | None:
+        """The parsed scripted flow for this call (6.6), or None when unscripted.
+        Re-parsed per turn — parse_flow is pure/cheap and the Flow isn't stored."""
+        if not state.flow:
+            return None
+        return parse_flow({"flow": state.flow})
+
+    def _build_turn_context(
+        self, state: SessionState, *, prefetched_chunks: list[RetrievedChunk] | None = None
+    ) -> TurnContext:
+        """The NLP TurnContext for this turn (shared by the batch + streaming paths).
+
+        ``prefetched_chunks`` (O-5): when provided, ride in ``retrieved`` so
+        NLP_svc reuses them and skips its own retrieval; ``None`` ⇒ empty, and
+        NLP_svc retrieves as today.
+        """
+        # Scripted-flow scaffolding (6.6): append the current node's prompt as
+        # extra guidance for this turn. It augments — never replaces — the
+        # hardened preamble, so the compliance/JSON rules always stay in force.
+        preamble = state.prompt_preamble
+        flow = self._flow_for(state)
+        node_prompt = current_prompt(flow, state.flow_node_id) if flow else None
+        if node_prompt:
+            preamble = f"{preamble}\n\n{node_prompt}".strip() if preamble else node_prompt
         return TurnContext(
             session_id=state.session_id,
             bot_id=state.bot_id,
@@ -467,12 +603,25 @@ class Orchestrator:
             rag_score_threshold=state.rag_score_threshold,
             llm_model=state.llm_model,
             llm_temperature=state.llm_temperature,
-            prompt_preamble=state.prompt_preamble,
+            prompt_preamble=preamble,
+            llm_connection_id=state.llm_connection_id,  # BYOK custom LLM (Phase 2)
+            retrieved=prefetched_chunks or [],
         )
 
-    async def _respond_with_filler(self, state: SessionState, send: Sender) -> NlpResponse:
+    def build_speculative_context(self, state: SessionState, query: str) -> TurnContext:
+        """Public builder for O-5 speculative RAG: a retrieval TurnContext for a
+        held-but-not-yet-recorded transcript. Reuses ``_build_turn_context`` (so
+        the rag_index / org / per-bot RAG overrides all match the real turn) but
+        overrides the customer text with the held query. ``retrieved`` stays empty
+        so the ``/v1/retrieve`` call actually retrieves."""
+        return self._build_turn_context(state).model_copy(update={"customer_text": query})
+
+    async def _respond_with_filler(
+        self, state: SessionState, send: Sender,
+        *, prefetched_chunks: list[RetrievedChunk] | None = None,
+    ) -> NlpResponse:
         """Run NLP; if it exceeds the filler trigger, inject a filler clip meanwhile."""
-        ctx = self._build_turn_context(state)
+        ctx = self._build_turn_context(state, prefetched_chunks=prefetched_chunks)
         with span("nlp.respond", session_id=state.session_id):
             t0 = time.monotonic()
             nlp_task = asyncio.create_task(self._clients.respond(ctx))
@@ -543,6 +692,7 @@ class Orchestrator:
                         ambient=use_ambient,
                         ambient_profile=state.ambient_profile if use_ambient else None,
                         telephony=self._settings.telephony_mode,
+                        tts_connection_id=state.tts_connection_id,  # BYOK per-bot TTS connection
                     )
                     async for chunk in self._clients.stream_synthesis(req):
                         if first_ms is None:
@@ -686,7 +836,7 @@ class Orchestrator:
         )
 
     def _is_unsupported_language(self, stt: TranscriptResult) -> bool:
-        supported = {Language.en, Language.hi, Language.hinglish}
+        supported = SUPPORTED_LANGUAGES
         # (a) Auto-detect path: STT explicitly reports a non-supported language with
         #     confidence (used when transcription isn't force-pinned).
         if (
