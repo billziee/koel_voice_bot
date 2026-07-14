@@ -29,6 +29,10 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
 
   const [callState, setCallState] = useState<CallState>('idle');
   const [transcript, setTranscript] = useState<TranscriptMessageData[]>([]);
+  // Wave 2: current LIVE interim customer transcript (best-effort). Updates in
+  // place as more audio arrives; cleared when the authoritative final transcript
+  // for the turn lands (see onTranscript) or when a call starts/ends. Empty = none.
+  const [partialTranscript, setPartialTranscript] = useState<string>('');
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [duration, setDuration] = useState<number>(0);
   const [expandedInteraction, setExpandedInteraction] = useState<string | null>(null);
@@ -153,12 +157,23 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   const toggleMic = async () => {
     if (micOn) { stopMic(); return; }
     if (!liveCall) { logEvent('Microphone is only available in live mode (real VB_Svc).', 'warn'); return; }
+    // Streaming STT (config.stt_mode='ws'): additionally forward captured PCM
+    // frames continuously as non-final chunks. Chunk mode keeps the single
+    // per-utterance send below untouched.
+    const streaming = bot.sttMode === 'ws';
     try {
       const cap = new MicCapture({
         onUtterance: (b64, fmt, pcm16) => {
           logEvent(`Mic utterance captured (${fmt}) → streaming to STT`, 'info');
+          // is_final:true endpoint for the finished utterance (both modes).
           liveCallRef.current?.sendAudioChunk(b64, fmt, pcm16);
         },
+        ...(streaming
+          ? {
+              onFrame: (pcm16B64: string, sampleRate: number) =>
+                liveCallRef.current?.sendAudioFrame(pcm16B64, sampleRate),
+            }
+          : {}),
         // Real barge-in: the instant the caller speaks over the bot, cut the bot's
         // audio locally (feels like a real interruption) and tell VB_Svc so it stops
         // streaming the rest of the turn. Echo cancellation keeps the bot's own
@@ -175,7 +190,12 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
       await cap.start();
       micRef.current = cap;
       setMicOn(true);
-      logEvent('Microphone armed — speak; VAD endpoints each utterance', 'ok');
+      logEvent(
+        streaming
+          ? 'Microphone armed (streaming) — PCM frames forwarded continuously; VAD marks end-of-utterance'
+          : 'Microphone armed — speak; VAD endpoints each utterance',
+        'ok',
+      );
     } catch (err) {
       logEvent(`Microphone access denied/unavailable: ${err instanceof Error ? err.message : String(err)}`, 'warn');
       setMicOn(false);
@@ -403,6 +423,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     outcomeRef.current = { label: 'Completed', status: 'green' };
     callStartTimeRef.current = Date.now();
     setTranscript([]);
+    setPartialTranscript('');
     setEvents([]);
     setDuration(0);
     setCallState('connecting');
@@ -417,8 +438,15 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
       const handlers: LiveCallHandlers = {
         onOpen: () => logEvent('WebSocket upgraded — JWT accepted by VB_Svc', 'ok'),
         onCallState: (status) => setCallState(status as CallState),
-        onTranscript: (speaker, text, d) =>
-          addMsg({ kind: speaker === 'bot' ? 'bot' : 'user', text, tone: d.tone as Tone | undefined }),
+        onTranscript: (speaker, text, d) => {
+          // The authoritative turn transcript supersedes any live interim caption.
+          setPartialTranscript('');
+          addMsg({ kind: speaker === 'bot' ? 'bot' : 'user', text, tone: d.tone as Tone | undefined });
+        },
+        // Best-effort interim caption for the customer's in-progress utterance.
+        onPartialTranscript: (speaker, text) => {
+          if (speaker === 'customer') setPartialTranscript(text || '');
+        },
         onAudio: (d) => { void enqueueAudio(d.audio_b64 as string | undefined); },
         onFiller: (text) => {
           addMsg({ kind: 'filler', text });
@@ -509,6 +537,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     clearAllScheduled();
     if (liveCallRef.current) { liveCallRef.current.close(); liveCallRef.current = null; }
     if (soundEnabled && window.speechSynthesis) window.speechSynthesis.cancel();
+    setPartialTranscript('');
     setCallState('ended');
     if (!liveCall) logEvent('Session flushed from Redis · transcript + outcome persisted to PostgreSQL', 'ok');
 
@@ -809,6 +838,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     liveCall,
     callState,
     transcript,
+    partialTranscript,
     events,
     duration,
     expandedInteraction,

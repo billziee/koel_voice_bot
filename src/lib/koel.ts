@@ -403,7 +403,7 @@ export async function startSession(
 // ---- WebSocket protocol ----------------------------------------------------
 
 export type ServerFrameType =
-  | 'call_state' | 'transcript' | 'audio_chunk' | 'tts_kill' | 'filler'
+  | 'call_state' | 'transcript' | 'partial_transcript' | 'audio_chunk' | 'tts_kill' | 'filler'
   | 'reconnected' | 'ping' | 'error' | 'call_ended';
 
 export interface ServerFrame {
@@ -414,6 +414,9 @@ export interface ServerFrame {
 export interface LiveCallHandlers {
   onCallState?: (status: string, data: Record<string, any>) => void;
   onTranscript?: (speaker: 'bot' | 'customer', text: string, data: Record<string, any>) => void;
+  // Wave 2: best-effort LIVE interim transcript. Revised/replaced as more audio
+  // arrives; superseded by the authoritative `transcript` frame for the turn.
+  onPartialTranscript?: (speaker: 'bot' | 'customer', text: string, data: Record<string, any>) => void;
   onAudio?: (data: Record<string, any>) => void;
   onFiller?: (text: string, data: Record<string, any>) => void;
   onTtsKill?: (reason: string) => void;
@@ -471,6 +474,15 @@ export class LiveCall {
       case 'transcript':
         this.handlers.onTranscript?.(d.speaker, d.text, d);
         break;
+      case 'partial_transcript': {
+        // Tolerate either the nested `{type,data:{speaker,text}}` protocol shape
+        // (like every other frame) or a flattened `{type,speaker,text}` payload.
+        const flat = frame as ServerFrame & { speaker?: string; text?: string };
+        const speaker = (d.speaker ?? flat.speaker) as 'bot' | 'customer';
+        const text = (d.text ?? flat.text ?? '') as string;
+        this.handlers.onPartialTranscript?.(speaker, text, d);
+        break;
+      }
       case 'audio_chunk':
         this.handlers.onAudio?.(d);
         break;
@@ -514,6 +526,20 @@ export class LiveCall {
       is_final: true,
       audio_format: format,
       ...(pcm16B64 ? { pcm16_b64: pcm16B64 } : {}),
+    });
+  }
+
+  /** Streaming (ws) mode only: forward a captured PCM16 frame mid-utterance as a
+   *  NON-final chunk (`is_final:false`) so the backend can run incremental STT.
+   *  The authoritative `is_final:true` send still fires at VAD end-of-utterance
+   *  via sendAudioChunk — this is purely additive. */
+  sendAudioFrame(pcm16B64: string, sampleRate = 16000): void {
+    this.send({
+      type: 'audio_chunk',
+      audio_b64: pcm16B64,
+      is_final: false,
+      audio_format: 'pcm16',
+      sample_rate: sampleRate,
     });
   }
 

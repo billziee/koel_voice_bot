@@ -105,6 +105,7 @@ export function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, 
     liveCall,
     callState,
     transcript,
+    partialTranscript,
     events,
     duration,
     expandedInteraction,
@@ -362,6 +363,32 @@ export function ActiveCallView({ bot, onBack, onCallCompleted, theme, darkMode, 
             )}
 
             {transcript.map(msg => <TranscriptMessage key={msg.id} msg={msg} theme={theme} />)}
+
+            {/* Wave 2 — LIVE interim caption. A best-effort, in-place-updating
+                preview of the customer's in-progress utterance; visually distinct
+                (dashed, italic, pulsing "live" badge) from a settled transcript
+                bubble, and removed the instant the authoritative final transcript
+                lands (useLiveCall clears partialTranscript in onTranscript). */}
+            {partialTranscript && (
+              <div className="flex flex-col max-w-[80%] self-end items-end animate-in fade-in" aria-live="polite">
+                <span className="text-[10px] uppercase font-bold tracking-wider mb-1 mx-1 flex items-center gap-2" style={{ color: theme.inkMuted }}>
+                  Customer
+                  <span className="flex items-center gap-1 px-1.5 py-px rounded-full text-[9px] normal-case font-bold text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> live
+                  </span>
+                </span>
+                <div className="flex gap-3 items-end flex-row-reverse">
+                  <div className="w-8 h-8 text-xs rounded-full flex-shrink-0 flex items-center justify-center font-bold text-white shadow-sm bg-gray-400 opacity-80">U</div>
+                  <div
+                    className="p-4 text-[15px] rounded-2xl leading-relaxed border border-dashed italic"
+                    style={{ backgroundColor: theme.primaryLight, color: theme.primaryDark, borderColor: theme.primary + '55', borderRadius: '1rem 1rem 0.25rem 1rem' }}
+                  >
+                    <span data-testid="partial-caption">{partialTranscript}</span>
+                    <span aria-hidden="true" className="opacity-50">…</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {(callState === 'bot_speaking' || callState === 'processing' || callState === 'user_speaking' || callState === 'reconnecting' || callState === 'escalating') && (
               <div className="flex gap-2 items-center text-xs font-semibold uppercase tracking-wider p-2 px-4 backdrop-blur-sm rounded-full self-center border shadow-sm" style={{ backgroundColor: darkMode ? 'rgba(17,24,39,0.6)' : 'rgba(255,255,255,0.6)', borderColor: theme.rule, color: theme.inkMuted }}>

@@ -47,6 +47,7 @@ from koel.voicebot.session.models import CallStatus, SessionState
 from koel.voicebot.telephony.bridge import TwilioMediaBridge
 from koel.voicebot.telephony.ingest import (
     PartialCallback,
+    StreamingSessionFactory,
     StreamingTelephonyIngest,
     TelephonyAudioIngest,
     TranscribeCallback,
@@ -66,6 +67,11 @@ stt_settings = get_stt_settings()
 # Twilio media decodes to 16 kHz PCM16 (the bridge's default ``inbound_sample_rate``);
 # the streaming Deepgram session must be opened at that same rate.
 _TELEPHONY_STT_SAMPLE_RATE = 16000
+
+# The browser's neural-VAD worklet emits raw s16le mono 16 kHz PCM (``pcm16_b64`` on
+# each audio_chunk — see ws/protocol.py), so the browser streaming Deepgram session
+# opens at the same rate.
+_BROWSER_STT_SAMPLE_RATE = 16000
 
 
 # Per-phrase warmup timeout: a slow provider must not block boot. 9 sequential
@@ -264,6 +270,13 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
         return
     active_sessions.add(session_id)
 
+    # O-6 Wave 2: when this call resolves to Deepgram streaming STT, hand the
+    # CallSession a factory that opens a long-lived DeepgramStreamingSession
+    # (continuous frames → live partials + finals). None ⇒ the unchanged buffered
+    # per-utterance transcribe path (every non-streaming bot). Resolved before the
+    # socket runs; the session itself opens lazily on the first audio frame.
+    streaming_session_factory = await _browser_streaming_factory(state)
+
     # Track in-flight calls so the lifespan can drain them on SIGTERM (P).
     websocket.app.state.active_calls += 1
     try:
@@ -281,6 +294,7 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
             background_tasks=runtime.background_tasks,
             escalations=runtime.escalations,
             monitor=runtime.monitor,
+            streaming_session_factory=streaming_session_factory,
         )
     finally:
         websocket.app.state.active_calls -= 1
@@ -336,6 +350,38 @@ async def _resolve_deepgram_streaming(state: SessionState) -> tuple[str, str, st
     ):
         return (key, stt_settings.deepgram_model, stt_settings.deepgram_base_url)
     return None
+
+
+async def _browser_streaming_factory(state: SessionState) -> StreamingSessionFactory | None:
+    """A session factory for the browser (``/ws/calls``) streaming STT path (O-6 Wave 2).
+
+    Returns a factory that opens a long-lived :class:`DeepgramStreamingSession` when
+    this call resolves to Deepgram *streaming* STT (reusing the same BYOK-or-env
+    resolution as telephony via :func:`_resolve_deepgram_streaming`); ``None`` for every
+    other bot — the CallSession then runs the unchanged buffered per-utterance transcribe
+    path. The socket is opened lazily by the CallSession on the first audio frame, so a
+    connect failure degrades to the buffered path in-flight without dropping the call.
+    """
+    dg = await _resolve_deepgram_streaming(state)
+    if dg is None:
+        return None
+    api_key, model, base_url = dg
+
+    def _factory(
+        on_partial: PartialCallback, on_final: UtteranceCallback
+    ) -> DeepgramStreamingSession:
+        return DeepgramStreamingSession(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            sample_rate=_BROWSER_STT_SAMPLE_RATE,
+            on_partial=on_partial,
+            on_final=on_final,
+            language=state.language or Language.en,
+            session_id=state.session_id,
+        )
+
+    return _factory
 
 
 async def _build_telephony_ingest(

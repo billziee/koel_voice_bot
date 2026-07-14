@@ -24,6 +24,10 @@ export interface MicCaptureOptions {
   onUtterance: UtteranceHandler;
   onSpeechStart?: () => void; // fires the instant speech begins (for barge-in)
   onLevel?: (rms: number) => void; // 0..1, for the waveform / mic meter
+  // Streaming (ws) mode only: fires continuously with raw PCM16 (base64, s16le
+  // mono at `sampleRate`) as audio is captured, for incremental server-side STT.
+  // Only wired when provided — the default per-utterance path is unaffected.
+  onFrame?: (pcm16B64: string, sampleRate: number) => void;
   onError?: (err: unknown) => void;
   thresholdRms?: number; // absolute floor for speech vs. silence — never go below this
   noiseMultiplier?: number; // speech must clear (ambient noise floor * this) too
@@ -92,6 +96,12 @@ export class MicCapture {
   private chunks: BlobPart[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = true;
+  // Continuous-frame tap (streaming/ws mode only). A ScriptProcessorNode taps
+  // every sample (no gaps); a zero-gain sink drives it without playing the mic
+  // back out. Only built when a frame sink (onFrame) was supplied.
+  private readonly hasFrameSink: boolean;
+  private frameTap: ScriptProcessorNode | null = null;
+  private frameTapSink: GainNode | null = null;
 
   // VAD state
   private hadSpeech = false;
@@ -113,6 +123,9 @@ export class MicCapture {
   private pendingPcm16B64: string | undefined;
 
   constructor(options: MicCaptureOptions) {
+    // Capture whether a real frame sink was supplied *before* defaults fill one
+    // in, so chunk mode never builds the streaming tap.
+    this.hasFrameSink = typeof options.onFrame === 'function';
     this.opts = {
       thresholdRms: 0.025,
       noiseMultiplier: 2.5,
@@ -124,6 +137,7 @@ export class MicCapture {
       maxIdleMs: 8000,
       onLevel: () => {},
       onSpeechStart: () => {},
+      onFrame: () => {},
       ...options,
     };
   }
@@ -143,6 +157,28 @@ export class MicCapture {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 512;
     src.connect(this.analyser);
+    // Streaming (ws) mode: forward captured PCM continuously as it arrives. This
+    // is additive to the per-utterance MediaRecorder path (which still emits the
+    // authoritative is_final:true segment on VAD end-of-utterance).
+    if (this.hasFrameSink) {
+      const tap = this.ctx.createScriptProcessor(4096, 1, 1);
+      const sink = this.ctx.createGain();
+      sink.gain.value = 0; // never play the mic back — the tap only needs to run
+      tap.onaudioprocess = (e: AudioProcessingEvent) => {
+        if (this.stopped) return;
+        const input = e.inputBuffer.getChannelData(0);
+        try {
+          this.opts.onFrame(float32ToPcm16Base64(input), this.ctx!.sampleRate);
+        } catch {
+          /* drop a bad frame rather than break capture */
+        }
+      };
+      src.connect(tap);
+      tap.connect(sink);
+      sink.connect(this.ctx.destination);
+      this.frameTap = tap;
+      this.frameTapSink = sink;
+    }
     this.stopped = false;
     this.arm();
     // setInterval (not rAF) so the VAD keeps ticking in background/headless tabs.
@@ -298,6 +334,14 @@ export class MicCapture {
     this.silero?.destroy();
     this.silero = null;
     this.engine = 'rms';
+    if (this.frameTap) {
+      try { this.frameTap.onaudioprocess = null; this.frameTap.disconnect(); } catch { /* already gone */ }
+      this.frameTap = null;
+    }
+    if (this.frameTapSink) {
+      try { this.frameTapSink.disconnect(); } catch { /* already gone */ }
+      this.frameTapSink = null;
+    }
     const rec = this.recorder;
     this.recorder = null;
     if (rec && rec.state !== 'inactive') {

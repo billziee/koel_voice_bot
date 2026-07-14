@@ -52,6 +52,7 @@ from koel.voicebot.ws.protocol import (
     ServerMessage,
     ServerMessageType,
 )
+from koel.voicebot.ws.streaming_stt import BrowserStreamingStt, StreamingSessionFactory
 
 logger = get_logger("koel.voicebot.ws")
 
@@ -80,6 +81,7 @@ class CallSession:
         smart_turn: SmartTurnAnalyzer | None = None,
         escalations: EscalationHub | None = None,
         monitor: LiveMonitor | None = None,
+        streaming_session_factory: StreamingSessionFactory | None = None,
     ) -> None:
         self._ws = websocket
         self._state = state
@@ -113,6 +115,9 @@ class CallSession:
         # in-flight RAG pre-fetch fired during the smart-turn hold window. Reused
         # by the resulting turn when the final transcript hasn't diverged.
         self._spec_retrieval: tuple[str, asyncio.Task[list[RetrievedChunk]]] | None = None
+        # O-6 Wave 2 browser streaming STT (non-null factory ⇒ Deepgram streaming; None
+        # ⇒ the unchanged buffered per-utterance path). See ws/streaming_stt.py.
+        self._stt_stream = BrowserStreamingStt(owner=self, factory=streaming_session_factory)
 
     async def send(self, message: ServerMessage) -> None:
         async with self._send_lock:
@@ -342,6 +347,10 @@ class CallSession:
         # (which would speak over the handoff). Relaying the caller's audio to the
         # operator console is a follow-up (live transcript stream / 3.3).
         if self._state.status == CallStatus.waiting_agent:
+            return
+        # O-6 Wave 2: push into the streaming session when engaged; False ⇒ it couldn't
+        # open, so degrade to the (unchanged) buffered path below for the rest of the call.
+        if self._stt_stream.enabled and await self._stt_stream.feed(msg):
             return
         req = TranscribeRequest(
             session_id=self._state.session_id,
@@ -664,6 +673,7 @@ class CallSession:
             timer.cancel()
         # O-5: drop any in-flight speculative RAG pre-fetch on teardown.
         self._cancel_speculative_retrieval()
+        await self._stt_stream.aclose()  # O-6 Wave 2: close the streaming STT session
         # Drop the call from the live supervisor view (3.3).
         self._monitor.close(self._state.session_id)
         # Tear down any live human-handoff (3.1): drop the operator bridge and, if
@@ -768,6 +778,7 @@ async def handle_connection(
     smart_turn: SmartTurnAnalyzer | None = None,
     escalations: EscalationHub | None = None,
     monitor: LiveMonitor | None = None,
+    streaming_session_factory: StreamingSessionFactory | None = None,
 ) -> None:
     set_correlation_id(session_id)
     call = CallSession(
@@ -783,5 +794,6 @@ async def handle_connection(
         smart_turn=smart_turn,
         escalations=escalations,
         monitor=monitor,
+        streaming_session_factory=streaming_session_factory,
     )
     await call.run()
