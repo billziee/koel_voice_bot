@@ -184,8 +184,12 @@ test('live interim partials render in sequence, then are superseded by the final
   ).toBeVisible({ timeout: 10_000 });
 });
 
-test('streaming mic arms with a fake device and the live-call surface is available', async ({ page }) => {
+test('streaming mic arms with a fake device and the live-call surface is available', async ({ page, browserName }) => {
   test.setTimeout(60_000);
+  // Headless WebKit doesn't drive the stubbed getUserMedia → MediaRecorder capture
+  // path to the "Listening…" state (the fake-media-stream support is Chromium/Firefox
+  // only); the ws-mode mic pipeline itself is covered there. Skip to keep CI honest.
+  test.skip(browserName === 'webkit', 'fake mic capture unsupported under headless WebKit');
 
   await mockBackend(page);
   await stubMedia(page);
