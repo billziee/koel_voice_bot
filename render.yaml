@@ -16,7 +16,7 @@
 
 services:
   - type: web
-    name: koel-voicebot          # kept for continuity; serves the whole combined app
+    name: koel-backend           # live Render service name (serves the whole combined app)
     runtime: docker
     region: ohio
     plan: starter                # free works for a warm demo; starter avoids spin-down
@@ -46,7 +46,10 @@ services:
         value: "true"
       - key: KOEL_SMART_TURN_ENABLED
         value: "true"
-      - fromGroup: koel-secrets   # KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET, KOEL_CORS_ALLOW_ORIGINS
+      - fromGroup: koel-secrets   # KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET
+      # CORS is set at the SERVICE level on the live backend (dashboard + legacy origins).
+      - key: KOEL_CORS_ALLOW_ORIGINS
+        value: https://koel-voice-bot.onrender.com,https://koel-dashboard.onrender.com
       - key: KOEL_DATABASE_URL
         fromDatabase: { name: koel-postgres, property: connectionString }
       - key: KOEL_REDIS_URL
@@ -60,9 +63,9 @@ services:
   # missing from the blueprint, so the deploy only ever served the backend API at
   # `/` (hitting the URL showed no dashboard). VITE_KOEL_API is inlined at BUILD
   # time (Vite), so Render must set it before `buildCommand` — it does.
-  # NOTE: add this site's origin (https://koel-dashboard.onrender.com) to
-  # KOEL_CORS_ALLOW_ORIGINS in the koel-secrets group so the API accepts it, and
-  # update VITE_KOEL_API below if the backend uses a custom domain.
+  # Live URL: https://koel-dashboard.onrender.com — already in the backend's
+  # KOEL_CORS_ALLOW_ORIGINS (service-level). Update VITE_KOEL_API if the backend
+  # URL changes (Render assigns a per-service suffix).
   - type: web
     name: koel-dashboard
     runtime: static
@@ -71,7 +74,7 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_KOEL_API
-        value: https://koel-voicebot.onrender.com   # backend origin (Render default domain for `koel-voicebot`)
+        value: https://koel-backend-oj5p.onrender.com   # live backend origin (Render-assigned suffix)
     routes:
       # SPA fallback so a refresh/deep-link still serves the app shell.
       - type: rewrite
