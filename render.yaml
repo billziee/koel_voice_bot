@@ -1,6 +1,6 @@
-# Render Blueprint — the LIVE topology: ONE combined web service running all five
-# FastAPI apps in a single process (koel.combined:app), which fits the free/small
-# tier's 512MB limit. The five-service split (independently scalable) is preserved
+# Render Blueprint — the LIVE topology: a combined backend web service running all
+# five FastAPI apps in one process (koel.combined:app, fits the free/small tier's
+# 512MB limit) PLUS a `koel-dashboard` static site for the Vite SPA frontend. The five-service split (independently scalable) is preserved
 # in render.split.yaml for the Phase-2 scale-out (docs/PRODUCTION_MASTERPLAN.md).
 #
 # Region `ohio` (us-east) co-locates inference with Groq/NVIDIA (~ms) instead of
@@ -55,6 +55,28 @@ services:
       # via Redis (in-memory would multiply the limit by process count).
       - key: KOEL_RATE_LIMIT_BACKEND
         value: "redis"
+
+  # Frontend dashboard — the Vite SPA, served as a Render static site. This was
+  # missing from the blueprint, so the deploy only ever served the backend API at
+  # `/` (hitting the URL showed no dashboard). VITE_KOEL_API is inlined at BUILD
+  # time (Vite), so Render must set it before `buildCommand` — it does.
+  # NOTE: add this site's origin (https://koel-dashboard.onrender.com) to
+  # KOEL_CORS_ALLOW_ORIGINS in the koel-secrets group so the API accepts it, and
+  # update VITE_KOEL_API below if the backend uses a custom domain.
+  - type: web
+    name: koel-dashboard
+    runtime: static
+    region: ohio
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_KOEL_API
+        value: https://koel-voicebot.onrender.com   # backend origin (Render default domain for `koel-voicebot`)
+    routes:
+      # SPA fallback so a refresh/deep-link still serves the app shell.
+      - type: rewrite
+        source: /*
+        destination: /index.html
 
   - type: keyvalue        # managed Redis (session store)
     name: koel-redis

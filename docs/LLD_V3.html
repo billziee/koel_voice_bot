@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — Low-Level Design v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;gap:16px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;white-space:nowrap;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 11px;border-radius:7px;transition:.15s;white-space:nowrap;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;} nav{height:auto;padding:8px 18px;flex-direction:column;align-items:flex-start;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs · v3</small></span>
+  <span class="nav-links"><a href="HLD_V3.html">HLD</a><a href="LLD_V3.html" class="active">LLD</a><a href="PRD_V3.html">PRD</a><a href="SECURITY_V3.html">Security</a><a href="SLO_V3.html">SLO</a><a href="DEPLOY_V3.html">Deploy</a><a href="RESIDENCY_V3.html">Residency</a><a href="TELEPHONY_V3.html">Telephony</a><a href="PRODUCTION_MASTERPLAN_V3.html">Masterplan</a></span>
+</nav>
+<main><p class="doc-meta">LLD · KOEL Voice Bot · v3</p><div id="content"><h1 id="koel-voice-bot-low-level-design-v3">KOEL Voice Bot — Low-Level Design v3</h1>
+<blockquote>
+<p>Supersedes <a href="./LLD_V2.md">LLD_V2.md</a> (→ <a href="./LLD.md">LLD.md</a>). Module-level view of
+the v3 codebase. Every table carries <strong>v1 / v2 / v3</strong> columns. Companion:
+<a href="./HLD_V3.md">HLD_V3.md</a>.</p>
+</blockquote>
+<h2 id="what-changed-since-v2-module-level-diff-v1-v2-v3">What changed since v2 — module-level diff (v1 → v2 → v3)</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Pipeline modules</strong></td>
+<td><code>bargein, filler, silence, orchestrator</code></td>
+<td>+ <code>endpointing, localization, transliteration, summarizer, whisper_features</code></td>
+<td>+ <code>cost.py</code> (O-9 per-turn estimate + budget), speculative-RAG hold in <code>orchestrator</code> (O-5), streaming turn <code>_stream_bot_turn</code> (O-2)</td>
+</tr>
+<tr>
+<td><strong>WS layer</strong></td>
+<td><code>handler, protocol</code></td>
+<td>+ <code>recording.py</code></td>
+<td>+ <strong><code>ws/streaming_stt.py</code></strong> (browser Deepgram ingest, O-6 Wave 2) + <code>partial_transcript</code> server msg</td>
+</tr>
+<tr>
+<td><strong>STT providers</strong></td>
+<td><code>Stub</code> only</td>
+<td>+ <code>GroqWhisper</code> (pinned), <code>SarvamStt</code>, SageMaker seam</td>
+<td>+ <strong><code>DeepgramStreaming*</code></strong> (true interim partials) + Sarvam WS <code>stream_transcribe</code> (verified protocol) + per-bot <code>chunk</code>|<code>ws</code> mode</td>
+</tr>
+<tr>
+<td><strong>NLP</strong></td>
+<td><code>Stub</code></td>
+<td>+ <code>GroqNlp</code> (8B/70B)</td>
+<td>+ <strong><code>nlp/streaming.py</code></strong> (<code>ResponseTextSentenceStreamer</code>) + <code>generate_stream()</code> + <code>/v1/respond/stream</code></td>
+</tr>
+<tr>
+<td><strong>TTS</strong></td>
+<td><code>Stub</code></td>
+<td>+ Orpheus/Magpie/Sarvam(HTTP+WS)/Routing</td>
+<td>+ <strong><code>tts_cache.py</code></strong> (whole-clip + streaming cache, O-3)</td>
+</tr>
+<tr>
+<td><strong>RAG embedder</strong></td>
+<td><code>HashEmbedder</code></td>
+<td>+ NVIDIA, Bedrock seam</td>
+<td>+ <strong><code>FastEmbedEmbedder</code></strong> (<code>bge-m3</code>, O-4, opt-in) + <code>scripts/reembed_kb.py</code></td>
+</tr>
+<tr>
+<td><strong>Rate limiter</strong></td>
+<td>in-mem <code>RateLimiter</code></td>
+<td>same</td>
+<td>+ <strong><code>RedisRateLimiter</code></strong> (O-8, per-route namespace, fail-open cfg)</td>
+</tr>
+<tr>
+<td><strong>Platform (new)</strong></td>
+<td>—</td>
+<td>—</td>
+<td><strong>model-connections</strong> (encrypted secret store + SSRF guard + resolver), <strong>Users/org registry</strong> (6.4), connections CRUD API, EscalationHub (3.1), LiveMonitor (3.3), inbound bot (3.2)</td>
+</tr>
+<tr>
+<td><strong>DB</strong></td>
+<td>models</td>
+<td>+ KB chunks, analytics</td>
+<td>+ pool checkout metrics + <code>pgvector_hnsw_ef_search</code> + <code>db_pool_use_lifo</code> (O-10); Users/connections tables (6.4/BYOK)</td>
+</tr>
+<tr>
+<td><strong>Frontend</strong></td>
+<td>monolith <code>App.tsx</code></td>
+<td>+ mic/VAD</td>
+<td><strong>decomposed</strong> <code>types/lib/components/views</code> + <code>React.lazy</code> + <code>useLiveCall</code> (Q-1); <code>useConnections</code>, <code>ConnectionsView</code>, <code>ModelConnectionSelectors</code>; flow editor (6.6); streaming partial captions</td>
+</tr>
+<tr>
+<td><strong>Config surface</strong></td>
+<td>~20</td>
+<td>~40 (<code>sarvam_*, smart_turn_*, stream_tts</code>, …)</td>
+<td>+ <code>stream_nlp, stream_stt</code>, Deepgram, <code>nlp_embedder=fastembed</code> + <code>fastembed_model</code>, <code>rate_limit_backend=redis</code>, <code>session_budget_usd</code>, <code>pgvector_hnsw_ef_search</code>, <code>db_pool_*</code>, <code>tts_cache_ttl_s</code>, BYOK connection config</td>
+</tr>
+<tr>
+<td><strong>Tests</strong></td>
+<td>37</td>
+<td>264</td>
+<td><strong>680</strong></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="1-module-layout-v3-current">1. Module layout (v3 current)</h2>
+<p>Backend <code>koel/{common,db,stt,nlp,tts,crm,voicebot}</code> + <code>koel.combined</code>. New v3
+surfaces: <code>voicebot/ws/streaming_stt.py</code>, <code>voicebot/telephony/ingest.py</code>
+(<code>StreamingSessionFactory</code>/<code>StreamingSttSession</code> — shared by the browser Deepgram
+path and future telephony bridges), <code>nlp/streaming.py</code>, <code>voicebot/tts_cache.py</code>,
+<code>voicebot/pipeline/cost.py</code>, the model-connection/BYOK modules, and the Users/org
+registry. Frontend <code>src/{types.ts,lib,components,views,hooks}</code> (post-Q-1).</p>
+<h2 id="2-shared-core-koelcommon-v1-v2-v3">2. Shared core (<code>koel/common</code>) — v1 → v2 → v3</h2>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>http.py</code></td>
+<td>—</td>
+<td>shared async client</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td><code>ratelimit.py</code></td>
+<td>in-mem</td>
+<td>in-mem</td>
+<td><strong>+ <code>RedisRateLimiter</code></strong>, <code>rate_limit(name, fail_open)</code> per-route namespace</td>
+</tr>
+<tr>
+<td><code>resilience.py</code></td>
+<td>—</td>
+<td>breaker + retry</td>
+<td>reused by streaming fallbacks</td>
+</tr>
+<tr>
+<td><code>text_guard.py</code></td>
+<td>—</td>
+<td>PII redaction</td>
+<td>reused per-sentence on the streaming path</td>
+</tr>
+<tr>
+<td><code>config.py</code></td>
+<td>~20</td>
+<td>~40</td>
+<td>+ streaming/redis/embedder/budget/pool/cache/BYOK settings</td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-data-model-koeldbmodelspy-v3-additions">3. Data model (<code>koel/db/models.py</code>) — v3 additions</h2>
+<p>v2: <code>bots, sessions, call_history, knowledge_chunks</code> (+ pgvector). <strong>v3 adds</strong>
+Users + org rows (6.4 multi-tenant, enforced scoping), model-connection rows
+(BYOK, secret encrypted at rest), and the pgvector query knob (<code>hnsw.ef_search</code>
+via <code>SET LOCAL</code>, guarded, no-op at 0).</p>
+<h2 id="4-websocket-protocol-v1-v2-v3">4. WebSocket protocol — v1 → v2 → v3</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>client</td>
+<td><code>audio_chunk, barge_in_candidate, pong, end_call</code></td>
+<td>+ <code>playback_done</code></td>
+<td>continuous <code>audio_chunk</code> (pcm16) frames feed the streaming session</td>
+</tr>
+<tr>
+<td>server</td>
+<td>8 types</td>
+<td>same</td>
+<td><strong>+ <code>partial_transcript</code></strong> (best-effort live caption)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="5-orchestrator-voicebotpipelineorchestratorpy-v3-behavior">5. Orchestrator (<code>voicebot/pipeline/orchestrator.py</code>) — v3 behavior</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>batch turn</td>
+<td><code>_respond_with_filler</code> → <code>_send_bot_turn</code></td>
+<td>unchanged when <code>stream_nlp</code> off</td>
+</tr>
+<tr>
+<td>streaming turn</td>
+<td>—</td>
+<td><strong><code>_stream_bot_turn</code></strong>: consume <code>respond_stream</code>, speak sentences as they land, filler race + sentiment prosody, lock-serialized; reconcile-or-escalate on a lost final</td>
+</tr>
+<tr>
+<td>speculative RAG</td>
+<td>—</td>
+<td><strong>O-5</strong>: pre-fetch on the smart-turn hold, reuse if the final hasn't diverged, cancel on teardown</td>
+</tr>
+<tr>
+<td>cost/budget</td>
+<td>—</td>
+<td><strong>O-9</strong>: <code>cost.py</code> estimate per turn + polite wrap-up at the ceiling</td>
+</tr>
+</tbody>
+</table>
+<h2 id="6-ws-handler-callsession-voicebotwshandlerpy-v3">6. WS handler <code>CallSession</code> (<code>voicebot/ws/handler.py</code>) — v3</h2>
+<p>Factory-injected <code>BrowserStreamingStt</code>: audio frames route to a long-lived
+Deepgram session (partials → captions, finals → the <strong>same</strong> downstream turn),
+degrading to the unchanged buffered per-utterance path on connect failure.
+Streaming finals are <strong>serialized by a lock</strong> (they arrive off the receive loop,
+so two close finals can't drive overlapping turns). Also wires EscalationHub
+(3.1) + LiveMonitor (3.3).</p>
+<h2 id="7-ai-microservices-provider-inventory-v1-v2-v3">7. AI microservices — provider inventory (v1 → v2 → v3)</h2>
+<h3 id="71-stt-koelstt">7.1 STT (<code>koel/stt</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>StubWhisperProvider</code></td>
+<td>stub</td>
+<td>stub</td>
+<td>stub</td>
+</tr>
+<tr>
+<td><code>GroqWhisperProvider</code></td>
+<td>—</td>
+<td>real (pinned)</td>
+<td>real; batch fallback for streaming paths</td>
+</tr>
+<tr>
+<td><code>SarvamSttProvider</code></td>
+<td>—</td>
+<td>real (batch)</td>
+<td>+ <code>stream_transcribe</code>/<code>_stream_ws</code> (protocol <strong>live-verified</strong>: <code>{"audio":{"data":&lt;b64 wav&gt;,"encoding":"audio/wav",…}}</code> + <code>{"type":"flush"}</code> → <code>data</code> frame; WAV-only ⇒ single-shot, degrade to batch)</td>
+</tr>
+<tr>
+<td><strong>Deepgram streaming</strong></td>
+<td>—</td>
+<td>—</td>
+<td><strong>real, true interim partials</strong> (<code>linear16</code>), per-utterance session, the browser streaming path</td>
+</tr>
+<tr>
+<td>SageMaker</td>
+<td>seam</td>
+<td>seam</td>
+<td>seam (O-7/6.8)</td>
+</tr>
+<tr>
+<td><strong>STT mode</strong></td>
+<td>n/a</td>
+<td><code>chunk</code> (batch)</td>
+<td><strong>per-bot <code>chunk</code>|<code>ws</code></strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="72-nlp-koelnlp">7.2 NLP (<code>koel/nlp</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Class/feature</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>StubNlpProvider</code></td>
+<td>stub</td>
+<td>stub</td>
+<td>stub</td>
+</tr>
+<tr>
+<td><code>GroqNlpProvider</code></td>
+<td>real</td>
+<td>+ 8B/70B routing</td>
+<td>+ <code>generate_stream()</code> (token → sentence, fail-safe to batch)</td>
+</tr>
+<tr>
+<td>route</td>
+<td><code>/v1/respond</code></td>
+<td>same</td>
+<td><strong>+ NDJSON <code>/v1/respond/stream</code></strong> (always emits a terminal <code>final</code>)</td>
+</tr>
+<tr>
+<td>streamer</td>
+<td>—</td>
+<td>—</td>
+<td><code>nlp/streaming.py::ResponseTextSentenceStreamer</code> (incremental JSON-value scan, never-diverge, surrogate-safe)</td>
+</tr>
+<tr>
+<td>BYOK</td>
+<td>—</td>
+<td>—</td>
+<td>custom LLM connection resolved per-bot</td>
+</tr>
+</tbody>
+</table>
+<h3 id="73-tts-koeltts">7.3 TTS (<code>koel/tts</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Class/feature</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stub/Orpheus/Magpie/Sarvam/Routing</td>
+<td>stub</td>
+<td>all real, Sarvam WS default</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td>cache</td>
+<td>—</td>
+<td>—</td>
+<td><strong><code>tts_cache.py</code></strong>: whole-clip (<code>synthesize</code>) + streaming (drain-only) cache, keyed text·voice·lang, TTL-bounded (O-3)</td>
+</tr>
+<tr>
+<td>BYOK</td>
+<td>—</td>
+<td>—</td>
+<td>custom TTS connection per-bot</td>
+</tr>
+</tbody>
+</table>
+<h3 id="74-rag-embedder-nlpragpy">7.4 RAG embedder (<code>nlp/rag.py</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HashEmbedder</code></td>
+<td>stub</td>
+<td>stub</td>
+<td>stub (fallback)</td>
+</tr>
+<tr>
+<td>NVIDIA</td>
+<td>—</td>
+<td>real</td>
+<td>real</td>
+</tr>
+<tr>
+<td><code>FastEmbedEmbedder</code></td>
+<td>—</td>
+<td>—</td>
+<td><strong>real, local <code>bge-m3</code></strong> (O-4, lazy-loaded, guarded, opt-in <code>local-embed</code>)</td>
+</tr>
+<tr>
+<td>Bedrock</td>
+<td>—</td>
+<td>seam (footgun)</td>
+<td>seam (fail-loud-at-boot fixed)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="75-crm-koelcrm">7.5 CRM (<code>koel/crm</code>)</h3>
+<p>v2 <code>+ /call-summary</code>. v3: unchanged shape; summaries now surfaced in
+history/dashboard (5.3).</p>
+<h2 id="8-configuration-reference-koel_-env-v3-additions">8. Configuration reference (<code>KOEL_</code> env) — v3 additions</h2>
+<p><code>stream_nlp</code> (O-2), <code>stream_stt</code> + Deepgram creds + per-bot STT mode (O-6),
+<code>nlp_embedder=fastembed</code>/<code>fastembed_model</code> (O-4), <code>rate_limit_backend=redis</code> +
+Redis URL (O-8), <code>session_budget_usd</code> (O-9), <code>pgvector_hnsw_ef_search</code> +
+<code>db_pool_use_lifo</code>/<code>db_pool_*</code> (O-10), <code>tts_cache_ttl_s</code> (O-3), BYOK
+model-connection config. All default-off/inert so v2 behavior is preserved.</p>
+<h2 id="9-rest-api-v3-additions">9. REST API — v3 additions</h2>
+<ul>
+<li><code>POST /v1/respond/stream</code> (NLP NDJSON); + model-connections CRUD (BYOK); +
+Users/org endpoints (6.4); + escalation/monitor endpoints (3.1/3.3). <code>/refresh</code>
+now consumed by the FE (Q-2).</li>
+</ul>
+<h2 id="10-key-algorithms-v3-additions">10. Key algorithms — v3 additions</h2>
+<ul>
+<li><strong>Incremental JSON sentence extraction</strong> (<code>nlp/streaming.py</code>) — emits reply
+  sentences as tokens arrive; provably a prefix of the final parse.</li>
+<li><strong>Speculative RAG reuse</strong> (O-5) — fire on hold, reuse iff the final ≈ the
+  speculated partial, else discard.</li>
+<li><strong>Streaming-final serialization</strong> (<code>ws/streaming_stt.py</code>) — <code>asyncio.Lock</code>
+  so callback-driven finals never overlap the turn loop.</li>
+<li><strong><code>SET LOCAL hnsw.ef_search</code></strong> (O-10) — transaction-scoped recall/latency knob.</li>
+<li><strong>BYOK secret handling</strong> — encrypt-at-rest + SSRF-guarded egress + resolver.</li>
+</ul>
+<h2 id="11-testing-strategy-backendtests-680-tests-v1-v2-v3">11. Testing strategy (<code>backend/tests</code>, 680 tests) — v1 → v2 → v3</h2>
+<p>37 → 264 → <strong>680</strong>. New v3 suites: NLP streaming (foundation + provider + route),
+VB <code>respond_stream</code> client, O-2 orchestrator turn (incl. adversarial-review
+hardening: lost-final reconcile, empty-stream, cancel-safe, prosody), O-3 cache,
+O-4 embedder, O-8 Redis limiter (namespace + fail-closed), O-9 cost/budget, O-10
+pool + <code>ef_search</code>, O-6 streaming STT + <strong>concurrent-finals serialization</strong>,
+BYOK/multi-tenant/escalation. Frontend e2e (Q-7): call-flow, navigation,
+edge-sims (barge-in/escalation/network-drop), streaming-partials — cross-browser
+(chromium/firefox/webkit; a fake-mic assertion skips on webkit).</p>
+<h2 id="12-extension-seams-v3">12. Extension seams — v3</h2>
+<p><code>telephony/ingest.py</code> <code>StreamingSessionFactory</code> is the shared seam for the
+browser Deepgram path <strong>and</strong> future Twilio/Exotel bridges (Theme 1). BYOK
+resolver is the seam for any new provider. O-7 (in-region/SageMaker) remains the
+open residency seam.</p></div></main>
+<footer>Generated from <code>docs/LLD_V3.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>

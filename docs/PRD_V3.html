@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KOEL — Product Requirements v3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Lora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary:#053BEE; --primary-dark:#032CB8; --primary-light:#E8EDFF; --primary-subtle:#F2F5FF;
+    --accent:#EB5324; --ink:#000A1B; --ink-2:#1A1F2E; --ink-muted:#5b6473; --faint:#8a93a3;
+    --rule:#E2E6EE; --surface:#F5F7FA; --white:#fff; --green:#05604F; --green-light:#EDFAF4;
+    --font-body:'DM Sans',sans-serif; --font-display:'Lora',serif; --font-mono:'JetBrains Mono',monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{font-family:var(--font-body);color:var(--ink);background:var(--white);line-height:1.7;font-size:15.5px;-webkit-font-smoothing:antialiased;}
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule);
+       display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:54px;gap:16px;}
+  .nav-logo{font-family:var(--font-display);font-size:19px;font-weight:600;color:var(--primary);letter-spacing:-.01em;white-space:nowrap;}
+  .nav-logo small{color:var(--ink-muted);font-family:var(--font-body);font-size:12px;font-weight:500;letter-spacing:.04em;margin-left:8px;}
+  .nav-links{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+  .nav-links a{text-decoration:none;font-size:13px;font-weight:500;color:var(--ink-muted);padding:6px 11px;border-radius:7px;transition:.15s;white-space:nowrap;}
+  .nav-links a:hover{color:var(--primary);background:var(--primary-subtle);}
+  .nav-links a.active{color:var(--primary);background:var(--primary-light);}
+  main{max-width:880px;margin:0 auto;padding:56px 32px 120px;}
+  h1{font-family:var(--font-display);font-size:42px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:8px 0 28px;}
+  h2{font-family:var(--font-display);font-size:27px;font-weight:600;letter-spacing:-.015em;margin:52px 0 16px;padding-top:24px;border-top:1px solid var(--rule);}
+  h3{font-size:18px;font-weight:600;margin:30px 0 10px;color:var(--ink-2);}
+  h4{font-size:14px;font-weight:600;margin:20px 0 8px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.05em;}
+  p{margin:0 0 14px;color:var(--ink-2);}
+  a{color:var(--primary);}
+  ul,ol{margin:0 0 16px;padding-left:24px;} li{margin:5px 0;color:var(--ink-2);}
+  strong{font-weight:600;color:var(--ink);}
+  blockquote{border-left:3px solid var(--primary);background:var(--primary-subtle);padding:12px 18px;border-radius:0 8px 8px 0;margin:0 0 20px;color:var(--primary-dark);font-size:14px;}
+  blockquote p{margin:0;color:var(--primary-dark);}
+  code{font-family:var(--font-mono);font-size:.86em;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:1px 5px;color:var(--accent);}
+  pre{background:#0d1117;border-radius:10px;padding:18px 20px;overflow-x:auto;margin:0 0 20px;}
+  pre code{background:none;border:none;padding:0;color:#e6edf3;font-size:12.5px;line-height:1.6;}
+  table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--rule);border-radius:10px;overflow:hidden;margin:0 0 22px;font-size:13.5px;}
+  th{background:var(--primary);color:#fff;text-align:left;padding:10px 14px;font-size:11.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+  td{padding:9px 14px;border-bottom:1px solid var(--rule);color:var(--ink-muted);vertical-align:top;line-height:1.55;}
+  tr:last-child td{border-bottom:none;} tr:nth-child(even) td{background:var(--surface);}
+  td code{font-size:.84em;}
+  hr{border:none;border-top:1px solid var(--rule);margin:36px 0;}
+  .mermaid{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:22px;margin:0 0 24px;text-align:center;overflow-x:auto;}
+  .doc-meta{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:4px;}
+  footer{max-width:880px;margin:0 auto;padding:24px 32px 60px;color:var(--faint);font-size:12.5px;border-top:1px solid var(--rule);}
+  @media(max-width:640px){main,nav,footer{padding-left:18px;padding-right:18px;} h1{font-size:32px;} nav{height:auto;padding:8px 18px;flex-direction:column;align-items:flex-start;}}
+</style>
+</head>
+<body>
+<nav>
+  <span class="nav-logo">KOEL <small>Design Docs · v3</small></span>
+  <span class="nav-links"><a href="HLD_V3.html">HLD</a><a href="LLD_V3.html">LLD</a><a href="PRD_V3.html" class="active">PRD</a><a href="SECURITY_V3.html">Security</a><a href="SLO_V3.html">SLO</a><a href="DEPLOY_V3.html">Deploy</a><a href="RESIDENCY_V3.html">Residency</a><a href="TELEPHONY_V3.html">Telephony</a><a href="PRODUCTION_MASTERPLAN_V3.html">Masterplan</a></span>
+</nav>
+<main><p class="doc-meta">PRD · KOEL Voice Bot · v3</p><div id="content"><h1 id="koel-product-requirements-document-v3-conformance-status">KOEL — Product Requirements Document v3 (Conformance Status)</h1>
+<blockquote>
+<p>Supersedes <a href="./PRD_V2.md">PRD_V2.md</a>. Tracks product conformance across the three
+build eras. v3 = after the latency/cost pass (O-1…O-10), the quality pass
+(Q-1…Q-7), and the first Part-C features. Companions: <a href="./HLD_V3.md">HLD_V3.md</a>,
+<a href="./LLD_V3.md">LLD_V3.md</a>.</p>
+</blockquote>
+<h2 id="conformance-at-a-glance-v1-v2-v3">Conformance at a glance (v1 → v2 → v3)</h2>
+<table>
+<thead>
+<tr>
+<th>PRD area</th>
+<th>v1</th>
+<th>v2</th>
+<th>v3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Multilingual EN/HI/Hinglish</td>
+<td>stub voices</td>
+<td>real (Orpheus/Magpie/Sarvam), script-correct</td>
+<td>unchanged + per-bot BYOK voice</td>
+</tr>
+<tr>
+<td>STT</td>
+<td>type-to-talk stub</td>
+<td>Groq Whisper (pinned) + Sarvam</td>
+<td><strong>+ Deepgram streaming (interim partials) + per-bot chunk|ws</strong></td>
+</tr>
+<tr>
+<td>NLP intent/response/tone</td>
+<td>real Groq</td>
+<td>language-routed 8B/70B</td>
+<td><strong>+ first-token streaming</strong>; sentiment-adaptive tone (4.3)</td>
+</tr>
+<tr>
+<td>RAG grounding</td>
+<td>hash stub</td>
+<td>NVIDIA embedder + 3 seeded KBs + upload</td>
+<td><strong>+ local FastEmbed + speculative retrieval</strong></td>
+</tr>
+<tr>
+<td>Perceived latency</td>
+<td>thesis</td>
+<td>filler + sentence-streaming TTS</td>
+<td><strong>token-bound first-audio</strong> (O-1/O-2/O-6)</td>
+</tr>
+<tr>
+<td>Barge-in / endpointing</td>
+<td>design</td>
+<td>dual-gate + smart-turn v3.2, tested</td>
+<td>preserved across the streaming path</td>
+</tr>
+<tr>
+<td>Compliance (TRAI/DPDP)</td>
+<td>design</td>
+<td>enforced in the turn loop</td>
+<td>preserved on streaming; bounded TTS-cache PII; enforced org isolation</td>
+</tr>
+<tr>
+<td>CRM read/flag/summary</td>
+<td>endpoints</td>
+<td>+ post-call summary</td>
+<td>summaries surfaced in history/dashboard (5.3)</td>
+</tr>
+<tr>
+<td>Dashboard</td>
+<td>full SPA (type-to-talk)</td>
+<td>mic + VAD</td>
+<td><strong>decomposed + code-split; live KPIs (Q-3); connections manager; flow editor (6.6)</strong></td>
+</tr>
+<tr>
+<td>Auth</td>
+<td>JWT</td>
+<td>+refresh (FE gap)</td>
+<td><strong>persisted + silent refresh (Q-2)</strong>; real Users + org scoping (6.4)</td>
+</tr>
+<tr>
+<td>Human escalation</td>
+<td>design</td>
+<td>design</td>
+<td><strong>live agent handoff (3.1) + supervisor monitor (3.3)</strong></td>
+</tr>
+<tr>
+<td>Inbound</td>
+<td>out of scope</td>
+<td>out of scope</td>
+<td><strong>inbound bot (3.2)</strong></td>
+</tr>
+<tr>
+<td>Cost governance</td>
+<td>none</td>
+<td>none</td>
+<td><strong>per-call economics + budget caps (O-9)</strong></td>
+</tr>
+<tr>
+<td>Extensibility</td>
+<td>env-fixed providers</td>
+<td>env-fixed</td>
+<td><strong>BYOK per-bot LLM/TTS/STT connections</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="new-product-surfaces-in-v3">New product surfaces in v3</h2>
+<ul>
+<li><strong>Model connections (BYOK):</strong> tenants bring their own LLM/TTS/STT keys/endpoints;
+  secrets encrypted at rest, egress SSRF-guarded, resolved per bot.</li>
+<li><strong>Multi-tenant:</strong> real Users table, per-login org scoping enforced end to end.</li>
+<li><strong>Human-in-the-loop:</strong> escalation hub + live supervisor monitor; inbound bot.</li>
+<li><strong>Conversation-flow editor:</strong> visual + form editor for scripts.</li>
+</ul>
+<h2 id="non-conformance-deferred-see-future_proceedingsmd">Non-conformance / deferred (see <a href="./FUTURE_PROCEEDINGS.md">FUTURE_PROCEEDINGS.md</a>)</h2>
+<p>In-region inference (O-7, legal-gated); PSTN bridges (Twilio/Exotel — the ingest
+seam exists); payments/WhatsApp/scheduled-callbacks (Theme 2); advanced analytics
+(6.2). Requirements unchanged from v2 except where the table above marks progress.</p></div></main>
+<footer>Generated from <code>docs/PRD_V3.md</code> · rebuild with <code>python docs/build_html.py</code></footer>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose',
+    themeVariables:{primaryColor:'#E8EDFF', primaryBorderColor:'#053BEE', lineColor:'#5b6473', fontFamily:'DM Sans, sans-serif'}});
+  try { await mermaid.run({querySelector:'.mermaid'}); }
+  catch (e) { console.error('mermaid render failed (offline?):', e); }
+</script>
+</body>
+</html>
