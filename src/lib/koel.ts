@@ -78,6 +78,21 @@ export async function login(
   return body.access_token as string;
 }
 
+// Exchange a Google ID token (from the Sign in with Google button) for a KOEL
+// access token. The backend verifies it against Google's JWKS and resolves the
+// verified email against the allowlist (only enabled when the backend has a
+// client id set). Throws KoelApiError(401) for a non-allowlisted/unverified
+// email, 403 when Google login is disabled server-side.
+export async function loginWithGoogle(credential: string): Promise<string> {
+  const res = await fetch(`${KOEL_API}/v1/auth/google`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  });
+  const body = await jsonOrThrow(res);
+  return body.access_token as string;
+}
+
 // Silent refresh (Q-2): exchange a still-valid access token for a fresh one via
 // POST /v1/auth/refresh. Throws (KoelApiError) if the token is expired/invalid —
 // the caller then forces re-login. There is no separate refresh token; the

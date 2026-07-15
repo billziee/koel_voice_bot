@@ -70,6 +70,24 @@ class CommonSettings(BaseSettings):
     turnstile_verify_url: str = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
     turnstile_timeout_s: float = 5.0
 
+    # --- Google Sign-In (allowlist model): optional login provider ---
+    # Empty client id ⇒ Google login is DISABLED (dev/demo/CI unchanged, mirroring
+    # Turnstile). Set it to enable POST /v1/auth/google, which verifies the SPA's
+    # Google ID token against Google's JWKS (RS256), checks aud == client id +
+    # iss + email_verified, then resolves the verified email against the users
+    # allowlist. The SAME value must be inlined in the frontend build as
+    # VITE_GOOGLE_CLIENT_ID (the Google button's client id).
+    google_client_id: str = ""
+    google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
+    google_token_timeout_s: float = 5.0
+    # Allowlist provisioning (pre-provisioned access model). Comma-separated
+    # `email[:org_id[:role]]` entries; each becomes/updates a passwordless users
+    # row (auth_provider="google") on boot — idempotent, applied every start so it
+    # reaches an existing DB too. Omit org_id for the platform-admin "sees all"
+    # principal, e.g. `admin@acme.com::admin`. role defaults to "operator". ONLY
+    # these emails may sign in with Google; any other verified email is rejected.
+    google_allowlist: str = ""
+
     # --- Outbound messaging (2.1 SMS / 2.4 WhatsApp) + payment links ---
     # All empty by default ⇒ the channel is DORMANT: a send is a logged no-op that
     # returns False, so in-call actions (payment link, follow-up) degrade cleanly
