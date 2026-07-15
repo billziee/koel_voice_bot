@@ -136,9 +136,11 @@ async def login(payload: LoginRequest) -> TokenResponse:
         raise _invalid_credentials()
     if not _verify(payload.password, user.password_hash):
         raise _invalid_credentials()
+    # Subject = payload.username: we matched `User.username == payload.username`, so
+    # it equals user.username but is a definite str (user.username is now nullable).
     return TokenResponse(
         access_token=issue_token(
-            user.username, kind="access", role=user.role, org_id=user.org_id
+            payload.username, kind="access", role=user.role, org_id=user.org_id
         )
     )
 
@@ -240,9 +242,11 @@ async def google_login(payload: GoogleLoginRequest) -> TokenResponse:
             user.google_sub = sub
         elif user.google_sub != sub:
             raise _invalid_credentials()
-        subject, role, org_id = user.email, user.role, user.org_id
+        # `email` (the definite, verified, lowercased str we matched on) == user.email
+        # but is typed str, not str | None. role/org_id captured before the session closes.
+        role, org_id = user.role, user.org_id
     return TokenResponse(
-        access_token=issue_token(subject, kind="access", role=role, org_id=org_id)
+        access_token=issue_token(email, kind="access", role=role, org_id=org_id)
     )
 
 
