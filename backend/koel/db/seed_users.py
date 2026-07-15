@@ -104,3 +104,94 @@ async def seed_orgs(session: AsyncSession) -> int:
             session.add(Org(id=org_id, name=name, slug=slug))
             inserted += 1
     return inserted
+
+
+# Roles a Google-provisioned HUMAN may hold. Deliberately excludes "service" (the
+# internal machine principal minted only by koel.voicebot.clients for M2M calls):
+# a config typo like `alice@acme.com::service` must NEVER mint a service-principal
+# token for a human dashboard login. Anything unrecognized is coerced to the
+# least-privilege "operator" rather than granting an unintended scope.
+_GOOGLE_HUMAN_ROLES: frozenset[str] = frozenset({"operator", "admin"})
+
+
+def parse_google_allowlist(raw: str) -> tuple[tuple[str, str | None, str], ...]:
+    """Parse the ``KOEL_GOOGLE_ALLOWLIST`` CSV into ``(email, org_id, role)`` rows.
+
+    Each entry is ``email[:org_id[:role]]``. A blank org_id ⇒ ``None`` (the
+    platform-admin "sees all" principal); a missing role ⇒ ``"operator"``. Emails
+    are lowercased (Google treats them case-insensitively; we store + match the
+    normalized form). ``role`` is lowercased and validated against
+    ``_GOOGLE_HUMAN_ROLES`` — an unrecognized or privileged value (e.g. "service")
+    is coerced to "operator" so a config mistake can't escalate privilege.
+    Malformed entries (no ``@``) are skipped rather than raising, so one bad line
+    can't wedge boot.
+    """
+    entries: list[tuple[str, str | None, str]] = []
+    for raw_entry in raw.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        parts = [p.strip() for p in entry.split(":")]
+        email = parts[0].lower()
+        if "@" not in email:
+            continue
+        org_id = parts[1] if len(parts) > 1 and parts[1] else None
+        role = (parts[2].lower() if len(parts) > 2 and parts[2] else "operator")
+        if role not in _GOOGLE_HUMAN_ROLES:
+            role = "operator"
+        entries.append((email, org_id, role))
+    return tuple(entries)
+
+
+async def seed_google_allowlist(session: AsyncSession, raw: str) -> int:
+    """Reconcile the Google Sign-In allowlist users to the config CSV.
+
+    Returns how many rows were newly inserted. Idempotent + config-synced: the env
+    is the SOLE source of truth for who may sign in with Google, so:
+      - a new allowlisted email is inserted as a PASSWORDLESS row
+        (``auth_provider="google"``, no username, no password_hash),
+      - an existing allowlisted email has its ``org_id`` + ``role`` re-synced and
+        is re-activated (``google_sub``, bound on first login, is left untouched),
+      - a Google row whose email is NO LONGER in the CSV is DEACTIVATED
+        (``active=False``) — so removing an email from the env and redeploying is
+        an actual revocation, not a silent no-op. Deactivation (not deletion)
+        keeps the audit trail + sub binding, and re-adding the email re-activates.
+
+    Caller owns the commit. A blank ``raw`` deactivates every Google row (an empty
+    allowlist ⇒ nobody may sign in with Google).
+    """
+    entries = parse_google_allowlist(raw)
+    allowed_emails = {email for email, _org, _role in entries}
+    inserted = 0
+    for email, org_id, role in entries:
+        existing = (
+            await session.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                User(
+                    email=email,
+                    username=None,
+                    password_hash=None,
+                    auth_provider="google",
+                    org_id=org_id,
+                    role=role,
+                    active=True,
+                )
+            )
+            inserted += 1
+        else:
+            existing.org_id = org_id
+            existing.role = role
+            existing.active = True
+            existing.auth_provider = "google"
+    # Revoke: deactivate any still-active Google row that dropped off the list.
+    stale = (
+        await session.execute(
+            select(User).where(User.auth_provider == "google", User.active.is_(True))
+        )
+    ).scalars().all()
+    for user in stale:
+        if user.email not in allowed_emails:
+            user.active = False
+    return inserted

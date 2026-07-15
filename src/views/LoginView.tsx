@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Activity, Lock, XCircle } from 'lucide-react';
 
-import { login, KoelApiError } from '../lib/koel';
+import { login, loginWithGoogle, KoelApiError } from '../lib/koel';
 import type { Theme } from '../lib/theme';
 
 interface LoginViewProps {
@@ -17,6 +17,15 @@ const TURNSTILE_SITE_KEY: string | undefined =
 
 const TURNSTILE_SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 
+// Google Sign-In (allowlist model): the button renders only when a client id is
+// configured at build time. Without it, the login form is unchanged (password +
+// Turnstile only), so the offline demo/CI path keeps working. The SAME value
+// must be set as KOEL_GOOGLE_CLIENT_ID on the backend for the ID-token verify.
+const GOOGLE_CLIENT_ID: string | undefined =
+  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_GOOGLE_CLIENT_ID;
+
+const GSI_SCRIPT = 'https://accounts.google.com/gsi/client';
+
 interface TurnstileApi {
   render: (
     el: HTMLElement,
@@ -31,10 +40,54 @@ interface TurnstileApi {
   reset: (widgetId?: string) => void;
 }
 
+interface GoogleIdApi {
+  accounts: {
+    id: {
+      initialize: (opts: {
+        client_id: string;
+        callback: (resp: { credential: string }) => void;
+      }) => void;
+      renderButton: (
+        el: HTMLElement,
+        opts: {
+          theme?: 'outline' | 'filled_blue' | 'filled_black';
+          size?: 'small' | 'medium' | 'large';
+          text?: 'signin_with' | 'signup_with' | 'continue_with' | 'signin';
+          shape?: 'rectangular' | 'pill' | 'circle' | 'square';
+          width?: number;
+        },
+      ) => void;
+    };
+  };
+}
+
 declare global {
   interface Window {
     turnstile?: TurnstileApi;
+    google?: GoogleIdApi;
   }
+}
+
+function loadGsiScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.google?.accounts?.id) {
+      resolve();
+      return;
+    }
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${GSI_SCRIPT}"]`);
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('gsi script failed')));
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = GSI_SCRIPT;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', () => resolve());
+    script.addEventListener('error', () => reject(new Error('gsi script failed')));
+    document.head.appendChild(script);
+  });
 }
 
 function loadTurnstileScript(): Promise<void> {
@@ -71,6 +124,10 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [widgetError, setWidgetError] = useState(false);
   const widgetRef = useRef<HTMLDivElement | null>(null);
+  // Google Sign-In: rendered only when a client id is configured at build time.
+  const [googleError, setGoogleError] = useState(false);
+  const googleBtnRef = useRef<HTMLDivElement | null>(null);
+  const usingGoogle = Boolean(GOOGLE_CLIENT_ID);
 
   const usingRealTurnstile = Boolean(TURNSTILE_SITE_KEY);
 
@@ -96,6 +153,53 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
       cancelled = true;
     };
   }, [usingRealTurnstile]);
+
+  // Render the Google button and wire its ID-token callback. Google returns an ID
+  // token to `callback`; we exchange it for a KOEL token via the backend (which
+  // verifies it + checks the allowlist). Runs only when a client id is set; clears
+  // the container before rendering so a re-run never stacks duplicate buttons.
+  useEffect(() => {
+    if (!usingGoogle || !googleBtnRef.current) return;
+    const container = googleBtnRef.current;
+    let cancelled = false;
+
+    const onCredential = async (credential: string) => {
+      setError(null);
+      setAuthing(true);
+      try {
+        const tok = await loginWithGoogle(credential);
+        onLogin({ live: true, token: tok });
+      } catch (err) {
+        if (err instanceof KoelApiError && err.status === 401) {
+          setError('This Google account is not on the allowlist. Ask an admin to add your email.');
+        } else if (err instanceof KoelApiError && err.status === 403) {
+          setError('Google Sign-In is not enabled on this deployment.');
+        } else {
+          setError('Google Sign-In failed. Please try again.');
+        }
+        setAuthing(false);
+      }
+    };
+
+    loadGsiScript()
+      .then(() => {
+        if (cancelled || !window.google) return;
+        window.google.accounts.id.initialize({
+          client_id: GOOGLE_CLIENT_ID as string,
+          callback: (resp) => { void onCredential(resp.credential); },
+        });
+        container.innerHTML = '';
+        window.google.accounts.id.renderButton(container, {
+          theme: 'outline', size: 'large', text: 'signin_with', shape: 'rectangular', width: 320,
+        });
+      })
+      .catch(() => {
+        // Script blocked/offline: surface it rather than silently offering nothing.
+        if (!cancelled) setGoogleError(true);
+      });
+
+    return () => { cancelled = true; };
+  }, [usingGoogle, onLogin]);
 
   const handleVerify = () => {
     setVerifying(true);
@@ -204,6 +308,25 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
           <button type="submit" disabled={authing} className="w-full py-3 rounded-md text-white font-medium flex items-center justify-center gap-2 shadow-md transition-all hover:opacity-90 disabled:opacity-60" style={{ backgroundColor: '#053BEE' }}>
             {authing ? <><Activity size={16} className="animate-pulse" /> Issuing JWT…</> : <><Lock size={16} /> Sign In</>}
           </button>
+
+          {/* Google Sign-In (allowlist): rendered only when VITE_GOOGLE_CLIENT_ID
+              is set at build time. The button posts an ID token to the backend,
+              which verifies it + checks the email allowlist. */}
+          {usingGoogle && (
+            <div className="mt-5">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="h-px flex-1" style={{ backgroundColor: '#E2E6ED' }} />
+                <span className="text-[11px] font-medium uppercase tracking-wide" style={{ color: '#98A0AD' }}>or</span>
+                <span className="h-px flex-1" style={{ backgroundColor: '#E2E6ED' }} />
+              </div>
+              <div ref={googleBtnRef} className="flex justify-center" aria-label="Sign in with Google" />
+              {googleError && (
+                <p className="mt-2 text-xs font-medium text-center" style={{ color: '#D93520' }}>
+                  Google Sign-In failed to load. Check your connection and refresh.
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="mt-5 p-3 rounded-md text-xs" style={{ backgroundColor: '#F2F5FF', border: '1px solid #E8EDFF', color: '#032CB8' }}>
             <span className="font-semibold">Seeded demo credentials:</span> demo / koel-demo

@@ -111,10 +111,17 @@ class User(Base):
     """Operator/admin login identity, mapped to an org (6.4 follow-up).
 
     This closes the last gap in tenant scoping: login (``koel.voicebot.api.auth``)
-    looks the user up by ``username``, verifies the bcrypt ``password_hash``, and
-    mints a token carrying this user's ``org_id`` + ``role`` — so a logged-in
-    operator is scoped to their tenant instead of the unscoped "sees all"
-    principal every prior login minted.
+    resolves the user, verifies their credential, and mints a token carrying this
+    user's ``org_id`` + ``role`` — so a logged-in operator is scoped to their
+    tenant instead of the unscoped "sees all" principal every prior login minted.
+
+    Two identity kinds share this table (``auth_provider``):
+      - ``"password"`` — resolved by ``username``, verified against the bcrypt
+        ``password_hash`` (the original demo/CI + seeded-operator path).
+      - ``"google"`` — resolved by verified ``email`` (Google Sign-In, allowlist
+        model). Such rows carry NO ``password_hash`` and NO ``username``; the
+        Google subject id is stored in ``google_sub`` on first login. Only
+        pre-provisioned emails exist as rows, so login is an allowlist lookup.
 
     ``org_id=None`` is the platform-admin / single-tenant "sees all" principal —
     the SAME convention every scoped table's nullable ``org_id`` already uses
@@ -124,8 +131,16 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    password_hash: Mapped[bytes] = mapped_column(LargeBinary)  # bcrypt hash — never plaintext
+    # Nullable: a Google (allowlist) user has no username — they resolve by email.
+    username: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    # Nullable: a Google user has no password. bcrypt hash — never plaintext.
+    password_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Google Sign-In identity (allowlist). ``email`` is the pre-provisioned key an
+    # admin adds; ``google_sub`` is Google's stable subject id, backfilled on first
+    # login and matched thereafter (email can change; sub cannot).
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+    google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
+    auth_provider: Mapped[str] = mapped_column(String(16), default="password")  # password | google
     # Tenant scope. None = platform-admin / single-tenant "sees all" (AF convention).
     org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(32), default="operator")

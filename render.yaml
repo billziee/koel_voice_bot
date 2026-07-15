@@ -47,6 +47,11 @@ services:
       - key: KOEL_SMART_TURN_ENABLED
         value: "true"
       - fromGroup: koel-secrets   # KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET
+      # Google Sign-In (optional, allowlist model). Set these in the Render
+      # dashboard (NOT committed) to enable POST /v1/auth/google; unset ⇒ Google
+      # login is off and the password/demo path is unchanged:
+      #   KOEL_GOOGLE_CLIENT_ID   — the OAuth Web client id (also VITE_GOOGLE_CLIENT_ID on koel-dashboard)
+      #   KOEL_GOOGLE_ALLOWLIST   — CSV of `email[:org_id[:role]]`; the SOLE allowlist (removing an email revokes it on next deploy)
       # CORS is set at the SERVICE level on the live backend (dashboard + legacy origins).
       - key: KOEL_CORS_ALLOW_ORIGINS
         value: https://koel-voice-bot.onrender.com,https://koel-dashboard.onrender.com
@@ -75,6 +80,10 @@ services:
     envVars:
       - key: VITE_KOEL_API
         value: https://koel-backend-oj5p.onrender.com   # live backend origin (Render-assigned suffix)
+      # Google Sign-In (optional): set VITE_GOOGLE_CLIENT_ID in the dashboard to
+      # the SAME OAuth client id as the backend's KOEL_GOOGLE_CLIENT_ID. It is
+      # inlined at BUILD time, so a change requires a redeploy of this static
+      # site. Unset ⇒ the "Sign in with Google" button is not rendered.
     routes:
       # SPA fallback so a refresh/deep-link still serves the app shell.
       - type: rewrite

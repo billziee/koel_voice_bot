@@ -6,8 +6,11 @@ mints a short-lived WS token immediately before opening the call socket.
 
 from __future__ import annotations
 
+from typing import Any
+
 import bcrypt
 from fastapi import APIRouter, Depends, status
+from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -29,6 +32,8 @@ router = APIRouter(prefix="/v1/auth", tags=["auth"])
 # dropping login throttling; token minting is post-auth and stays fail-open.
 _login_limit = rate_limit(max_requests=8, window_s=60, name="login", fail_open=False)
 _token_limit = rate_limit(max_requests=30, window_s=60, name="token")
+# Google login is pre-auth like password login → fails CLOSED in its own namespace.
+_google_limit = rate_limit(max_requests=10, window_s=60, name="google_login", fail_open=False)
 
 
 def _hash(password: str) -> bytes:
@@ -123,17 +128,125 @@ async def login(payload: LoginRequest) -> TokenResponse:
         user = (
             await db.execute(select(User).where(User.username == payload.username))
         ).scalar_one_or_none()
-    if user is None or not user.active:
+    if user is None or not user.active or user.password_hash is None:
         # Decoy verify keeps timing constant so an unknown username can't be told
-        # apart from a wrong password; both raise the identical 401.
+        # apart from a wrong password; both raise the identical 401. A passwordless
+        # (Google) row also lands here — it must never authenticate via password.
         _verify(payload.password, _DECOY_HASH)
         raise _invalid_credentials()
     if not _verify(payload.password, user.password_hash):
         raise _invalid_credentials()
+    # Subject = payload.username: we matched `User.username == payload.username`, so
+    # it equals user.username but is a definite str (user.username is now nullable).
     return TokenResponse(
         access_token=issue_token(
-            user.username, kind="access", role=user.role, org_id=user.org_id
+            payload.username, kind="access", role=user.role, org_id=user.org_id
         )
+    )
+
+
+class GoogleLoginRequest(BaseModel):
+    # The Google ID token (a JWT) returned by Google Identity Services — GIS calls
+    # this field `credential`. Capped generously; real ID tokens are ~1KB.
+    credential: str = Field(max_length=8192)
+
+
+async def _verify_google_id_token(credential: str) -> dict[str, Any] | None:
+    """Verify a Google ID token against Google's JWKS and return its claims.
+
+    Returns None on ANY failure (fail closed): no client id configured, malformed
+    token, JWKS fetch error, unknown signing key, bad signature, wrong audience,
+    non-Google issuer, or expiry. jose enforces the signature (RS256), ``aud`` ==
+    our client id, the issuer, and ``exp``; the caller additionally requires
+    ``email_verified``. We never hand-verify crypto — jose owns that.
+    """
+    settings = get_common_settings()
+    if not settings.google_client_id:
+        return None
+    try:
+        kid = jwt.get_unverified_header(credential).get("kid")
+    except JWTError:
+        return None
+    if not kid:
+        return None
+    try:
+        async with make_async_client(timeout_s=settings.google_token_timeout_s) as client:
+            resp = await client.get(settings.google_jwks_url)
+            resp.raise_for_status()
+            jwks = resp.json()
+        # Key selection is inside the try so a malformed JWKS body (not a dict /
+        # no "keys") fails CLOSED (→ None → 401) instead of raising a 500.
+        key = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+    except Exception:  # noqa: BLE001 — JWKS fetch/parse failure ⇒ reject (fail closed)
+        logger.warning("google_jwks_fetch_failed", exc_info=True)
+        return None
+    if key is None:
+        return None
+    try:
+        return jwt.decode(
+            credential,
+            key,
+            algorithms=["RS256"],
+            audience=settings.google_client_id,
+            issuer=["https://accounts.google.com", "accounts.google.com"],
+        )
+    except JWTError:
+        logger.info("google_id_token_invalid", exc_info=True)
+        return None
+
+
+@router.post("/google", response_model=TokenResponse, dependencies=[Depends(_google_limit)])
+async def google_login(payload: GoogleLoginRequest) -> TokenResponse:
+    """Log in with a Google ID token (allowlist model).
+
+    Disabled unless ``KOEL_GOOGLE_CLIENT_ID`` is set (403 ``google_login_disabled``
+    — the frontend only shows the button when its own client id is configured, so
+    the demo/CI path never calls this). When enabled: verify the ID token, require
+    a verified email, then resolve that email against the PRE-PROVISIONED users
+    allowlist. An unknown or unverified email raises the SAME 401 as a bad
+    password — Google login never reveals whether an email is on the allowlist.
+    The token minted carries the allowlisted row's ``org_id`` + ``role``.
+    """
+    settings = get_common_settings()
+    if not settings.google_client_id:
+        raise ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="google_login_disabled",
+            message="Google Sign-In is not enabled on this deployment.",
+        )
+    claims = await _verify_google_id_token(payload.credential)
+    if claims is None or claims.get("email_verified") is not True:
+        raise _invalid_credentials()
+    email = str(claims.get("email") or "").strip().lower()
+    sub = str(claims.get("sub") or "")
+    if not email or not sub:
+        raise _invalid_credentials()
+    async with session_scope() as db:
+        # Row-lock the read (FOR UPDATE on Postgres; a no-op on SQLite tests) so two
+        # concurrent first-logins for the same email with DIFFERENT subs can't both
+        # take the "bind" branch — the second sees the bound sub and is rejected.
+        user = (
+            await db.execute(select(User).where(User.email == email).with_for_update())
+        ).scalar_one_or_none()
+        # Allowlist: only a pre-provisioned, active row may sign in.
+        if user is None or not user.active:
+            raise _invalid_credentials()
+        # Reject an email that collides with a NON-Google row (defence in depth:
+        # a password user's email should never be assumable via Google).
+        if user.auth_provider != "google":
+            raise _invalid_credentials()
+        # Bind the stable Google subject on first login; verify it thereafter so a
+        # re-used email (rare, but Google allows deletion + reassignment within a
+        # Workspace) can't silently inherit a prior person's access.
+        if user.google_sub is None:
+            user.google_sub = sub
+        elif user.google_sub != sub:
+            raise _invalid_credentials()
+        # `email` (the definite, verified, lowercased str we matched on) == user.email
+        # but is typed str, not str | None. role/org_id captured before the session closes.
+        role, org_id = user.role, user.org_id
+    return TokenResponse(
+        access_token=issue_token(email, kind="access", role=role, org_id=org_id)
     )
 
 
