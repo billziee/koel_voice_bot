@@ -1,13 +1,31 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 import type { BotConfig, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
+import { getKnowledgeIndexes, type KnowledgeIndex } from '../lib/koel';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
 import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
 import { useConnections } from '../hooks/useConnections';
 import { FlowEditor, defaultFlow, validateFlow } from '../components/FlowEditor';
+
+// Single source of truth for which prompt variables the CRM context fills at call
+// time, and the CRM field each resolves from. Drives BOTH the Step-4 mapping table
+// and the preflight check, so they can never drift. A prompt token outside this
+// map has no data source and would render literally on the call.
+const CRM_FIELD_MAP: Record<string, string> = {
+  customer_name: 'crm.full_name',
+  name: 'crm.full_name',
+  bank: 'crm.bank',
+  product: 'crm.offer.product',
+  product_name: 'crm.offer.product',
+  offer: 'crm.offer.product',
+  offer_amount: 'crm.offer.amount',
+  benefit_1: 'crm.offer.benefit_primary',
+  benefit_2: 'crm.offer.benefit_secondary',
+  fee_clause: 'crm.offer.fee_waiver',
+};
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
 const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
@@ -32,26 +50,35 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
   // degrades to Default-only when the backend is offline or the fetch fails.
   const availableConnections = useConnections(token);
   const [connectionSel, setConnectionSel] = useState<ConnectionSelection>({});
-  const [ragIndex, setRagIndex] = useState('kb_hdfc_regalia_v3');
+  const [ragIndex, setRagIndex] = useState('');
   // Real scripted flow (6.6): seeded with a minimal single-node starter, edited
   // in place, and shipped in config.flow on deploy.
   const [flow, setFlow] = useState<Flow>(() => defaultFlow());
+  // Live knowledge indexes for the RAG picker (Step 4). Fetched with the token;
+  // degrades to an empty list (plain free-text entry still works) when offline.
+  const [knowledgeIndexes, setKnowledgeIndexes] = useState<KnowledgeIndex[]>([]);
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    getKnowledgeIndexes(token)
+      .then((ix) => { if (!cancelled) setKnowledgeIndexes(ix); })
+      .catch(() => { /* offline/demo → picker stays empty, free-text entry still works */ });
+    return () => { cancelled = true; };
+  }, [token]);
 
   // Flow shape stats + validation feed the footer, review panel, and preflight.
   const flowNodeCount = Object.keys(flow.nodes).length;
   const flowBranchCount = Object.values(flow.nodes).reduce((n, node) => n + Object.keys(node.branches).length, 0);
   const flowErrors = validateFlow(flow).filter((i) => i.level === 'error').length;
 
-  // Variables the CRM context can fill at call time. A prompt token outside this
-  // set has no data source, so it would render literally on the call. Scanned
-  // across ALL node prompts so the check tracks the real flow, not one node.
-  const CRM_MAPPED_VARS = new Set([
-    'customer_name', 'name', 'bank', 'product', 'offer', 'offer_amount',
-    'benefit_1', 'benefit_2', 'fee_clause',
-  ]);
+  // The UNIQUE variables actually used across ALL node prompts (real flow, not a
+  // hardcoded list), in first-seen order. A token outside CRM_FIELD_MAP has no
+  // data source, so it would render literally on the call.
   const flowPromptText = Object.values(flow.nodes).map((n) => n.prompt).join(' ');
-  const scriptVars = Array.from(flowPromptText.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim());
-  const unmappedVars = scriptVars.filter((v) => !CRM_MAPPED_VARS.has(v));
+  const scriptVars = Array.from(
+    new Set(Array.from(flowPromptText.matchAll(/\{([^}]+)\}/g), (m) => m[1].trim())),
+  );
+  const unmappedVars = scriptVars.filter((v) => !(v in CRM_FIELD_MAP));
 
   // Real preflight (Q-3): each row reflects the builder's ACTUAL state rather
   // than a hardcoded pass. Variable-mapping, flow validity, and index checks are
@@ -243,46 +270,80 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
               <FlowEditor value={flow} onChange={setFlow} theme={theme} />
             )}
 
-            {/* Step 4: Knowledge & CRM */}
+            {/* Step 4: Knowledge & CRM — wired to live indexes + the real flow */}
             {step === 4 && (
               <div className="space-y-5">
                 <div>
                   <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>RAG knowledge index</label>
-                  <input value={ragIndex} onChange={e => setRagIndex(e.target.value)} className="w-full border rounded-md px-3 py-2 text-[13px] font-mono" style={{ borderColor: theme.rule, color: theme.ink }} />
+                  <input
+                    list="kb-indexes"
+                    value={ragIndex}
+                    onChange={e => setRagIndex(e.target.value)}
+                    placeholder={knowledgeIndexes.length ? 'Pick an existing index or type a new one' : 'e.g. cc_hdfc'}
+                    className="w-full border rounded-md px-3 py-2 text-[13px] font-mono outline-none focus:ring-2"
+                    style={{ borderColor: theme.rule, backgroundColor: theme.surfaceCard, color: theme.ink }}
+                  />
+                  <datalist id="kb-indexes">
+                    {knowledgeIndexes.map((ix) => (
+                      <option key={ix.rag_index} value={ix.rag_index}>{`${ix.chunk_count} chunk${ix.chunk_count === 1 ? '' : 's'}`}</option>
+                    ))}
+                  </datalist>
+                  <p className="text-[11px] mt-1.5" style={{ color: theme.faint }}>
+                    {(() => {
+                      const sel = knowledgeIndexes.find((ix) => ix.rag_index === ragIndex);
+                      if (sel) return `“${sel.rag_index}” · ${sel.chunk_count} chunk${sel.chunk_count === 1 ? '' : 's'} embedded and retrievable.`;
+                      if (knowledgeIndexes.length) return `${knowledgeIndexes.length} index${knowledgeIndexes.length === 1 ? '' : 'es'} available. A new name starts an empty index — add content under Knowledge Base.`;
+                      return token
+                        ? 'No indexes found yet — create one under Knowledge Base, or type a name to start fresh.'
+                        : 'Connect to a live backend to list existing indexes.';
+                    })()}
+                  </p>
                 </div>
                 <div>
-                  <label className="block text-[12px] font-medium mb-3" style={{ color: theme.ink2 }}>CRM variable mapping</label>
-                  <div className="rounded-md border overflow-hidden" style={{ borderColor: theme.rule }}>
-                    <table className="w-full text-[12.5px]">
-                      <thead>
-                        <tr style={{ backgroundColor: theme.inset }}>
-                          <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>Script variable</th>
-                          <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>CRM field</th>
-                          <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[
-                          { variable: '{customer_name}', field: 'crm.full_name', mapped: true },
-                          { variable: '{product_name}', field: 'crm.offer.product', mapped: true },
-                          { variable: '{benefit_1}', field: 'crm.offer.benefit_primary', mapped: true },
-                          { variable: '{benefit_2}', field: 'crm.offer.benefit_secondary', mapped: true },
-                          { variable: '{fee_clause}', field: 'crm.offer.fee_waiver', mapped: true },
-                          { variable: '{pre_approved_limit}', field: '—', mapped: false },
-                        ].map((row, i) => (
-                          <tr key={i} className="border-t" style={{ borderColor: theme.ruleSubtle }}>
-                            <td className="px-3 py-2 font-mono" style={{ color: theme.primary }}>{row.variable}</td>
-                            <td className="px-3 py-2 font-mono" style={{ color: theme.ink }}>{row.field}</td>
-                            <td className="px-3 py-2">
-                              <span className="px-2 py-0.5 rounded text-[11px] font-medium" style={{ backgroundColor: row.mapped ? theme.greenLight : theme.warningLight, color: row.mapped ? theme.green : theme.warning }}>
-                                {row.mapped ? 'Mapped' : 'Unmapped'}
-                              </span>
-                            </td>
+                  <label className="block text-[12px] font-medium mb-2" style={{ color: theme.ink2 }}>
+                    CRM variable mapping
+                    <span className="ml-2 font-normal" style={{ color: theme.faint }}>· derived from your conversation flow</span>
+                  </label>
+                  {scriptVars.length === 0 ? (
+                    <div className="rounded-md border px-4 py-6 text-center text-[12.5px]" style={{ borderColor: theme.rule, color: theme.faint }}>
+                      No <span className="font-mono">{'{variables}'}</span> used in your flow yet. Add a token like{' '}
+                      <span className="font-mono" style={{ color: theme.primary }}>{'{customer_name}'}</span> to a prompt in the Conversation flow step and it’ll appear here.
+                    </div>
+                  ) : (
+                    <div className="rounded-md border overflow-hidden" style={{ borderColor: theme.rule }}>
+                      <table className="w-full text-[12.5px]">
+                        <thead>
+                          <tr style={{ backgroundColor: theme.inset }}>
+                            <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>Script variable</th>
+                            <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>CRM field</th>
+                            <th className="text-left px-3 py-2 font-medium" style={{ color: theme.faint }}>Status</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          {scriptVars.map((v) => {
+                            const field = CRM_FIELD_MAP[v];
+                            const mapped = field !== undefined;
+                            return (
+                              <tr key={v} className="border-t" style={{ borderColor: theme.ruleSubtle }}>
+                                <td className="px-3 py-2 font-mono" style={{ color: theme.primary }}>{`{${v}}`}</td>
+                                <td className="px-3 py-2 font-mono" style={{ color: mapped ? theme.ink : theme.faint }}>{field ?? '—'}</td>
+                                <td className="px-3 py-2">
+                                  <span className="px-2 py-0.5 rounded text-[11px] font-medium" style={{ backgroundColor: mapped ? theme.greenLight : theme.warningLight, color: mapped ? theme.green : theme.warning }}>
+                                    {mapped ? 'Mapped' : 'Unmapped'}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {unmappedVars.length > 0 && (
+                    <p className="text-[11px] mt-2" style={{ color: theme.warning }}>
+                      {unmappedVars.length} unmapped variable{unmappedVars.length === 1 ? '' : 's'} — no CRM source, so it renders literally on the call. Rename it to a supported field or remove it from the flow.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
