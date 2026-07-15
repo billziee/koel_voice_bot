@@ -72,28 +72,43 @@ async def _keepalive_loop(url: str, interval_s: float) -> None:
 
 
 async def _ensure_schema() -> None:
-    """Apply migrations + seed on boot when the schema is missing/empty.
+    """Migrate on every boot; seed only when the schema is empty.
 
     Render free tier runs no pre-deploy/one-off jobs, so the app self-migrates.
-    Idempotent: skips seeding when bots already exist (no KB re-embed per boot).
+    ``alembic upgrade head`` is idempotent — it applies only the *pending*
+    revisions — so it MUST run unconditionally: an already-populated live DB
+    (bots exist) still needs newly-added migrations (e.g. the Users/org + BYOK
+    model-connection tables). Gating migrations behind "DB is empty" silently
+    skipped them, so ``users`` never existed and login 500'd. Seeding, by
+    contrast, is gated on emptiness so we never re-embed the KB per boot.
     """
     from sqlalchemy import func, select
 
     from koel.db.models import BotConfig
     from koel.db.session import session_scope
 
+    # 1) Always bring the schema to head (idempotent; no-op when up to date).
+    #    `python -m alembic` from the WORKDIR (which holds alembic.ini) applies
+    #    every pending revision. Run off the event loop — env.py drives its own.
+    logger.info("applying migrations (alembic upgrade head)")
+    await asyncio.to_thread(
+        subprocess.run, [sys.executable, "-m", "alembic", "upgrade", "head"], check=True
+    )
+
+    # 2) Seed only when the schema is empty (fresh DB). On an existing DB the
+    #    tables now exist post-migrate, so this count is a cheap, safe probe.
     need = True
     try:
         async with session_scope() as db:
             count = (await db.execute(select(func.count()).select_from(BotConfig))).scalar_one()
             need = count == 0
-    except Exception:  # noqa: BLE001 — tables don't exist yet → bootstrap
+    except Exception:  # noqa: BLE001 — defensive: treat any probe failure as "seed"
         need = True
     if not need:
         return
-    logger.info("schema missing/empty → running migrations + seed")
+    logger.info("schema empty → seeding orgs + users + CRM + bots + knowledge base")
     # `python -m` puts CWD (the WORKDIR that holds scripts/) on sys.path; the
-    # bootstrap script runs alembic upgrade head then seeds. Run off the loop.
+    # bootstrap script re-runs alembic upgrade head (no-op here) then seeds.
     await asyncio.to_thread(
         subprocess.run, [sys.executable, "-m", "scripts.bootstrap_db"], check=True
     )
