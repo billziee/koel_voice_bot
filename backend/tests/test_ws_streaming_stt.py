@@ -225,6 +225,29 @@ async def test_streaming_final_that_ends_call_persists_and_finalizes(test_db):
     assert row.outcome == CallOutcome.converted
 
 
+async def test_streaming_final_dropped_during_agent_hold(test_db):
+    # Regression: on an agent hold (waiting_agent) the human operator owns the
+    # call, so a streaming utterance final must be DROPPED — running it through the
+    # bot turn loop would speak over the live handoff. Mirrors _handle_audio's guard.
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp())
+    session = FakeStreamingSession()
+    call = _session(ws, _state("ws_hold"), clients, factory=_factory_for(session))
+    call._state.status = CallStatus.waiting_agent  # noqa: SLF001
+
+    ran = False
+
+    async def _turn(state, send, stt):  # noqa: ANN001
+        nonlocal ran
+        ran = True
+
+    call._orch.handle_final_transcript = _turn  # type: ignore[assignment] # noqa: SLF001
+    await call._stt_stream._on_final(  # noqa: SLF001
+        TranscriptResult(session_id="s", text="haan operator se baat karni hai", is_final=True)
+    )
+    assert ran is False  # bot turn suppressed during the operator handoff
+
+
 async def test_teardown_closes_session(test_db):
     # A frame opens the session; end_call finalizes the CallSession, which must close
     # the streaming session so the Deepgram socket isn't leaked.

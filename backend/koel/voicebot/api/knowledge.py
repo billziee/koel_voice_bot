@@ -42,7 +42,10 @@ class ChunkIn(BaseModel):
     use_case: UseCase
     language: str = Field(default="hinglish", max_length=16)
     title: str = Field(max_length=200)
-    content: str = Field(min_length=1)
+    # Bounded so a single chunk can't trigger an unbounded embedding call (cost /
+    # memory / provider-limit DoS). Long docs should be chunked (auto_chunk) rather
+    # than posted as one huge blob; 100k chars is a generous ceiling for one doc.
+    content: str = Field(min_length=1, max_length=100_000)
     # If true, split long content into multiple ~512-token passages before embedding.
     chunk: bool = False
 

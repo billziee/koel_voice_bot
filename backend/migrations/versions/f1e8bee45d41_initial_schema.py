@@ -164,3 +164,10 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_bot_config_audits_bot_id'), table_name='bot_config_audits')
     op.drop_table('bot_config_audits')
     # ### end Alembic commands ###
+    # On Postgres, sa.Enum auto-creates named TYPEs that drop_table does NOT remove.
+    # Without this, a downgrade-then-upgrade fails with "type ... already exists".
+    # (No-op on SQLite, which has no standalone enum types.)
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        for enum_name in ("calloutcome", "calldirection", "usecase"):
+            op.execute(sa.text(f"DROP TYPE IF EXISTS {enum_name}"))

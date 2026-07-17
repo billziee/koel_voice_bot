@@ -114,6 +114,15 @@ async def reply(
             code="escalation_not_claimed",
             message="Claim the handoff before replying.",
         )
+    if row.get("operator_sub") != user.sub:
+        # Org + claimed is not enough: only the operator who CLAIMED it may speak on
+        # the call — otherwise a second operator in the same org could talk over the
+        # claimer's live handoff.
+        raise ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="not_claim_owner",
+            message="This handoff was claimed by another operator.",
+        )
     delivered = await runtime.escalations.deliver(row["session_id"], payload.text)
     if not delivered:
         raise ApiError(
@@ -132,6 +141,21 @@ async def resolve(
 ) -> dict:
     """Finish the handoff: mark it resolved, then end the caller's call. Marking
     the DB first means the caller's finalize won't race it to 'abandoned'."""
+    # Ownership: only the operator who claimed the handoff may resolve it. Check
+    # before closing so another org-mate can't resolve someone else's live call.
+    existing = await get_escalation(escalation_id, user.org_id)
+    if existing is None:
+        raise ApiError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="escalation_not_found",
+            message="Escalation not found.",
+        )
+    if existing.get("operator_sub") != user.sub:
+        raise ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="not_claim_owner",
+            message="This handoff was claimed by another operator.",
+        )
     row = await close_escalation(escalation_id, user.org_id, EscalationStatus.resolved)
     if row is None:
         raise ApiError(

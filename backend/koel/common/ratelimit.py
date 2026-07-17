@@ -116,6 +116,12 @@ class RedisRateLimiter:
         try:
             async with self._redis.pipeline(transaction=True) as pipe:
                 pipe.incr(rk)
+                # EXPIRE ... NX sets the TTL only when the key has none yet, so the
+                # fixed window starts at the first request and isn't reset on every
+                # hit (which would let sustained traffic keep the counter alive and
+                # lock users out permanently). The NX flag needs Redis >= 7.0 — which
+                # the project pins everywhere (docker-compose + CI = redis:7-alpine);
+                # do not run this against an older server.
                 pipe.expire(rk, self._window, nx=True)
                 count, _ = await pipe.execute()
         except Exception:  # noqa: BLE001 — Redis unreachable: honor the fail_open policy

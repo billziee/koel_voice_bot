@@ -77,6 +77,14 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   const audioQueueRef = useRef<AudioBuffer[]>([]);
   const audioPlayingRef = useRef(false);
   const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
+  // Live mirror of soundEnabled: ensureAudioGraph is invoked from a stale closure
+  // (the onAudio handler captured at call start), so reading the state directly
+  // could build the graph muted even after the user enabled sound. Read the ref.
+  const soundEnabledRef = useRef(soundEnabled);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  // Serializes decode+enqueue so streamed TTS chunks queue in ARRIVAL order —
+  // decodeAudioData is async and can resolve out of order for back-to-back chunks.
+  const enqueueChainRef = useRef<Promise<void>>(Promise.resolve());
 
   // Lazily build the playback graph: source -> analyser -> masterGain -> output.
   // masterGain is the mute switch; the analyser always sees audio so the
@@ -89,7 +97,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 64;
     const gain = ctx.createGain();
-    gain.gain.value = soundEnabled ? 1 : 0;
+    gain.gain.value = soundEnabledRef.current ? 1 : 0;
     analyser.connect(gain);
     gain.connect(ctx.destination);
     audioCtxRef.current = ctx;
@@ -119,17 +127,22 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   };
 
   // Decode a base64 WAV chunk from the backend and enqueue it for gapless playback.
-  const enqueueAudio = async (audio_b64?: string) => {
+  // Decode+enqueue is chained through enqueueChainRef so back-to-back chunks preserve
+  // ARRIVAL order — decodeAudioData resolves at different speeds per chunk, so a bare
+  // async push could queue streamed TTS sentences out of order.
+  const enqueueAudio = (audio_b64?: string) => {
     if (!audio_b64) return;
-    const ctx = ensureAudioGraph();
-    if (!ctx) return;
-    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
-    try {
-      const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
-      const buffer = await ctx.decodeAudioData(bytes.buffer);
-      audioQueueRef.current.push(buffer);
-      if (!audioPlayingRef.current) playNextAudio();
-    } catch { /* undecodable chunk — skip rather than break the call */ }
+    enqueueChainRef.current = enqueueChainRef.current.then(async () => {
+      const ctx = ensureAudioGraph();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
+      try {
+        const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
+        const buffer = await ctx.decodeAudioData(bytes.buffer);
+        audioQueueRef.current.push(buffer);
+        if (!audioPlayingRef.current) playNextAudio();
+      } catch { /* undecodable chunk — skip rather than break the call */ }
+    });
   };
 
   // Stop playback immediately (barge-in TTS_KILL, or call end) and drop the queue.

@@ -9,6 +9,7 @@ holds either way. Tenant-scoped (AF); each export is itself logged as an
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, status
@@ -67,8 +68,16 @@ async def create_export(payload: ExportRequest, user: CurrentUser) -> ExportResu
         db.add(job)
         await db.flush()
         job_id = job.id
-        url = upload_export(job_id, data)
-        job.object_url = url
+    # Upload OUTSIDE the transaction and OFF the event loop: upload_export is a
+    # blocking boto3 call, so keeping it inside the txn held a DB connection open
+    # for the whole S3 round-trip and stalled the loop. Persist the object URL in a
+    # second short txn once the bytes are stored.
+    url = await asyncio.to_thread(upload_export, job_id, data)
+    if url:
+        async with session_scope() as db:
+            stored = await db.get(ExportJob, job_id)
+            if stored is not None:
+                stored.object_url = url
     logger.info(
         "export_created",
         extra={"extra_fields": {

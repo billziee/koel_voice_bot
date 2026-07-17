@@ -248,7 +248,18 @@ export function LoginView({ onLogin, theme }: LoginViewProps) {
         setAuthing(false);
         return;
       }
-      // Backend unreachable — proceed in demo mode so the showcase still runs.
+      if (err instanceof KoelApiError) {
+        // The backend ANSWERED with an error status (e.g. 5xx) — surface it rather
+        // than silently dropping into offline demo, which would masquerade as a
+        // successful login while hiding a real server problem. Only a genuine
+        // network failure (fetch threw, below) means "backend unreachable".
+        setError(`${err.status} — Sign-in failed on the server. Please try again.`);
+        resetChallenge();
+        setAuthing(false);
+        return;
+      }
+      // Backend unreachable (fetch threw — network/CORS): proceed in demo mode so
+      // the offline showcase / CI path still runs.
       onLogin({ live: false, token: null });
     }
   };

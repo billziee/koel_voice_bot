@@ -166,9 +166,19 @@ def create_app(
     # routing/instrumentation runs (the OTel instrumentor errors on unmatched
     # routes). add_middleware prepends, so adding it last makes it outermost.
     origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
+    if not origins and settings.is_production:
+        # A production value that parses to nothing (empty, or only separators like
+        # ",,") is a misconfiguration — do NOT silently fall back to a wildcard.
+        # Fail closed: no cross-origin until origins are configured. (Set the value
+        # to a literal "*" to opt into wildcard — safe here since auth is bearer-token,
+        # not cookies.)
+        logger.error("cors_allow_origins is empty in production; refusing '*' fallback")
+        allow_origins = origins
+    else:
+        allow_origins = origins or ["*"]  # dev convenience / explicit "*"
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins or ["*"],
+        allow_origins=allow_origins,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=[CORRELATION_HEADER],

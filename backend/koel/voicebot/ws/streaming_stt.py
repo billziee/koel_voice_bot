@@ -150,6 +150,12 @@ class BrowserStreamingStt:
         owner = self._owner
         # Serialize with any concurrent utterance final so two turns never overlap.
         async with self._final_lock:
+            # On agent hold (3.1) the human operator owns the conversation — drop the
+            # customer's streaming turn instead of running the bot loop over the
+            # handoff (mirrors _handle_audio's waiting_agent guard; checked inside the
+            # lock so a hold that lands mid-wait is still honoured).
+            if owner._state.status == CallStatus.waiting_agent:  # noqa: SLF001
+                return
             # The customer is taking their turn — any prior bot audio is done.
             owner._bot_speaking = False  # noqa: SLF001 — extracted arm of CallSession
             owner._turn_in_at = time.monotonic()  # noqa: SLF001 — first-audio metric mark
