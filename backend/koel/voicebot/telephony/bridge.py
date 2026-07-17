@@ -42,7 +42,7 @@ from typing import Protocol
 
 from koel.common.logging import get_logger
 from koel.stt.schemas import TranscriptResult
-from koel.voicebot.session.models import SessionState
+from koel.voicebot.session.models import CallStatus, SessionState
 from koel.voicebot.telephony.codec import pcm16_to_ulaw8k, ulaw8k_to_pcm16
 from koel.voicebot.telephony.dtmf import dtmf_to_turn
 from koel.voicebot.telephony.twilio import (
@@ -210,9 +210,21 @@ class TwilioMediaBridge:
                 if self._stopped:
                     break
         finally:
+            # Abnormal disconnect: the carrier socket dropped without a Twilio
+            # `stop` frame (a clean stop already ran end_call via _on_stop). Mark
+            # the call dropped so the owning route persists the true outcome rather
+            # than a stuck `in_progress` — mirrors the browser handler's grace path.
+            # We don't call end_call here: its goodbye audio would only go to a dead
+            # socket, and this adapter owns transport, not persistence.
+            if not self._stopped and self._state.outcome == "in_progress":
+                self._state.outcome = "call_dropped"
+                self._state.status = CallStatus.ended
             logger.info(
                 "twilio_bridge_closed",
-                extra={"extra_fields": {"session_id": self._state.session_id}},
+                extra={"extra_fields": {
+                    "session_id": self._state.session_id,
+                    "outcome": self._state.outcome,
+                }},
             )
 
     async def _on_frame(self, raw: str) -> None:

@@ -436,6 +436,13 @@ class CallSession:
         )
         if self._state.status == CallStatus.ended:
             self._closed = True
+        # This runs in a detached background task (the smart-turn flush timer), NOT
+        # the receive loop — so unlike the inline turn in _handle_audio, nothing
+        # persists the resulting state afterwards. Persist here (and finalize when
+        # the held turn ended the call), else the flushed turn's transcript is lost
+        # until the next frame and, if it ENDED the call, the receive loop unwinds
+        # via the no-input timeout with the call never recorded (lost CallLog).
+        await self._persist_state()
 
     def _start_speculative_retrieval(self, held_text: str) -> None:
         """O-5: fire RAG retrieval for the held mid-thought text in the background

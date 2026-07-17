@@ -100,6 +100,34 @@ async def test_held_turn_flushes_alone_after_window(test_db):
     assert customer[0]["text"] == "main soch raha tha ki"
 
 
+async def test_flushed_turn_that_ends_call_persists_and_finalizes(test_db):
+    # Regression: the smart-turn flush runs in a DETACHED background task, not the
+    # receive loop, so nothing persists its state afterwards. If the held turn ends
+    # the call, _flush_pending_turn must persist + finalize itself — otherwise the
+    # receive loop unwinds on the no-input timer (early-returns on `ended`) and the
+    # call is never recorded (lost CallLog + Redis session leaked on TTL).
+    from sqlalchemy import select
+
+    from koel.db.models import CallLog
+    from koel.voicebot.session.models import CallStatus
+
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp(end_call=True), stt_text="theek hai bye")
+    call = _call(ws, clients, verdict=False, hold_ms=50)  # held (incomplete-turn gate)
+
+    await call._handle_audio(_audio_msg())  # noqa: SLF001 — held, timer armed
+    assert ws.frames_of(ServerMessageType.transcript) == []
+
+    await asyncio.sleep(0.15)  # let the flush timer fire → ends the call
+
+    assert call._state.status == CallStatus.ended  # noqa: SLF001
+    assert call._closed is True and call._finalized is True  # noqa: SLF001
+    assert "ws_1" in call._store.deleted  # noqa: SLF001 — Redis flushed only post-persist
+    async with test_db() as db:
+        rows = (await db.execute(select(CallLog).where(CallLog.session_id == "ws_1"))).scalars().all()
+    assert len(rows) == 1  # the flushed-and-ended turn was recorded exactly once
+
+
 async def test_complete_turn_passes_straight_through(test_db):
     ws = FakeWebSocket([])
     clients = ScriptedClients(nlp=_nlp(), stt_text="mujhe card nahi chahiye")

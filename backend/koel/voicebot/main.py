@@ -259,6 +259,17 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
         if not await runtime.store.restore_active_ttl(session_id):
             await websocket.close(code=1008, reason="session expired")
             return
+        # Claim the session off the grace path NOW, before any further await: flip
+        # `reconnecting` → `listening` and persist immediately. The prior session's
+        # detached grace finalizer (_await_grace_then_finalize) re-loads state and
+        # bails when it's no longer `reconnecting`, so persisting the reclaim here —
+        # rather than late in run() after accept()+the reconnected frame — closes
+        # the window where a reconnect landing near grace-expiry would still be
+        # finalized as a dropped call. (Sub-millisecond Redis GET/SET interleave
+        # residual needs a store-level CAS under multi-worker — see docs/SECURITY.md.)
+        if state.status == CallStatus.reconnecting:
+            state.status = CallStatus.listening
+            await runtime.store.save(state)
 
     # Concurrency guard: only ONE live socket per session at a time. A second
     # concurrent connect (double-tab, racey reconnect) would resume the same

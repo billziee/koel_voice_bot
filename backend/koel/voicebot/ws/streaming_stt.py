@@ -164,6 +164,12 @@ class BrowserStreamingStt:
                 return
             if owner._state.status == CallStatus.ended:  # noqa: SLF001
                 owner._closed = True  # noqa: SLF001 — let the receive loop unwind
+            # This turn runs from the Deepgram reader task, NOT the receive loop, so
+            # nothing persists the resulting state afterwards. Persist here (and
+            # finalize when the turn ended the call) — otherwise a streaming turn
+            # that hangs up leaves the receive loop to unwind on the no-input timer,
+            # which early-returns on `ended` and exits with the call never recorded.
+            await owner._persist_state()  # noqa: SLF001 — extracted arm of CallSession
 
     @staticmethod
     def _decode(msg: ClientMessage) -> bytes:
