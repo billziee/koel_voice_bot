@@ -3,7 +3,7 @@ import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 import type { BotConfig, SttMode, Flow, ConnectionSelection } from '../types';
 import type { Theme } from '../lib/theme';
-import { getKnowledgeIndexes, type KnowledgeIndex } from '../lib/koel';
+import { generateFlow, getKnowledgeIndexes, type KnowledgeIndex } from '../lib/koel';
 import { KV } from '../components/KV';
 import { SttModeSelector } from '../components/SttModeSelector';
 import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
@@ -267,7 +267,16 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
 
             {/* Step 3: Conversation flow — real editor (canvas + form) */}
             {step === 3 && (
-              <FlowEditor value={flow} onChange={setFlow} theme={theme} />
+              <FlowEditor
+                value={flow}
+                onChange={setFlow}
+                theme={theme}
+                onAutoBuild={
+                  token && ragIndex.trim()
+                    ? () => generateFlow(token, { ragIndex, useCase, language: languages[0] })
+                    : undefined
+                }
+              />
             )}
 
             {/* Step 4: Knowledge & CRM — wired to live indexes + the real flow */}

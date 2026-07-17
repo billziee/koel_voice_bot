@@ -8,6 +8,7 @@ import { SttModeSelector } from '../components/SttModeSelector';
 import { ModelConnectionSelectors } from '../components/connections/ModelConnectionSelectors';
 import { useConnections } from '../hooks/useConnections';
 import { FlowEditor, defaultFlow } from '../components/FlowEditor';
+import { generateFlow } from '../lib/koel';
 
 // Default config seed per use case (ConfigView-only).
 const DEFAULT_CONFIGS: Record<UseCase, BotConfig> = {
@@ -296,7 +297,16 @@ export function ConfigView({ bot, existingConfig, isNew, onSave, onCancel, theme
           <div className="text-[12px]" style={{ color: theme.faint }}>Scripted state machine that scaffolds the LLM — nodes carry per-turn guidance, branches route on detected intent.</div>
         </div>
         <div className="p-4">
-          <FlowEditor value={flow} onChange={setFlow} theme={theme} />
+          <FlowEditor
+            value={flow}
+            onChange={setFlow}
+            theme={theme}
+            onAutoBuild={
+              token && ragIndex.trim()
+                ? () => generateFlow(token, { ragIndex, useCase, language })
+                : undefined
+            }
+          />
         </div>
       </div>
 
