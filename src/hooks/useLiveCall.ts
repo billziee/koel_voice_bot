@@ -49,6 +49,10 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   const outcomeRef = useRef<{ label: string; status: CallHistory['status'] }>({ label: 'Completed', status: 'green' });
   const transcriptRef = useRef<TranscriptMessageData[]>([]);
   const durationRef = useRef(0);
+  // Mirror of `events` — endCall runs from stale closures (scheduled timers,
+  // onEnded/onTtsKill captured at startLiveCall), so it must read the ref, not
+  // the closed-over `events` state, or the persisted CallHistory.events is empty.
+  const eventsRef = useRef<SessionEvent[]>([]);
   const endedRef = useRef(false);
   const lastFillerRef = useRef<number>(-1);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -319,7 +323,11 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
 
   const logEvent = (label: string, level: SessionEvent['level'] = 'info') => {
     const id = nextId();
-    setEvents(prev => [...prev, { id, t: formatTime(durationRef.current), label, level }]);
+    setEvents(prev => {
+      const next = [...prev, { id, t: formatTime(durationRef.current), label, level }];
+      eventsRef.current = next;  // keep the ref in sync so endCall (stale closure) persists them
+      return next;
+    });
   };
 
   // --- transcript autoscroll / call timer ---
@@ -424,7 +432,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     callStartTimeRef.current = Date.now();
     setTranscript([]);
     setPartialTranscript('');
-    setEvents([]);
+    setEvents([]); eventsRef.current = [];
     setDuration(0);
     setCallState('connecting');
     logEvent('WebSocket handshake — short-lived JWT presented, upgrading…');
@@ -508,7 +516,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     const sid = `SES-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     setSessionId(sid);
     setTranscript([]);
-    setEvents([]);
+    setEvents([]); eventsRef.current = [];
     setDuration(0);
     setCallState('connecting');
     logEvent('WebSocket handshake — JWT presented, upgrading…');
@@ -571,7 +579,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
       phone: customer.phone,
       avgLatencyMs: avgLat,
       transcript: finalTranscript,
-      events: [...events], // Item 35
+      events: [...eventsRef.current], // Item 35 — ref, not stale closure `events`
     });
   };
 

@@ -222,7 +222,15 @@ async def start_session(
 
     crm_context: dict = {}
     if payload.customer_id:
-        customer = await runtime.clients.get_customer(payload.customer_id)
+        # Org-scoped fetch (AF): a scoped operator must not load another org's
+        # customer PII via a foreign customer_id. Unknown/cross-tenant → clean 404.
+        customer = await runtime.clients.get_customer(payload.customer_id, org_id=user.org_id)
+        if customer is None:
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="customer_not_found",
+                message="Customer not found.",
+            )
         if customer.dnd:
             # TRAI DND scrub before dialling (PRD §11).
             raise ApiError(

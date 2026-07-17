@@ -9,13 +9,14 @@ returned by CRUD (responses carry ``api_key_set: bool`` only).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
 from koel.common.crypto import decrypt_secret, encrypt_secret
 from koel.common.logging import get_logger
-from koel.common.urlsafe import validate_base_url
+from koel.common.urlsafe import UnsafeUrlError, validate_base_url
 from koel.db.models import ModelConnection
 from koel.db.session import session_scope
 
@@ -72,7 +73,9 @@ async def create_connection(
     if kind not in _KINDS:
         raise ValueError(f"kind must be one of {sorted(_KINDS)}")
     if base_url:
-        validate_base_url(base_url)
+        # validate_base_url does a blocking DNS lookup — off the event loop so a
+        # slow resolver can't stall concurrent live voice calls on this worker.
+        await asyncio.to_thread(validate_base_url, base_url)
     enc = encrypt_secret(api_key) if api_key else None
     async with session_scope() as db:
         row = ModelConnection(
@@ -112,7 +115,7 @@ async def update_connection(conn_id: str, org_id: str | None, **fields: object) 
         if row is None or (org_id is not None and row.org_id != org_id):
             return None
         if "base_url" in fields and fields["base_url"]:
-            validate_base_url(str(fields["base_url"]))
+            await asyncio.to_thread(validate_base_url, str(fields["base_url"]))
         for attr in ("name", "provider", "base_url", "model"):
             if attr in fields and fields[attr] is not None:
                 setattr(row, attr, str(fields[attr]))
@@ -146,6 +149,18 @@ async def resolve_connection(conn_id: str | None, org_id: str | None = None) -> 
         row = await db.get(ModelConnection, conn_id)
         if row is None or not row.active or (org_id is not None and row.org_id != org_id):
             return None
+        # SSRF re-validation ON THE LIVE PATH (not just at create): a stored URL
+        # can be DNS-rebound to a private/metadata address after it first passed.
+        # Re-check every resolve so the service never builds an outbound client
+        # (carrying the decrypted key) against an internal target. Off the event
+        # loop; the OS resolver caches so the repeat cost is negligible. Fail
+        # closed → caller uses its default provider.
+        if row.base_url:
+            try:
+                await asyncio.to_thread(validate_base_url, row.base_url)
+            except UnsafeUrlError:
+                logger.warning("model_connection_unsafe_base_url id=%s", conn_id)
+                return None
         api_key = ""
         if row.api_key_encrypted is not None:
             try:

@@ -13,7 +13,7 @@ SEED_CUSTOMERS: list[dict] = [
     {
         "id": "cust_cc_001",
         "name": "Rahul Sharma",
-        "phone": "+91-90000-00001",
+        "phone": "+919000000001",
         "language": "hinglish",
         "bank": "HDFC Bank",
         "use_case": UseCase.credit_card,
@@ -30,7 +30,7 @@ SEED_CUSTOMERS: list[dict] = [
     {
         "id": "cust_col_001",
         "name": "Priya Nair",
-        "phone": "+91-90000-00002",
+        "phone": "+919000000002",
         "language": "hinglish",
         "bank": "ICICI Bank",
         "use_case": UseCase.collections,
@@ -46,7 +46,7 @@ SEED_CUSTOMERS: list[dict] = [
     {
         "id": "cust_loan_001",
         "name": "Arjun Mehta",
-        "phone": "+91-90000-00003",
+        "phone": "+919000000003",
         "language": "en",
         "bank": "HDFC Bank",
         "use_case": UseCase.personal_loan,
@@ -61,7 +61,7 @@ SEED_CUSTOMERS: list[dict] = [
     {
         "id": "cust_ins_001",
         "name": "Meera Iyer",
-        "phone": "+91-90000-00004",
+        "phone": "+919000000004",
         "language": "hi",
         "bank": "Devotica Life",
         "use_case": UseCase.insurance,
@@ -78,7 +78,7 @@ SEED_CUSTOMERS: list[dict] = [
         # DND record to exercise the TRAI scrub path (PRD §11).
         "id": "cust_dnd_001",
         "name": "Sanjay Gupta",
-        "phone": "+91-90000-00005",
+        "phone": "+919000000005",
         "language": "hinglish",
         "bank": "ICICI Bank",
         "use_case": UseCase.credit_card,

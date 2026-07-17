@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from koel.common.auth import CurrentUser
 from koel.common.errors import ApiError
-from koel.db.models import CallLog, TranscriptTurn
+from koel.db.models import CallLog, CallOutcome, TranscriptTurn
 from koel.db.session import session_scope
 
 router = APIRouter(prefix="/v1/calls", tags=["history"])
@@ -65,13 +65,24 @@ async def list_calls(
     language: str | None = Query(default=None),
     limit: int = Query(default=50, le=200),
 ) -> list[CallSummary]:
-    stmt = select(CallLog).order_by(CallLog.started_at.desc()).limit(limit)
+    # Outcome filter must be in SQL BEFORE the limit — filtering in Python after
+    # LIMIT N silently returned incomplete results (e.g. all N newest rows are
+    # 'escalated' → a 'converted' filter yielded [] despite many existing).
+    if outcome is not None:
+        try:
+            outcome_enum = CallOutcome(outcome)
+        except ValueError:
+            return []  # unknown outcome value → no matches (not a 500)
+    stmt = select(CallLog).order_by(CallLog.started_at.desc())
     if user.org_id is not None:  # tenant isolation (AF)
         stmt = stmt.where(CallLog.org_id == user.org_id)
     if bot_id:
         stmt = stmt.where(CallLog.bot_id == bot_id)
     if language:
         stmt = stmt.where(CallLog.language == language)
+    if outcome is not None:
+        stmt = stmt.where(CallLog.outcome == outcome_enum)
+    stmt = stmt.limit(limit)
     async with session_scope() as db:
         rows = (await db.execute(stmt)).scalars().all()
     summaries = [
@@ -88,9 +99,6 @@ async def list_calls(
         )
         for r in rows
     ]
-    # Enum filter applied in Python so an invalid value yields [] not a 500.
-    if outcome:
-        summaries = [s for s in summaries if s.outcome == outcome]
     return summaries
 
 

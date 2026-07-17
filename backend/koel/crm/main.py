@@ -31,6 +31,19 @@ app = create_app(
 router = APIRouter(prefix="/v1/customers", tags=["crm"])
 
 
+def _normalize_phone(phone: str) -> str:
+    """Canonicalise a phone number to bare E.164-ish digits for exact-match ANI
+    lookup: strip spaces/dashes/parens/dots and map a leading '00' to '+'. A real
+    dialer ANI arrives as '+919000000001'; a hand-entered '+91-90000-00001' or
+    '+91 90000 00001' normalises to the same string so the lookup resolves."""
+    if not phone:
+        return ""
+    cleaned = "".join(c for c in phone if c.isdigit() or c == "+")
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    return cleaned
+
+
 def _to_record(row: CrmCustomer) -> CustomerRecord:
     return CustomerRecord(
         id=row.id,
@@ -60,7 +73,7 @@ async def get_customer_by_phone(
     dynamic one. Org-scoped like the other customer routes — when ``org_id`` is
     given, only that tenant's records match (multi-tenant isolation, AF)."""
     with span("crm.get_customer_by_phone"):
-        stmt = select(CrmCustomer).where(CrmCustomer.phone == phone)
+        stmt = select(CrmCustomer).where(CrmCustomer.phone == _normalize_phone(phone))
         if org_id is not None:
             stmt = stmt.where(CrmCustomer.org_id == org_id)
         async with session_scope() as db:
@@ -75,11 +88,17 @@ async def get_customer_by_phone(
 
 
 @router.get("/{customer_id}", response_model=CustomerRecord)
-async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
+async def get_customer(
+    customer_id: str, _: ServicePrincipal, org_id: str | None = None
+) -> CustomerRecord:
+    """Fetch one customer. Org-scoped like the other customer routes (AF): when
+    ``org_id`` is given, a record from a different tenant 404s exactly like a
+    missing one — so the caller cannot read another org's customer PII, and the
+    record's existence isn't leaked cross-tenant."""
     with span("crm.get_customer", customer_id=customer_id):
         async with session_scope() as db:
             row = await db.get(CrmCustomer, customer_id)
-        if row is None:
+        if row is None or (org_id is not None and row.org_id != org_id):
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="customer_not_found",
@@ -92,12 +111,15 @@ async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
 async def log_interaction(customer_id: str, payload: InteractionLog, _: ServicePrincipal) -> dict:
     """Persist a CRM interaction (AD). Idempotent: a retry with the same key writes once."""
     async with session_scope() as db:
-        # Fast path: if this key was already recorded, return it unchanged.
+        # Fast path: if this key was already recorded FOR THIS CUSTOMER, return it
+        # unchanged. Scoped by customer_id so a reused key never returns (or leaks
+        # the id/event of) a DIFFERENT customer's interaction row.
         if payload.idempotency_key:
             existing = (
                 await db.execute(
                     select(InteractionLogRow).where(
-                        InteractionLogRow.idempotency_key == payload.idempotency_key
+                        InteractionLogRow.idempotency_key == payload.idempotency_key,
+                        InteractionLogRow.customer_id == customer_id,
                     )
                 )
             ).scalar_one_or_none()
