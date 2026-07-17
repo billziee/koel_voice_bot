@@ -99,10 +99,18 @@ class OrchestratorLike(Protocol):
 
 
 def _wav_to_pcm16(data: bytes) -> tuple[bytes, int]:
-    """(raw PCM16 samples, sample_rate) from a mono 16-bit PCM WAV clip."""
+    """(raw PCM16 samples, sample_rate) from a mono 16-bit PCM WAV clip.
+
+    Validates the format the µ-law transcoder assumes — a stereo or non-16-bit clip
+    would be silently mis-transcoded into garbled carrier audio. A mismatch raises
+    ValueError, which the caller (_play) already catches and drops + logs.
+    """
     with wave.open(io.BytesIO(data), "rb") as wav:
+        channels, width = wav.getnchannels(), wav.getsampwidth()
         rate = wav.getframerate()
         frames = wav.readframes(wav.getnframes())
+    if channels != 1 or width != 2:
+        raise ValueError(f"expected mono 16-bit PCM WAV, got {channels}ch/{width * 8}-bit")
     return frames, rate
 
 
