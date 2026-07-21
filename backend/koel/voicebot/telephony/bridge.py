@@ -144,6 +144,12 @@ class TwilioMediaBridge:
         self._stream_sid: str | None = None
         self._started = False  # guard against a duplicate ``start`` re-greeting
         self._stopped = False
+        # Per-direction audioop.ratecv continuation state — this instance is
+        # one bridge per call, so carrying it for the instance's lifetime keeps
+        # the resample filter continuous across the many small chunks/frames a
+        # real call is made of (see codec.py's docstrings for why that matters).
+        self._outbound_resample_state = None
+        self._inbound_resample_state = None
 
     # -- outbound: orchestrator ServerMessage → Twilio frame -----------------
 
@@ -181,18 +187,23 @@ class TwilioMediaBridge:
             return
         await self._ws.send_text(twilio_clear_frame(self._stream_sid))
 
-    @staticmethod
-    def _to_ulaw(audio_b64: str, audio_format: str) -> bytes:
+    def _to_ulaw(self, audio_b64: str, audio_format: str) -> bytes:
         """Bot audio → raw 8 kHz µ-law for a Twilio media payload.
 
         Audio synthesized in telephony mode is already µ-law (passed through);
-        otherwise it is a PCM16 WAV that is decoded and transcoded.
+        otherwise it is a PCM16 WAV that is decoded and transcoded. Resample
+        state is threaded across calls (instance-scoped) so a multi-chunk
+        streamed utterance transcodes as one continuous stream, not one fresh
+        filter per chunk.
         """
         raw = base64.b64decode(audio_b64)
         if audio_format == _ULAW_FORMAT:
             return raw
         pcm, rate = _wav_to_pcm16(raw)
-        return pcm16_to_ulaw8k(pcm, rate)
+        ulaw, self._outbound_resample_state = pcm16_to_ulaw8k(
+            pcm, rate, self._outbound_resample_state
+        )
+        return ulaw
 
     # -- inbound: Twilio frame → orchestrator --------------------------------
 
@@ -278,7 +289,10 @@ class TwilioMediaBridge:
         ulaw = event.payload_ulaw
         if not ulaw or self._on_caller_audio is None:
             return
-        pcm16 = ulaw8k_to_pcm16(ulaw, target_rate=self._inbound_sample_rate)
+        # Resample state threaded across every 20ms frame — see codec.py.
+        pcm16, self._inbound_resample_state = ulaw8k_to_pcm16(
+            ulaw, target_rate=self._inbound_sample_rate, resample_state=self._inbound_resample_state
+        )
         await self._on_caller_audio(pcm16, self._inbound_sample_rate)
 
     async def _on_dtmf(self, event: TwilioEvent) -> None:

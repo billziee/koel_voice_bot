@@ -14,6 +14,10 @@ A pre-accept ``websocket.close(code=1008)`` surfaces client-side as a
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -44,3 +48,29 @@ def test_bad_signature_is_rejected_when_token_configured(monkeypatch):
         ):
             pass
     assert exc.value.code == 1008
+
+
+def test_genuine_signature_with_query_params_clears_the_gate(monkeypatch):
+    # Regression: a real Twilio Stream URL carries templated query params (e.g.
+    # ``<Stream url=".../twilio/stream?From={{From}}">``). Twilio signs the FULL
+    # url including that query string, appending NO extra params (there is no
+    # POST body on this GET/WS-upgrade request). A correctly-computed signature
+    # for such a URL must clear the signature gate — proving the endpoint no
+    # longer re-sorts the query params and appends them as if they were POST
+    # form data (which never matched Twilio's real digest). No bot is configured,
+    # so the connection still closes 1008, but for the NEXT reason down the
+    # chain ("inbound telephony disabled"), not "invalid twilio signature".
+    monkeypatch.setattr(main.settings, "twilio_auth_token", "test-token")
+    monkeypatch.setattr(main.settings, "public_base_url", "https://example.com")
+    query = "From=%2B919000000000"
+    signed_url = f"https://example.com/twilio/stream?{query}"
+    digest = hmac.new(b"test-token", signed_url.encode(), hashlib.sha1).digest()
+    signature = base64.b64encode(digest).decode()
+    client = TestClient(main.app)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            f"/twilio/stream?{query}", headers={"X-Twilio-Signature": signature}
+        ):
+            pass
+    assert exc.value.code == 1008
+    assert exc.value.reason == "inbound telephony disabled"
