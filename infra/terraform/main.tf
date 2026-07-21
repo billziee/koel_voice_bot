@@ -73,7 +73,7 @@ resource "aws_db_instance" "koel" {
   vpc_security_group_ids       = [var.app_security_group_id]
   db_subnet_group_name         = var.db_subnet_group
   # pgvector: enable the `vector` extension via a parameter group / migration.
-  tags                         = { app = "koel" }
+  tags = { app = "koel" }
 }
 
 # --- ElastiCache Redis (session store) --------------------------------------
