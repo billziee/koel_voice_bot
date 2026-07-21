@@ -36,6 +36,7 @@ from koel.voicebot.api import (
     operators,
     orgs,
     sessions,
+    users,
 )
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
@@ -228,6 +229,7 @@ app.include_router(analytics.router)
 app.include_router(knowledge.router)
 app.include_router(operators.router)
 app.include_router(orgs.router)
+app.include_router(users.router)
 app.include_router(connections.router)
 app.include_router(exports.router)
 

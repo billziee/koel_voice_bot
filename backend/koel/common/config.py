@@ -97,7 +97,18 @@ class CommonSettings(BaseSettings):
     sms_api_key: str = ""
     whatsapp_gateway_url: str = ""
     whatsapp_api_key: str = ""
+    email_gateway_url: str = ""
+    email_api_key: str = ""
     messaging_timeout_s: float = 8.0
+
+    # --- Account invites / password reset (org + user admin) ---
+    # How long an invite/reset link stays redeemable. The link + a copyable
+    # fallback are always returned in the API response (so an admin can share it
+    # manually), regardless of whether the email channel above is configured.
+    invite_ttl_hours: float = 168.0  # 7 days
+    # Origin the accept-invite link is built against, e.g. the dashboard's
+    # deployed URL. Empty ⇒ a relative path (fine for local dev / same-origin FE).
+    invite_base_url: str = ""
     # Payment-link provider base URL (Razorpay/Setu). Empty ⇒ no link is minted
     # (the action still records the intent on the CRM, just sends nothing).
     payment_link_base_url: str = ""
