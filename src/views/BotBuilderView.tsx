@@ -28,11 +28,16 @@ const CRM_FIELD_MAP: Record<string, string> = {
 };
 
 type BuilderStep = 1 | 2 | 3 | 4 | 5;
+// Knowledge & CRM comes BEFORE Conversation flow: the flow step's "auto-build
+// from knowledge base" button needs a RAG index already set (koel/nlp/flow_gen
+// via generateFlow), so the index must be picked first or the button never
+// appears on a first linear pass through the wizard (confirmed live — the
+// index only existed on the OLD step 4, one step after the button that needed it).
 const BUILDER_STEPS: { num: BuilderStep; title: string; sub: string }[] = [
   { num: 1, title: 'Use case', sub: 'Template & languages' },
   { num: 2, title: 'Persona & voice', sub: 'Name, gender, speed' },
-  { num: 3, title: 'Conversation flow', sub: 'Script nodes & branches' },
-  { num: 4, title: 'Knowledge & CRM', sub: 'RAG index · field map' },
+  { num: 3, title: 'Knowledge & CRM', sub: 'RAG index · field map' },
+  { num: 4, title: 'Conversation flow', sub: 'Script nodes & branches' },
   { num: 5, title: 'Review & deploy', sub: 'Preflight checks' },
 ];
 
@@ -54,7 +59,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
   // Real scripted flow (6.6): seeded with a minimal single-node starter, edited
   // in place, and shipped in config.flow on deploy.
   const [flow, setFlow] = useState<Flow>(() => defaultFlow());
-  // Live knowledge indexes for the RAG picker (Step 4). Fetched with the token;
+  // Live knowledge indexes for the RAG picker (Step 3). Fetched with the token;
   // degrades to an empty list (plain free-text entry still works) when offline.
   const [knowledgeIndexes, setKnowledgeIndexes] = useState<KnowledgeIndex[]>([]);
   useEffect(() => {
@@ -183,8 +188,8 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
             <p className="text-[12.5px] mt-1" style={{ color: theme.faint }}>
               {step === 1 && 'Select the use case template and supported languages.'}
               {step === 2 && 'Configure the bot persona, voice, and speech settings.'}
-              {step === 3 && 'Define how KOEL moves through the call. Each node is a script step; branches are driven by intent classification.'}
-              {step === 4 && 'Connect the RAG knowledge base and map CRM fields to script variables.'}
+              {step === 3 && 'Connect the RAG knowledge base and map CRM fields to script variables.'}
+              {step === 4 && 'Define how KOEL moves through the call. Each node is a script step; branches are driven by intent classification.'}
               {step === 5 && 'Review the configuration below. Once deployed, the bot appears on the dashboard.'}
             </p>
           </div>
@@ -265,22 +270,10 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
               </div>
             )}
 
-            {/* Step 3: Conversation flow — real editor (canvas + form) */}
+            {/* Step 3: Knowledge & CRM — wired to live indexes + the real flow.
+                Comes BEFORE Conversation flow so the RAG index below is already
+                set by the time the auto-build button (step 4) needs it. */}
             {step === 3 && (
-              <FlowEditor
-                value={flow}
-                onChange={setFlow}
-                theme={theme}
-                onAutoBuild={
-                  token && ragIndex.trim()
-                    ? () => generateFlow(token, { ragIndex, useCase, language: languages[0] })
-                    : undefined
-                }
-              />
-            )}
-
-            {/* Step 4: Knowledge & CRM — wired to live indexes + the real flow */}
-            {step === 4 && (
               <div className="space-y-5">
                 <div>
                   <label className="block text-[12px] font-medium mb-1.5" style={{ color: theme.ink2 }}>RAG knowledge index</label>
@@ -357,6 +350,22 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
               </div>
             )}
 
+            {/* Step 4: Conversation flow — real editor (canvas + form). RAG index
+                is already set from step 3, so the auto-build button below works
+                on the very first linear pass through the wizard. */}
+            {step === 4 && (
+              <FlowEditor
+                value={flow}
+                onChange={setFlow}
+                theme={theme}
+                onAutoBuild={
+                  token && ragIndex.trim()
+                    ? () => generateFlow(token, { ragIndex, useCase, language: languages[0] })
+                    : undefined
+                }
+              />
+            )}
+
             {/* Step 5: Review */}
             {step === 5 && (
               <div className="grid grid-cols-2 gap-4">
@@ -404,7 +413,7 @@ export function BotBuilderView({ onDeploy, onCancel, theme, token }: { onDeploy:
               ← Back
             </button>
             <span className="text-[12px]" style={{ color: theme.faint }}>
-              {step === 3 && `${flowNodeCount} node${flowNodeCount === 1 ? '' : 's'} · ${flowBranchCount} branch${flowBranchCount === 1 ? '' : 'es'} · ${flowErrors} error${flowErrors === 1 ? '' : 's'}`}
+              {step === 4 && `${flowNodeCount} node${flowNodeCount === 1 ? '' : 's'} · ${flowBranchCount} branch${flowBranchCount === 1 ? '' : 'es'} · ${flowErrors} error${flowErrors === 1 ? '' : 's'}`}
               {step === 5 && (() => {
                 const warnings = preflight.filter(p => !p.ok).length;
                 return `${preflight.filter(p => p.ok).length} of ${preflight.length} checks passed · ${warnings} warning${warnings === 1 ? '' : 's'}`;

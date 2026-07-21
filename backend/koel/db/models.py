@@ -145,6 +145,14 @@ class User(Base):
     org_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     role: Mapped[str] = mapped_column(String(32), default="operator")
     active: Mapped[bool] = mapped_column(default=True)  # soft-disable without deletion
+    # Invite / password-reset token (split selector+verifier — koel.common.tokens):
+    # NULL selector = no invite/reset in flight. The SAME fields serve invite
+    # acceptance (password_hash still NULL when issued) and admin-triggered
+    # password reset (password_hash already set; stays valid until redeemed).
+    invite_selector: Mapped[str | None] = mapped_column(String(32), unique=True, index=True, nullable=True)
+    invite_verifier_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invited_by: Mapped[str | None] = mapped_column(String(32), nullable=True)  # audit only, no FK
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

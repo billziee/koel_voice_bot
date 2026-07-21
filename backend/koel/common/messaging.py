@@ -1,10 +1,11 @@
-"""Outbound messaging — SMS (2.1) and WhatsApp (2.4).
+"""Outbound messaging — SMS (2.1), WhatsApp (2.4), and email (account invites).
 
 A single ``send_message(channel, to, body)`` over a generic HTTP gateway. Each
 channel is DORMANT until its gateway URL + key are configured: a send is then a
-logged no-op returning False, so in-call revenue actions and post-call follow-ups
-degrade cleanly with no credentials (per the "leave keys empty" constraint).
-Swap the tiny adapter below for a Twilio/MSG91/Meta client when going live.
+logged no-op returning False, so in-call revenue actions, post-call follow-ups,
+and account-invite emails all degrade cleanly with no credentials (per the
+"leave keys empty" constraint). Swap the tiny adapter below for a Twilio/MSG91/
+Meta/SendGrid client when going live.
 """
 
 from __future__ import annotations
@@ -21,11 +22,14 @@ logger = get_logger("koel.messaging")
 class Channel(str, Enum):
     sms = "sms"
     whatsapp = "whatsapp"
+    email = "email"
 
 
 def _gateway(channel: Channel, settings: CommonSettings) -> tuple[str, str]:
     if channel is Channel.whatsapp:
         return settings.whatsapp_gateway_url, settings.whatsapp_api_key
+    if channel is Channel.email:
+        return settings.email_gateway_url, settings.email_api_key
     return settings.sms_gateway_url, settings.sms_api_key
 
 
