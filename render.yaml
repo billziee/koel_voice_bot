@@ -11,8 +11,11 @@
 # and caps at 512MB RAM. The in-app keep-alive (self-ping) + a GitHub Actions cron
 # offset spin-down; `plan: starter` removes it outright. See docs/DEPLOY.md.
 #
-# Secrets (KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET)
-# are set in the Render dashboard / a synced env group — never committed.
+# Secrets (KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET,
+# KOEL_SECRET_KEY — the Fernet key for BYOK model-connection encryption, see
+# docs/SECURITY.md) are set in the Render dashboard / a synced env group — never
+# committed. KOEL_SECRET_KEY is easy to miss since BYOK fails closed silently
+# (no error, connections just never resolve) rather than refusing to boot.
 
 services:
   - type: web
@@ -46,7 +49,8 @@ services:
         value: "true"
       - key: KOEL_SMART_TURN_ENABLED
         value: "true"
-      - fromGroup: koel-secrets   # KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY, KOEL_JWT_SECRET
+      - fromGroup: koel-secrets   # KOEL_GROQ_API_KEY, KOEL_NVIDIA_API_KEY, KOEL_SARVAM_API_KEY,
+                                  # KOEL_JWT_SECRET, KOEL_SECRET_KEY (BYOK — see header comment above)
       # Google Sign-In (optional, allowlist model). Set these in the Render
       # dashboard (NOT committed) to enable POST /v1/auth/google; unset ⇒ Google
       # login is off and the password/demo path is unchanged:
