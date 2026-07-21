@@ -10,6 +10,8 @@ returned by any provider at a low per-profile gain.
 Public API:
     mix_into_wav(wav_bytes, profile, gain) -> wav_bytes   # mix bed under voice
     wav_sample_rate(wav_bytes) -> int                     # read fmt sample rate
+    pcm16_to_wav(pcm, sr) -> wav_bytes                    # wrap raw PCM16 in a WAV container
+    concat_wavs(wavs) -> wav_bytes                        # call-recording buffer mux
 """
 
 from __future__ import annotations
@@ -113,6 +115,13 @@ def _to_wav(pcm: bytes, sr: int) -> bytes:
         + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, sr, byte_rate, 2, 16)
         + b"data" + struct.pack("<I", len(pcm)) + pcm
     )
+
+
+def pcm16_to_wav(pcm16: bytes, sample_rate: int) -> bytes:
+    """Wrap raw mono 16-bit PCM in a WAV container — the public seam for
+    callers outside this module (the call-recording buffer WAV-wraps raw
+    customer PCM16 the same way voice-provider output already arrives)."""
+    return _to_wav(pcm16, sample_rate)
 
 
 def wav_sample_rate(wav: bytes) -> int:

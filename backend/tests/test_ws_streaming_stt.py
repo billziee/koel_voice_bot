@@ -248,6 +248,37 @@ async def test_streaming_final_dropped_during_agent_hold(test_db):
     assert ran is False  # bot turn suppressed during the operator handoff
 
 
+async def test_streaming_final_buffers_customer_audio_for_recording(test_db):
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp())
+    session = FakeStreamingSession()
+    call = _session(ws, _state("ws_rec_stream"), clients, factory=_factory_for(session))
+
+    frame = ClientMessage(type=ClientMessageType.audio_chunk, pcm16_b64=_PCM, is_final=False)
+    assert await call._stt_stream.feed(frame) is True  # noqa: SLF001 — accumulates the audio window
+    await session.on_final(TranscriptResult(session_id="s", text="haan boliye", is_final=True))
+
+    assert len(call._audio_buffer) >= 1  # noqa: SLF001 — customer audio reached the recording buffer
+
+
+async def test_streaming_final_buffers_audio_even_when_dropped_on_hold(test_db):
+    # Even a turn suppressed by the agent-hold guard should still have its
+    # audio captured — the recording is of the CALL, not just the bot's turns.
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp())
+    session = FakeStreamingSession()
+    call = _session(ws, _state("ws_rec_hold"), clients, factory=_factory_for(session))
+    call._state.status = CallStatus.waiting_agent  # noqa: SLF001
+
+    frame = ClientMessage(type=ClientMessageType.audio_chunk, pcm16_b64=_PCM, is_final=False)
+    await call._stt_stream.feed(frame)  # noqa: SLF001
+    await call._stt_stream._on_final(  # noqa: SLF001
+        TranscriptResult(session_id="s", text="hello, koi hai?", is_final=True)
+    )
+
+    assert len(call._audio_buffer) >= 1  # noqa: SLF001
+
+
 async def test_teardown_closes_session(test_db):
     # A frame opens the session; end_call finalizes the CallSession, which must close
     # the streaming session so the Deepgram socket isn't leaked.

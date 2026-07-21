@@ -19,14 +19,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import io
 import time
-import wave
 
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.telemetry import record_first_audio_latency, span
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
-from koel.tts.mixer import concat_wavs
+from koel.tts.mixer import concat_wavs, pcm16_to_wav
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.escalation import EscalationHub
 from koel.voicebot.monitor import LiveMonitor
@@ -57,17 +55,15 @@ _CHUNK_PLAYBACK_MARGIN_S = 0.2
 # frame) since telephony has no equivalent single "next event" to wait on —
 # a 1s poll is precise enough against an 8s window.
 _NO_INPUT_POLL_INTERVAL_S = 1.0
+# Both ingest paths hand on_utterance PCM16 at this rate (the bridge decodes
+# Twilio's 8 kHz µ-law up to it before feeding either one) — see
+# _TELEPHONY_STT_SAMPLE_RATE in main.py / _STT_SAMPLE_RATE in bridge.py.
+_TELEPHONY_AUDIO_SAMPLE_RATE = 16000
 
 
 def _pcm16_to_wav_b64(pcm16: bytes, sample_rate: int) -> str:
     """Wrap raw PCM16 mono samples in a WAV container (base64) for STT_svc."""
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(pcm16)
-    return base64.b64encode(buffer.getvalue()).decode()
+    return base64.b64encode(pcm16_to_wav(pcm16, sample_rate)).decode()
 
 
 class TelephonyCallSession:
@@ -199,13 +195,22 @@ class TelephonyCallSession:
             extra = duration_ms / 1000 + _CHUNK_PLAYBACK_MARGIN_S if duration_ms > 0 else 0.0
             self._speech_until = max(self._speech_until, time.monotonic()) + extra
             is_wav = message.data.get("audio_format", "wav") == "wav"
-            if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+            if is_wav:
                 try:
-                    self._audio_buffer.append(base64.b64decode(message.data.get("audio_b64", "")))
+                    self._buffer_recording_audio(base64.b64decode(message.data.get("audio_b64", "")))
                 except (ValueError, binascii.Error):
                     pass
         elif message.type == ServerMessageType.call_ended:
             await self._end_call_leg()
+
+    def _buffer_recording_audio(self, wav_bytes: bytes) -> None:
+        """Append one already-WAV-framed clip to the call-recording buffer
+        (bounded so a very long call can't exhaust memory). Shared by the bot
+        side (:meth:`on_outbound`, already WAV) and the customer side
+        (:meth:`on_utterance`, raw PCM16 wrapped first) so the recording
+        captures the full conversation, not just the bot's half."""
+        if wav_bytes and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+            self._audio_buffer.append(wav_bytes)
 
     async def _end_call_leg(self) -> None:
         """The orchestrator just ended the call (``end_call``'s one-and-only
@@ -302,6 +307,11 @@ class TelephonyCallSession:
         self._partial_gate.reset()
         if self._bridge is None:
             return
+        # Capture what the customer actually said regardless of call state —
+        # a full call recording (both sides) must include hold-period speech
+        # too, not just the turns the bot goes on to answer.
+        if pcm16:
+            self._buffer_recording_audio(pcm16_to_wav(pcm16, _TELEPHONY_AUDIO_SAMPLE_RATE))
         # On agent hold (3.1): the human operator owns the conversation; drop
         # caller audio rather than run a bot turn over the handoff (mirrors
         # ws/handler.CallSession._handle_audio's waiting_agent guard). Already

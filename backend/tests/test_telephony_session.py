@@ -556,3 +556,56 @@ async def test_end_call_leg_calls_rest_hangup_when_orchestrator_initiated(monkey
 
     assert bridge.hangups == 1
     assert calls == [{"call_sid": "CA2", "account_sid": "AC1", "auth_token": "tok"}]
+
+
+# --- full-conversation call recording (both sides) --------------------------
+
+
+async def test_on_utterance_buffers_customer_audio_alongside_bot_audio():
+    from koel.tts.mixer import concat_wavs
+
+    state = _state()
+    clients = ScriptedClients(nlp=_nlp())
+    session, bridge = _session(state, clients)
+
+    await session.on_utterance(_stt("mera emi kitna hai"), b"\x00\x01" * 800)
+
+    # The customer's utterance AND the bot's reply both landed in the buffer —
+    # not just the bot's half of the conversation.
+    assert len(session._audio_buffer) >= 2  # noqa: SLF001
+    assert concat_wavs(session._audio_buffer)  # noqa: SLF001 — a real, non-empty mux
+
+
+async def test_on_utterance_buffers_customer_audio_even_while_on_hold():
+    state = _state()
+    state.status = CallStatus.waiting_agent
+    clients = ScriptedClients(nlp=_nlp())
+    session, bridge = _session(state, clients)
+
+    await session.on_utterance(_stt("hello, koi hai?"), b"\x00\x01" * 800)
+
+    # The turn was dropped (no bot reply — see test_on_utterance_dropped_while_
+    # waiting_agent), but the caller's own audio must still be captured.
+    assert len(session._audio_buffer) == 1  # noqa: SLF001
+    assert bridge.customer_turns == 0
+
+
+async def test_on_utterance_buffers_customer_audio_even_after_call_ended():
+    state = _state()
+    state.status = CallStatus.ended
+    clients = ScriptedClients(nlp=_nlp())
+    session, bridge = _session(state, clients)
+
+    await session.on_utterance(_stt("hello?"), b"\x00\x01" * 800)
+
+    assert len(session._audio_buffer) == 1  # noqa: SLF001
+
+
+async def test_buffer_recording_audio_skips_empty_bytes():
+    state = _state()
+    clients = ScriptedClients(nlp=_nlp())
+    session, _bridge = _session(state, clients)
+
+    before = len(session._audio_buffer)  # noqa: SLF001
+    session._buffer_recording_audio(b"")  # noqa: SLF001 — e.g. a DTMF synthetic turn: no real audio
+    assert len(session._audio_buffer) == before  # noqa: SLF001

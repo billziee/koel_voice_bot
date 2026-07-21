@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from koel.common.logging import get_logger
 from koel.stt.schemas import TranscriptResult
+from koel.tts.mixer import pcm16_to_wav
 from koel.voicebot.session.models import CallStatus
 from koel.voicebot.telephony.ingest import StreamingSessionFactory, StreamingSttSession
 from koel.voicebot.ws.protocol import ClientMessage, ServerMessage, ServerMessageType
@@ -40,6 +41,12 @@ logger = get_logger("koel.voicebot.ws.streaming_stt")
 
 # Re-exported so the handler imports its factory type from one place.
 __all__ = ["BrowserStreamingStt", "StreamingSessionFactory"]
+
+# Rolling audio window kept alongside the streaming session so the call
+# recording still gets the customer's side (Deepgram returns text only) —
+# mirrors StreamingTelephonyIngest's own window on the telephony transport.
+_MAX_AUDIO_WINDOW_BYTES = 320_000  # 10s at 16 kHz/16-bit mono
+_AUDIO_SAMPLE_RATE = 16000  # ClientMessage.sample_rate default / the neural VAD's fixed rate
 
 
 class BrowserStreamingStt:
@@ -61,6 +68,7 @@ class BrowserStreamingStt:
         self._session_id = owner._state.session_id  # noqa: SLF001 — stable id, for logging
         self._session: StreamingSttSession | None = None
         self._degraded = False
+        self._audio_window = bytearray()
         # Serialize utterance finals: unlike the buffered path (single-driver receive
         # loop), finals arrive from the Deepgram reader task(s), so two close finals
         # (or an old session finishing while the next is open) could otherwise drive
@@ -92,6 +100,9 @@ class BrowserStreamingStt:
         pcm = self._decode(msg)
         if pcm:
             await session.send_frame(pcm)
+            self._audio_window.extend(pcm)
+            if len(self._audio_window) > _MAX_AUDIO_WINDOW_BYTES:
+                del self._audio_window[: len(self._audio_window) - _MAX_AUDIO_WINDOW_BYTES]
         if msg.is_final:
             await session.finish()
             self._session = None
@@ -145,6 +156,18 @@ class BrowserStreamingStt:
         """A streaming utterance final: run it through the owning session's turn
         pipeline. Best-effort — a turn failure is logged, never raised into the
         session's background reader (which would otherwise be lost)."""
+        # Full-conversation call recording (K): snapshot + clear the rolling
+        # window regardless of what's below — capture what the customer said
+        # even on a blank/dropped result or during an agent hold.
+        audio = bytes(self._audio_window)
+        self._audio_window.clear()
+        if audio:
+            try:
+                self._owner._buffer_recording_audio(  # noqa: SLF001 — extracted arm of CallSession
+                    pcm16_to_wav(audio, _AUDIO_SAMPLE_RATE)
+                )
+            except Exception:  # noqa: BLE001 — recording is best-effort, never break the reader
+                logger.debug("ws_stream_recording_buffer_failed", exc_info=True)
         if not stt.is_final or not stt.text.strip():
             return
         owner = self._owner
