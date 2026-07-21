@@ -22,6 +22,7 @@ class TwilioEvent:
     stream_sid: str | None = None
     payload_ulaw: bytes | None = None  # decoded inbound audio (media frames)
     digit: str | None = None  # pressed key (dtmf frames) — 1.3
+    call_sid: str | None = None  # the underlying PSTN leg (start frame only) — 3.1 Phase B
 
 
 def parse_twilio_message(raw: str) -> TwilioEvent:
@@ -39,6 +40,10 @@ def parse_twilio_message(raw: str) -> TwilioEvent:
         )
     if event == "dtmf":
         return TwilioEvent("dtmf", stream_sid, digit=msg.get("dtmf", {}).get("digit"))
+    if event == "start":
+        # callSid identifies the live PSTN leg for REST control (warm transfer,
+        # 3.1 Phase B) — only present on the start frame, same as streamSid.
+        return TwilioEvent("start", stream_sid, call_sid=msg.get("start", {}).get("callSid"))
     return TwilioEvent(event, stream_sid)
 
 

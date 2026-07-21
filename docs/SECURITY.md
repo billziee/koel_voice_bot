@@ -81,10 +81,37 @@ Dev runs plaintext on localhost. Production **must** use:
 
 ## Production checklist (not enforced in dev)
 
-- [ ] `KOEL_JWT_SECRET` set to a strong secret (prod boot fails on the dev default).
-- [ ] `KOEL_CORS_ALLOW_ORIGINS` set to an explicit allowlist (no `*` in prod).
-- [ ] Postgres `?ssl=require`, Redis `rediss://` + AUTH.
-- [ ] Rotate every key shared in plaintext during dev: Groq, NVIDIA, Sarvam, Deepgram — plus the Render API token used to configure the deployment. (Groq/NVIDIA were flagged first; this is the complete list of what was actually pasted in-session — rotate all of it, not just those two.)
-- [ ] `KOEL_SECRET_KEY` (Fernet key for BYOK model-connection encryption) set in the `koel-secrets` env group — it's absent from `render.yaml`'s group comment today, so a deploy from a fresh group would silently leave BYOK disabled (`resolve_connection` fails closed with no key configured).
-- [ ] Rate-limit store moved to Redis for multi-worker deployments.
-- [ ] Secrets sourced from a secret manager, not `.env`.
+Two kinds of item below: **code-enforced** (the app itself refuses to boot, or
+warns, if it's wrong — nothing to verify beyond actually setting the value)
+and **operational** (a real action someone has to take outside this repo,
+which no amount of code can do for you).
+
+Code-enforced (`create_app`, `koel/common/app_factory.py`):
+- [x] `KOEL_JWT_SECRET` set to a strong secret — **hard boot failure** in
+      production on the dev default (`RuntimeError`, not just a warning).
+- [x] `KOEL_CORS_ALLOW_ORIGINS` set to an explicit allowlist — **hard boot
+      failure** in production on `*` or empty.
+- [x] Rate-limit store on Redis for multi-worker deployments — already
+      implemented (`RedisRateLimiter`, `koel/common/ratelimit.py`), selected via
+      `KOEL_RATE_LIMIT_BACKEND=redis` (already set in `render.yaml`). Just
+      confirm the env var is actually set in whatever deployment you're
+      checking — the code path has existed since O-8.
+- [x] `KOEL_SECRET_KEY` (BYOK Fernet key) — **now warns at boot** in
+      production if unset/invalid (`warn_if_byok_secret_unset`), rather than
+      staying silently dormant until the first BYOK API call fails. Still not
+      a hard fail: BYOK is genuinely optional, an unrelated deployment
+      shouldn't refuse to boot over it.
+
+Operational (no code can verify or perform these for you):
+- [ ] Postgres `?ssl=require`, Redis `rediss://` + AUTH — connection-string
+      choices made at deploy time.
+- [ ] Rotate every key shared in plaintext during dev: Groq, NVIDIA, Sarvam,
+      Deepgram — plus the Render API token used to configure the deployment.
+      (Groq/NVIDIA were flagged first; this is the complete list of what was
+      actually pasted in-session — rotate all of it, not just those two.)
+- [ ] `KOEL_SECRET_KEY` actually set in the `koel-secrets` env group — the
+      boot-time warning above only fires if you deploy and check the logs;
+      it doesn't set the value for you.
+- [ ] Secrets sourced from a secret manager, not `.env` — a process/tooling
+      choice for whoever owns the deployment, not something this codebase's
+      boot sequence can enforce from the inside.

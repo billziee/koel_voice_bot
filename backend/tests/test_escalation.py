@@ -283,3 +283,96 @@ async def test_claim_missing_escalation_is_404(app_client, test_db):
     client, _ = app_client
     r = await client.post("/v1/operator/escalations/nope/claim", headers=_op_headers())
     assert r.status_code == 404
+
+
+# --- Warm transfer (3.1 Phase B) --------------------------------------------
+
+
+async def test_warm_transfer_requires_claim(app_client, test_db):
+    client, _ = app_client
+    eid = await create_escalation(_state(session_id="wt1", org_id=None), reason="request_human")
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/warm-transfer",
+        headers=_op_headers(),
+        json={"operator_phone": "+911111111111"},
+    )
+    assert r.status_code == 409
+    assert r.json()["code"] == "escalation_not_claimed"
+
+
+async def test_warm_transfer_rejects_a_non_claiming_operator(app_client, test_db):
+    client, _ = app_client
+    eid = await create_escalation(_state(session_id="wt2", org_id=None), reason="request_human")
+    await client.post(f"/v1/operator/escalations/{eid}/claim", headers=_op_headers())
+    op2 = {"Authorization": f"Bearer {issue_token('op_2', kind='access', role='operator')}"}
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/warm-transfer",
+        headers=op2,
+        json={"operator_phone": "+911111111111"},
+    )
+    assert r.status_code == 403 and r.json()["code"] == "not_claim_owner"
+
+
+async def test_warm_transfer_rejects_a_browser_call_with_no_pstn_leg(app_client, test_db):
+    client, runtime = app_client
+    eid = await create_escalation(_state(session_id="wt3", org_id=None), reason="request_human")
+    await client.post(f"/v1/operator/escalations/{eid}/claim", headers=_op_headers())
+    await runtime.store.save(_state(session_id="wt3", org_id=None))  # twilio_call_sid unset
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/warm-transfer",
+        headers=_op_headers(),
+        json={"operator_phone": "+911111111111"},
+    )
+    assert r.status_code == 409 and r.json()["code"] == "not_a_pstn_call"
+
+
+async def test_warm_transfer_succeeds_for_a_pstn_call(app_client, test_db, monkeypatch):
+    client, runtime = app_client
+    eid = await create_escalation(_state(session_id="wt4", org_id=None), reason="request_human")
+    await client.post(f"/v1/operator/escalations/{eid}/claim", headers=_op_headers())
+
+    pstn_state = _state(session_id="wt4", org_id=None)
+    pstn_state.twilio_call_sid = "CA999"
+    await runtime.store.save(pstn_state)
+
+    runtime.settings.twilio_account_sid = "AC1"
+    runtime.settings.twilio_auth_token = "tok"
+    runtime.settings.twilio_from_number = "+10000000000"
+
+    async def _fake_start_warm_transfer(**kwargs):
+        assert kwargs["call_sid"] == "CA999"
+        assert kwargs["operator_phone"] == "+911111111111"
+        return True
+
+    monkeypatch.setattr(
+        "koel.voicebot.api.operators.start_warm_transfer", _fake_start_warm_transfer
+    )
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/warm-transfer",
+        headers=_op_headers(),
+        json={"operator_phone": "+911111111111"},
+    )
+    assert r.status_code == 200 and r.json()["started"] is True
+
+
+async def test_warm_transfer_failure_is_502(app_client, test_db, monkeypatch):
+    client, runtime = app_client
+    eid = await create_escalation(_state(session_id="wt5", org_id=None), reason="request_human")
+    await client.post(f"/v1/operator/escalations/{eid}/claim", headers=_op_headers())
+
+    pstn_state = _state(session_id="wt5", org_id=None)
+    pstn_state.twilio_call_sid = "CA888"
+    await runtime.store.save(pstn_state)
+
+    async def _fake_start_warm_transfer(**kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "koel.voicebot.api.operators.start_warm_transfer", _fake_start_warm_transfer
+    )
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/warm-transfer",
+        headers=_op_headers(),
+        json={"operator_phone": "+911111111111"},
+    )
+    assert r.status_code == 502 and r.json()["code"] == "warm_transfer_failed"

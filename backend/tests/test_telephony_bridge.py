@@ -303,3 +303,73 @@ async def test_duplicate_start_does_not_re_greet():
     await bridge.run()
 
     assert calls == ["greet"]  # greeted exactly once despite two start frames
+
+
+# --- is_bot_speaking tracking (partial-transcript barge-in wiring) ----------
+
+
+async def test_is_bot_speaking_false_before_any_audio():
+    ws = FakeTwilioWS([])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    assert bridge.is_bot_speaking is False
+
+
+async def test_sending_audio_marks_bot_speaking():
+    ws = FakeTwilioWS([_start("MZ10")])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    await bridge._on_frame(_start("MZ10"))  # sets stream_sid so _play can write
+    ulaw = b"\xff" * 80
+    await bridge.send(
+        ServerMessage.of(
+            ServerMessageType.audio_chunk,
+            audio_b64=base64.b64encode(ulaw).decode(),
+            audio_format="ulaw",
+            sample_rate=8000,
+        )
+    )
+    assert bridge.is_bot_speaking is True
+
+
+async def test_send_clear_marks_bot_not_speaking():
+    ws = FakeTwilioWS([])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    await bridge._on_frame(_start("MZ11"))
+    await bridge.send(
+        ServerMessage.of(
+            ServerMessageType.audio_chunk,
+            audio_b64=base64.b64encode(b"\xff" * 80).decode(),
+            audio_format="ulaw",
+            sample_rate=8000,
+        )
+    )
+    assert bridge.is_bot_speaking is True
+    await bridge.send(ServerMessage.of(ServerMessageType.tts_kill, reason="interrupt"))
+    assert bridge.is_bot_speaking is False
+
+
+async def test_mark_customer_turn_clears_bot_speaking():
+    ws = FakeTwilioWS([])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    await bridge._on_frame(_start("MZ12"))
+    await bridge.send(
+        ServerMessage.of(
+            ServerMessageType.audio_chunk,
+            audio_b64=base64.b64encode(b"\xff" * 80).decode(),
+            audio_format="ulaw",
+            sample_rate=8000,
+        )
+    )
+    assert bridge.is_bot_speaking is True
+    bridge.mark_customer_turn()
+    assert bridge.is_bot_speaking is False
+
+
+async def test_send_audio_entry_point_also_marks_bot_speaking():
+    # The CarrierBridge protocol's send_audio() is a second outbound entry
+    # point (alongside the ServerMessage-driven send()) — must track the same
+    # state so barge-in wiring never sees a stale "not speaking" flag.
+    ws = FakeTwilioWS([])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    await bridge._on_frame(_start("MZ13"))
+    await bridge.send_audio(b"\x00\x01" * 800, 8000)
+    assert bridge.is_bot_speaking is True

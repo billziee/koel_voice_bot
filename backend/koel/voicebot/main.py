@@ -53,6 +53,7 @@ from koel.voicebot.pipeline.outbound_dialer import (
 )
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
 from koel.voicebot.session.models import CallStatus, SessionState
+from koel.voicebot.telephony.bargein_gate import TelephonyBargeInGate
 from koel.voicebot.telephony.bridge import TwilioMediaBridge
 from koel.voicebot.telephony.ingest import (
     PartialCallback,
@@ -598,21 +599,47 @@ async def twilio_stream(websocket: WebSocket) -> None:
             )
         )
 
+    # Barge-in Gate 1+2 on telephony (previously missing — only the browser
+    # transport, via its client VAD worklet, ever ran bargein.evaluate()). See
+    # TelephonyBargeInGate's docstring for why the interim partial itself
+    # stands in for Gate 1 here.
+    partial_gate = TelephonyBargeInGate(runtime.bargein)
+
     async def _on_utterance(stt: TranscriptResult) -> None:
-        # bridge.send translates the orchestrator's reply back into Twilio frames.
+        partial_gate.reset()
         if bridge is None:
             return
+        bridge.mark_customer_turn()
+        # bridge.send translates the orchestrator's reply back into Twilio frames.
         await runtime.orchestrator.handle_final_transcript(state, bridge.send, stt)
 
     async def _send_partial(text: str) -> None:
         """Forward an interim STT partial through the transport as a best-effort
-        ``partial_transcript`` (O-6). The Twilio bridge has no carrier
-        representation for it and drops it; on a browser transport it surfaces as a
-        live caption. NEVER authoritative — the turn still runs on the final."""
+        ``partial_transcript`` (O-6) — a live caption on the browser transport,
+        dropped by the Twilio bridge (no carrier representation), never
+        authoritative on its own (the turn still runs on the final). Also runs
+        Gate 2 barge-in classification while the bot is speaking, since this is
+        telephony's only voice-activity signal."""
         if bridge is None or not text.strip():
             return
         await bridge.send(
             ServerMessage.of(ServerMessageType.partial_transcript, text=text, speaker="customer")
+        )
+        if not bridge.is_bot_speaking:
+            partial_gate.reset()
+            return
+        extra = {w.lower() for w in state.backchannels.get(state.language.value, [])}
+        decision = partial_gate.evaluate_partial(
+            text=text, language=state.language, extra_backchannels=extra or None
+        )
+        if not decision.interrupt:
+            return
+        if state.transcript and state.transcript[-1].speaker == "bot":
+            state.transcript[-1].interrupted = True
+        await bridge.send_clear()
+        logger.info(
+            "telephony_barge_in",
+            extra={"extra_fields": {"session_id": state.session_id, "reason": decision.reason}},
         )
 
     # (6) STT ingest: the long-lived Deepgram streaming session (true continuous
