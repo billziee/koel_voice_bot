@@ -7,6 +7,7 @@ scripted fake socket, covering the paths that per-file coverage showed untested.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 from fastapi import WebSocketDisconnect
@@ -257,7 +258,7 @@ async def test_call_summary_runs_when_sarvam_enabled(monkeypatch, test_db):
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr("koel.voicebot.ws.handler.SarvamSummarizer", StubSummarizer)
+    monkeypatch.setattr("koel.voicebot.pipeline.postcall.SarvamSummarizer", StubSummarizer)
 
     ws = FakeWebSocket([json.dumps({"type": "end_call"})])
     clients = ScriptedClients(nlp=_nlp())
@@ -271,3 +272,43 @@ async def test_call_summary_runs_when_sarvam_enabled(monkeypatch, test_db):
     assert customer_id == "cust_x"
     assert summary["interest_shown"] is True
     assert summary["next_action"] == "Follow up"
+
+
+# --- full-conversation call recording (both sides) --------------------------
+
+
+def _audio_chunk_with_pcm(is_final: bool = True) -> str:
+    pcm = base64.b64encode(b"\x00\x01" * 160).decode()
+    return json.dumps({
+        "type": "audio_chunk", "audio_b64": "webm-opus-stand-in", "is_final": is_final,
+        "pcm16_b64": pcm,
+    })
+
+
+async def test_customer_audio_is_buffered_alongside_bot_audio(test_db):
+    from koel.tts.mixer import concat_wavs
+
+    ws = FakeWebSocket([_audio_chunk_with_pcm()])
+    clients = ScriptedClients(nlp=_nlp())
+    call = _session(ws, _state("ws_rec_both"), clients)
+
+    await call.run()
+
+    # Both the bot's turns (greeting + reply) AND the customer's utterance
+    # ended up in the recording buffer — not just the bot's half.
+    assert len(call._audio_buffer) >= 3  # noqa: SLF001
+    # And it actually muxes into one real, non-empty recording.
+    assert concat_wavs(call._audio_buffer)  # noqa: SLF001
+
+
+async def test_customer_audio_skipped_without_neural_vad_pcm(test_db):
+    # Older client / real mic capture with no Silero VAD worklet running has
+    # no pcm16_b64 at all — best-effort degrades to bot-only, never crashes.
+    audio = json.dumps({"type": "audio_chunk", "audio_b64": "webm-opus", "is_final": True})
+    ws = FakeWebSocket([audio])
+    clients = ScriptedClients(nlp=_nlp())
+    call = _session(ws, _state("ws_rec_no_pcm"), clients)
+
+    await call.run()
+
+    assert len(call._audio_buffer) >= 2  # noqa: SLF001 — bot audio only (greeting + reply)

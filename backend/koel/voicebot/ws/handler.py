@@ -26,7 +26,7 @@ from koel.common.schemas import Language
 from koel.common.telemetry import record_first_audio_latency, span
 from koel.nlp.schemas import RetrievedChunk
 from koel.stt.schemas import TranscribeRequest, TranscriptResult
-from koel.tts.mixer import concat_wavs
+from koel.tts.mixer import concat_wavs, pcm16_to_wav
 from koel.voicebot.config import VoiceBotSettings
 from koel.voicebot.escalation import EscalationHub
 from koel.voicebot.monitor import LiveMonitor
@@ -34,15 +34,13 @@ from koel.voicebot.persistence import (
     abandon_escalation_by_session,
     create_escalation,
     persist_call,
-    persist_call_summary,
 )
 from koel.voicebot.pipeline.bargein import BargeInClassifier
 from koel.voicebot.pipeline.endpointing import SmartTurnAnalyzer, merge_transcripts
-from koel.voicebot.pipeline.followup import send_followup
 from koel.voicebot.pipeline.orchestrator import Orchestrator
+from koel.voicebot.pipeline.postcall import dispatch_followup, summarize_and_annotate_crm
 from koel.voicebot.pipeline.silence import NoInputAction, on_no_input
 from koel.voicebot.pipeline.specrag import transcripts_diverged
-from koel.voicebot.pipeline.summarizer import SarvamSummarizer
 from koel.voicebot.recording import upload_recording
 from koel.voicebot.session.models import CallStatus, SessionState
 from koel.voicebot.session.store import RedisSessionStore
@@ -162,11 +160,21 @@ class CallSession:
             self._speech_until = max(self._speech_until, time.monotonic()) + extra
             # Buffer bot WAV audio for the call recording (K), capped to bound memory.
             is_wav = message.data.get("audio_format", "wav") == "wav"
-            if is_wav and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+            if is_wav:
                 try:
-                    self._audio_buffer.append(base64.b64decode(message.data.get("audio_b64", "")))
+                    self._buffer_recording_audio(base64.b64decode(message.data.get("audio_b64", "")))
                 except (ValueError, binascii.Error):
                     pass
+
+    def _buffer_recording_audio(self, wav_bytes: bytes) -> None:
+        """Append one already-WAV-framed clip to the call-recording buffer
+        (bounded so a very long call can't exhaust memory). Shared by the bot
+        side (:meth:`send`, already WAV) and the customer side
+        (:meth:`_handle_audio` / ``BrowserStreamingStt``, raw PCM16 wrapped
+        first) so the recording captures the full conversation, not just the
+        bot's half."""
+        if wav_bytes and len(self._audio_buffer) < _MAX_RECORDING_FRAMES:
+            self._audio_buffer.append(wav_bytes)
 
     async def run(self) -> None:
         # Echo our subprotocol when the client negotiated one (token-in-subprotocol
@@ -346,6 +354,23 @@ class CallSession:
             await self._handle_audio(msg)
 
     async def _handle_audio(self, msg: ClientMessage) -> None:
+        # Full-conversation call recording (K): capture the customer's audio
+        # regardless of call state (even during an agent hold) — a recording
+        # missing what the caller actually said isn't a real call recording.
+        # Only meaningful on the BUFFERED path: each message there is one
+        # complete utterance (the client's own VAD posts one audio_chunk per
+        # finished utterance); the O-6 streaming path buffers its own rolling
+        # window in BrowserStreamingStt instead, since individual streamed
+        # frames aren't complete utterances. Best-effort: only possible when
+        # the neural-VAD worklet supplied raw pcm16_b64 — a real mic capture
+        # without it (webm/opus in audio_b64) has no cheap PCM to WAV-wrap.
+        if not self._stt_stream.enabled and msg.is_final and msg.pcm16_b64:
+            try:
+                self._buffer_recording_audio(
+                    pcm16_to_wav(base64.b64decode(msg.pcm16_b64), msg.sample_rate)
+                )
+            except (ValueError, binascii.Error):
+                pass
         # On agent hold (3.1) the human operator owns the conversation — the bot
         # must stay silent. Drop caller audio rather than run the NLP turn loop
         # (which would speak over the handoff). Relaying the caller's audio to the
@@ -711,60 +736,19 @@ class CallSession:
             self._finalized = False  # allow a later attempt to persist (teardown won't re-run)
 
     def _dispatch_followup(self) -> None:
-        """Fire the post-call follow-up (2.4) off the critical path. No-op unless a
-        template matches the outcome and the WhatsApp channel is configured."""
-        if not self._state.followup_templates:
-            return
-        task = asyncio.create_task(send_followup(self._state))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        dispatch_followup(self._state, self._background_tasks)
 
     def _summarize_and_annotate_crm(self) -> None:
-        """Best-effort post-call CRM note: an LLM extracts interest/objection/
-        sentiment/next-action from the transcript and appends it to the
-        customer's record. Never on the critical path — fired after persist_call
-        succeeds, so a slow/failed Sarvam call can't delay socket teardown or
-        double-run on a persistence retry (guarded by the `call_id is not None`
-        branch above, same as the exactly-once _finalize itself)."""
-        if not self._state.customer_id or not self._settings.sarvam_enabled or not self._state.transcript:
-            return
-        task = asyncio.create_task(self._run_summary(self._state))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _run_summary(self, state: SessionState) -> None:
-        summarizer = SarvamSummarizer(
-            api_key=self._settings.sarvam_api_key,  # type: ignore[arg-type]  # sarvam_enabled guards None
-            model=self._settings.sarvam_summary_model,
-            base_url=self._settings.sarvam_base_url,
-            timeout_s=self._settings.sarvam_summary_timeout_s,
+        """Fired after persist_call succeeds, so a slow/failed Sarvam call can't
+        delay socket teardown or double-run on a persistence retry (guarded by
+        the `call_id is not None` branch above, same as the exactly-once
+        _finalize itself)."""
+        summarize_and_annotate_crm(
+            self._state,
+            clients=self._clients,
+            settings=self._settings,
+            background_tasks=self._background_tasks,
         )
-        try:
-            summary = await summarizer.summarize(state.transcript)
-            # 5.3: also persist the summary on the call so operators see it in the
-            # history API (persist_call_summary self-swallows, so a CallLog update
-            # failure can't stop the CRM annotation below).
-            await persist_call_summary(
-                state.session_id,
-                {
-                    "interest_shown": summary.interest_shown,
-                    "objection": summary.objection,
-                    "sentiment": summary.sentiment,
-                    "next_action": summary.next_action,
-                },
-            )
-            await self._clients.add_call_summary(
-                state.customer_id,  # type: ignore[arg-type]  # guarded by caller
-                session_id=state.session_id,
-                interest_shown=summary.interest_shown,
-                objection=summary.objection,
-                sentiment=summary.sentiment,
-                next_action=summary.next_action,
-            )
-        except Exception:  # noqa: BLE001 — best-effort CRM annotation, never raise
-            logger.warning("call_summary_failed session=%s", state.session_id, exc_info=True)
-        finally:
-            await summarizer.aclose()
 
     async def _upload_recording(self) -> None:
         """Mux the buffered bot audio and upload it (K), then point recording_url at

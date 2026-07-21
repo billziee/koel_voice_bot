@@ -7,9 +7,6 @@ filler-audio cache at startup so latency masking is ready on the first slow turn
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
-import wave
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, status
@@ -23,8 +20,8 @@ from koel.common.schemas import Language
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.stt.config import get_stt_settings
-from koel.stt.schemas import TranscribeRequest, TranscriptResult
 from koel.stt.streaming_session import DeepgramStreamingSession
+from koel.stt.streaming_session import FinalCallback as StreamingFinalCallback
 from koel.tts.schemas import SynthesizeRequest
 from koel.voicebot.api import (
     analytics,
@@ -53,7 +50,6 @@ from koel.voicebot.pipeline.outbound_dialer import (
 )
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
 from koel.voicebot.session.models import CallStatus, SessionState
-from koel.voicebot.telephony.bargein_gate import TelephonyBargeInGate
 from koel.voicebot.telephony.bridge import TwilioMediaBridge
 from koel.voicebot.telephony.ingest import (
     PartialCallback,
@@ -62,10 +58,11 @@ from koel.voicebot.telephony.ingest import (
     TelephonyAudioIngest,
     TranscribeCallback,
     UtteranceCallback,
+    VoiceActivityCallback,
 )
+from koel.voicebot.telephony.session import TelephonyCallSession
 from koel.voicebot.telephony.twilio import verify_twilio_signature
 from koel.voicebot.ws.handler import handle_connection
-from koel.voicebot.ws.protocol import ServerMessage, ServerMessageType
 
 logger = get_logger("koel.voicebot")
 settings = get_voicebot_settings()
@@ -355,22 +352,6 @@ async def call_socket(websocket: WebSocket, session_id: str) -> None:
         active_sessions.discard(session_id)
 
 
-def _pcm16_to_wav_b64(pcm16: bytes, sample_rate: int) -> str:
-    """Wrap raw PCM16 mono samples in a WAV container (base64) for STT_svc.
-
-    Twilio delivers 8 kHz µ-law; the bridge decodes it to raw 16 kHz PCM16. STT
-    infers the codec from the container, so the endpointed utterance is framed as
-    a WAV — the exact inverse of the bridge's own ``_wav_to_pcm16``.
-    """
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(pcm16)
-    return base64.b64encode(buffer.getvalue()).decode()
-
-
 async def _resolve_deepgram_streaming(state: SessionState) -> tuple[str, str, str] | None:
     """Decide whether this call runs on Deepgram *streaming* STT (O-6 Wave 2).
 
@@ -422,7 +403,7 @@ async def _browser_streaming_factory(state: SessionState) -> StreamingSessionFac
     api_key, model, base_url = dg
 
     def _factory(
-        on_partial: PartialCallback, on_final: UtteranceCallback
+        on_partial: PartialCallback, on_final: StreamingFinalCallback
     ) -> DeepgramStreamingSession:
         return DeepgramStreamingSession(
             api_key=api_key,
@@ -444,6 +425,7 @@ async def _build_telephony_ingest(
     transcribe: TranscribeCallback,
     on_utterance: UtteranceCallback,
     on_partial: PartialCallback,
+    on_voice_activity: VoiceActivityCallback | None = None,
 ) -> TelephonyAudioIngest | StreamingTelephonyIngest:
     """Pick the caller-audio ingest for this call.
 
@@ -460,7 +442,7 @@ async def _build_telephony_ingest(
         api_key, model, base_url = dg
 
         def _factory(
-            partial: PartialCallback, final: UtteranceCallback
+            partial: PartialCallback, final: StreamingFinalCallback
         ) -> DeepgramStreamingSession:
             return DeepgramStreamingSession(
                 api_key=api_key,
@@ -488,7 +470,9 @@ async def _build_telephony_ingest(
             "telephony_streaming_stt_unavailable; using buffered ingest",
             extra={"extra_fields": {"session_id": state.session_id}},
         )
-    return TelephonyAudioIngest(transcribe=transcribe, on_utterance=on_utterance)
+    return TelephonyAudioIngest(
+        transcribe=transcribe, on_utterance=on_utterance, on_voice_activity=on_voice_activity
+    )
 
 
 async def _build_outbound_telephony_session(runtime, bot: BotConfig, attempt_id: str) -> SessionState:
@@ -584,79 +568,40 @@ async def twilio_stream(websocket: WebSocket) -> None:
     set_correlation_id(state.session_id)
     await runtime.store.save(state)
 
-    # (5) STT seam: wrap clients.transcribe (mirrors ws/handler._handle_audio —
-    # final utterance, language pinned to the bot) behind the endpointer.
-    async def _transcribe(pcm16: bytes, sample_rate: int) -> TranscriptResult | None:
-        return await runtime.clients.transcribe(
-            TranscribeRequest(
-                session_id=state.session_id,
-                audio_b64=_pcm16_to_wav_b64(pcm16, sample_rate),
-                sample_rate=sample_rate,
-                is_final=True,
-                audio_format="wav",
-                language_hint=state.language,
-                stt_connection_id=state.stt_connection_id,  # BYOK per-bot STT connection
-            )
-        )
-
-    # Barge-in Gate 1+2 on telephony (previously missing — only the browser
-    # transport, via its client VAD worklet, ever ran bargein.evaluate()). See
-    # TelephonyBargeInGate's docstring for why the interim partial itself
-    # stands in for Gate 1 here.
-    partial_gate = TelephonyBargeInGate(runtime.bargein)
-
-    async def _on_utterance(stt: TranscriptResult) -> None:
-        partial_gate.reset()
-        if bridge is None:
-            return
-        bridge.mark_customer_turn()
-        # bridge.send translates the orchestrator's reply back into Twilio frames.
-        await runtime.orchestrator.handle_final_transcript(state, bridge.send, stt)
-
-    async def _send_partial(text: str) -> None:
-        """Forward an interim STT partial through the transport as a best-effort
-        ``partial_transcript`` (O-6) — a live caption on the browser transport,
-        dropped by the Twilio bridge (no carrier representation), never
-        authoritative on its own (the turn still runs on the final). Also runs
-        Gate 2 barge-in classification while the bot is speaking, since this is
-        telephony's only voice-activity signal."""
-        if bridge is None or not text.strip():
-            return
-        await bridge.send(
-            ServerMessage.of(ServerMessageType.partial_transcript, text=text, speaker="customer")
-        )
-        if not bridge.is_bot_speaking:
-            partial_gate.reset()
-            return
-        extra = {w.lower() for w in state.backchannels.get(state.language.value, [])}
-        decision = partial_gate.evaluate_partial(
-            text=text, language=state.language, extra_backchannels=extra or None
-        )
-        if not decision.interrupt:
-            return
-        if state.transcript and state.transcript[-1].speaker == "bot":
-            state.transcript[-1].interrupted = True
-        await bridge.send_clear()
-        logger.info(
-            "telephony_barge_in",
-            extra={"extra_fields": {"session_id": state.session_id, "reason": decision.reason}},
-        )
+    # (5) The call session owns turn-handling policy — barge-in, smart-turn
+    # hold + speculative RAG, human-handoff registration/gating, the no-input
+    # watchdog, first-audio latency, the recording buffer, and end-of-call
+    # persistence (roadmap 1.1/1.3/3.1/O-5/O-6; the telephony analogue of
+    # ws/handler.CallSession). Its callback methods are what the STT ingest and
+    # the bridge are built against below.
+    session = TelephonyCallSession(
+        state=state,
+        settings=settings,
+        store=runtime.store,
+        orchestrator=runtime.orchestrator,
+        bargein=runtime.bargein,
+        clients=runtime.clients,
+        smart_turn=runtime.smart_turn,
+        escalations=runtime.escalations,
+        monitor=runtime.monitor,
+        background_tasks=runtime.background_tasks,
+    )
 
     # (6) STT ingest: the long-lived Deepgram streaming session (true continuous
     # partials) when this call resolves to Deepgram streaming STT, else the
-    # buffered, RMS-endpointed TelephonyAudioIngest (fallback + non-Deepgram path).
-    # Bound to a mutable ``bridge`` the closures above read at call time (feeds only
-    # start once bridge.run() is underway, so it is always assigned by then).
-    bridge: TwilioMediaBridge | None = None
+    # buffered, RMS-endpointed TelephonyAudioIngest (fallback + non-Deepgram path;
+    # its on_voice_activity is this path's only barge-in Gate 1 signal, since it
+    # has no STT partials at all).
     ingest = await _build_telephony_ingest(
         state=state,
-        transcribe=_transcribe,
-        on_utterance=_on_utterance,
-        on_partial=_send_partial,
+        transcribe=session.transcribe,
+        on_utterance=session.on_utterance,
+        on_partial=session.on_partial,
+        on_voice_activity=session.on_voice_activity,
     )
 
-    # (7) Run the media bridge. Constructed directly (this is exactly what
-    # run_twilio_bridge does) so on_utterance can reach the bridge's own send.
+    # (7) The media bridge. Constructed directly (this is exactly what
+    # run_twilio_bridge does) so the session can bind to it before running.
     dtmf_map = bot.config.get("dtmf_map", {}) if isinstance(bot.config, dict) else {}
     bridge = TwilioMediaBridge(
         websocket=websocket,
@@ -664,22 +609,16 @@ async def twilio_stream(websocket: WebSocket) -> None:
         state=state,
         dtmf_map=dtmf_map,
         on_caller_audio=ingest.feed,
+        on_started=session.on_call_started,
+        on_outbound=session.on_outbound,
+        frame_idle_timeout_s=settings.telephony_frame_idle_timeout_s,
     )
+    session.bind(bridge=bridge, ingest=ingest)
 
     websocket.app.state.active_calls += 1
     try:
-        await bridge.run()
+        await session.run()
     finally:
-        # Drain any speech still buffered when the stream stopped — unless the
-        # call already ended normally (a `stop`/hangup already ran end_call), in
-        # which case there's no one left to answer.
-        if state.status != CallStatus.ended:
-            await ingest.flush()
-        # Always tear the ingest down: the streaming ingest owns a Deepgram socket
-        # that must close even on a normal end; the buffered ingest has no aclose.
-        aclose = getattr(ingest, "aclose", None)
-        if aclose is not None:
-            await aclose()
         websocket.app.state.active_calls -= 1
         # Outbound (1.2): report this leg's outcome back to the dial queue so
         # the retry policy can act on it — a customer never reached (dropped

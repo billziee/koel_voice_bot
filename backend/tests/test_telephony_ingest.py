@@ -51,13 +51,15 @@ class StubTranscribe:
 
 
 class UtteranceRecorder:
-    """Records final transcripts handed to on_utterance."""
+    """Records final transcripts (+ their raw PCM16) handed to on_utterance."""
 
     def __init__(self) -> None:
         self.received: list[TranscriptResult] = []
+        self.audio: list[bytes] = []
 
-    async def __call__(self, stt: TranscriptResult) -> None:
+    async def __call__(self, stt: TranscriptResult, pcm16: bytes) -> None:
         self.received.append(stt)
+        self.audio.append(pcm16)
 
 
 async def test_flush_fires_after_trailing_silence_with_min_length_utterance():
@@ -88,6 +90,9 @@ async def test_flush_fires_after_trailing_silence_with_min_length_utterance():
     pcm, rate = stt.calls[0]
     assert rate == _RATE
     assert len(pcm) > 0
+    # on_utterance also got the same raw audio the utterance was transcribed from
+    # (the smart-turn gate needs the waveform, not just the transcript).
+    assert rec.audio[0] == pcm
 
 
 async def test_short_blip_does_not_flush():
@@ -200,3 +205,56 @@ async def test_explicit_flush_drains_residual_speech_at_stream_stop():
     # A second flush on the now-empty buffer is a harmless no-op.
     await ingest.flush()
     assert len(rec.received) == 1
+
+
+async def test_on_voice_activity_fires_once_per_utterance():
+    """Gate 1 for the buffered ingest: fires the moment real speech is first
+    detected, not once per voiced frame, and resets for the next utterance."""
+    stt = StubTranscribe(_final())
+    rec = UtteranceRecorder()
+    activity_calls = 0
+
+    async def on_voice_activity() -> None:
+        nonlocal activity_calls
+        activity_calls += 1
+
+    ingest = TelephonyAudioIngest(
+        transcribe=stt,
+        on_utterance=rec,
+        on_voice_activity=on_voice_activity,
+        trailing_silence_ms=100,
+        min_utterance_ms=40,
+        silence_rms_threshold=500,
+    )
+
+    # Several voiced frames in the same utterance → exactly one activity signal.
+    for _ in range(3):
+        await ingest.feed(_loud_frame(), _RATE)
+    assert activity_calls == 1
+
+    # End the utterance.
+    for _ in range(5):
+        await ingest.feed(_silent_frame(), _RATE)
+    assert len(rec.received) == 1
+
+    # A fresh utterance gets its own activity signal.
+    for _ in range(3):
+        await ingest.feed(_loud_frame(), _RATE)
+    assert activity_calls == 2
+
+
+async def test_on_voice_activity_never_fires_on_pure_silence():
+    stt = StubTranscribe(_final())
+    rec = UtteranceRecorder()
+    activity_calls = 0
+
+    async def on_voice_activity() -> None:
+        nonlocal activity_calls
+        activity_calls += 1
+
+    ingest = TelephonyAudioIngest(
+        transcribe=stt, on_utterance=rec, on_voice_activity=on_voice_activity
+    )
+    for _ in range(10):
+        await ingest.feed(_silent_frame(), _RATE)
+    assert activity_calls == 0

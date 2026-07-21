@@ -107,6 +107,18 @@ class VoiceBotSettings(CommonSettings):
     # µ-law for a PSTN leg. Off for browser calls (the only transport built now).
     telephony_mode: bool = False
 
+    # Telephony connection-lifecycle (parity with the browser's heartbeat
+    # timeout — see TwilioMediaBridge.run()'s docstring on _DEFAULT_FRAME_IDLE_
+    # TIMEOUT_S for why total silence on the socket, not just on the line,
+    # signals a wedged connection worth tearing down).
+    telephony_frame_idle_timeout_s: float = 30.0
+    # No-input timeout for a telephony call (mirrors no_input_reprompt_ms /
+    # no_input_close_ms above) — the browser settings aren't reused directly so
+    # the two transports can be tuned independently if real PSTN calls need a
+    # different window than browser calls.
+    telephony_no_input_reprompt_ms: int = 8000
+    telephony_no_input_close_ms: int = 8000
+
     # Sentence-streaming TTS (latency): stream one audio chunk per sentence so the
     # bot starts speaking on the first sentence, not the whole clip. Reversible.
     stream_tts: bool = True
