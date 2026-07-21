@@ -56,6 +56,52 @@ def _whisper_then_join_twiml(conference_name: str, whisper_text: str) -> str:
     )
 
 
+async def end_twilio_call(
+    *,
+    call_sid: str,
+    account_sid: str,
+    auth_token: str,
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Terminate a live PSTN leg via Twilio's REST Calls API (``Status=completed``).
+
+    Media Streams gives an app no way to hang up a call from its own side —
+    the `stop` event is Twilio→app only, and closing our WebSocket doesn't
+    reliably end the underlying call (it depends on the TwiML verb that opened
+    the stream). This is the actual mechanism: when the orchestrator decides
+    mid-call to end a PSTN call (opt-out, a scripted close, the no-input or
+    budget guard), the telephony call session calls this so the customer is
+    really disconnected — the browser transport's equivalent is simply closing
+    its WebSocket, which telephony can't rely on for the same effect. Returns
+    True iff Twilio accepted the request; never raises.
+    """
+    if not (account_sid and auth_token):
+        logger.debug(
+            "end_twilio_call_skipped_unconfigured", extra={"extra_fields": {"call_sid": call_sid}}
+        )
+        return False
+    owns_client = client is None
+    client = client or make_async_client(timeout_s=_REQUEST_TIMEOUT_S, http2=False)
+    try:
+        resp = await client.post(
+            f"{_TWILIO_API_BASE}/Accounts/{account_sid}/Calls/{call_sid}.json",
+            auth=(account_sid, auth_token),
+            content=urlencode({"Status": "completed"}),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        logger.info("twilio_call_ended_via_rest", extra={"extra_fields": {"call_sid": call_sid}})
+        return True
+    except Exception:  # noqa: BLE001 — best-effort; the call is already ended state-side
+        logger.warning(
+            "end_twilio_call_failed", extra={"extra_fields": {"call_sid": call_sid}}, exc_info=True
+        )
+        return False
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 async def start_warm_transfer(
     *,
     call_sid: str,

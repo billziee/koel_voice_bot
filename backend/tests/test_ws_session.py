@@ -257,7 +257,7 @@ async def test_call_summary_runs_when_sarvam_enabled(monkeypatch, test_db):
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr("koel.voicebot.ws.handler.SarvamSummarizer", StubSummarizer)
+    monkeypatch.setattr("koel.voicebot.pipeline.postcall.SarvamSummarizer", StubSummarizer)
 
     ws = FakeWebSocket([json.dumps({"type": "end_call"})])
     clients = ScriptedClients(nlp=_nlp())

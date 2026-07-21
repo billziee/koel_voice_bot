@@ -85,9 +85,21 @@ class _Recorder:
         self.items.append(item)
 
 
+class _FinalRecorder:
+    """Like _Recorder, but for on_utterance's (TranscriptResult, pcm16) pair."""
+
+    def __init__(self) -> None:
+        self.items: list = []
+        self.audio: list[bytes] = []
+
+    async def __call__(self, result, pcm16) -> None:  # noqa: ANN001
+        self.items.append(result)
+        self.audio.append(pcm16)
+
+
 async def test_partials_and_final_are_surfaced():
     session = _FakeSession()
-    partials, finals = _Recorder(), _Recorder()
+    partials, finals = _Recorder(), _FinalRecorder()
     ingest = StreamingTelephonyIngest(
         session_factory=_factory_for(session), on_utterance=finals, on_partial=partials
     )
@@ -103,6 +115,9 @@ async def test_partials_and_final_are_surfaced():
     assert finals.items[0].text == "final utterance"
     assert session.frames  # frames were pushed into the session
     assert session.finished is True
+    # The rolling audio window (Deepgram gives text only) rode along with the
+    # final — the smart-turn gate needs the waveform.
+    assert finals.audio[0] == b"\x00\x01" * 20
 
     await ingest.aclose()
     assert session.closed is True
@@ -110,7 +125,7 @@ async def test_partials_and_final_are_surfaced():
 
 async def test_blank_partial_and_non_final_are_dropped():
     session = _FakeSession()
-    partials, finals = _Recorder(), _Recorder()
+    partials, finals = _Recorder(), _FinalRecorder()
     ingest = StreamingTelephonyIngest(
         session_factory=_factory_for(session), on_utterance=finals, on_partial=partials
     )
@@ -127,7 +142,7 @@ async def test_blank_partial_and_non_final_are_dropped():
 
 async def test_no_partial_sink_is_fine():
     session = _FakeSession()
-    finals = _Recorder()
+    finals = _FinalRecorder()
     ingest = StreamingTelephonyIngest(
         session_factory=_factory_for(session), on_utterance=finals  # on_partial=None
     )
@@ -140,7 +155,7 @@ async def test_no_partial_sink_is_fine():
 
 async def test_start_failure_reports_false_and_degrades():
     session = _FakeSession(fail_on="start")
-    partials, finals = _Recorder(), _Recorder()
+    partials, finals = _Recorder(), _FinalRecorder()
     ingest = StreamingTelephonyIngest(
         session_factory=_factory_for(session), on_utterance=finals, on_partial=partials
     )
@@ -154,7 +169,7 @@ async def test_start_failure_reports_false_and_degrades():
 
 async def test_send_failure_degrades_safely():
     session = _FakeSession(fail_on="send")
-    partials, finals = _Recorder(), _Recorder()
+    partials, finals = _Recorder(), _FinalRecorder()
     ingest = StreamingTelephonyIngest(
         session_factory=_factory_for(session), on_utterance=finals, on_partial=partials
     )
@@ -168,6 +183,24 @@ async def test_send_failure_degrades_safely():
     assert partials.items == []
     assert finals.items == []
     await ingest.aclose()  # never raises
+
+
+async def test_audio_window_resets_between_utterances():
+    session = _FakeSession()
+    finals = _FinalRecorder()
+    ingest = StreamingTelephonyIngest(
+        session_factory=_factory_for(session), on_utterance=finals
+    )
+    await ingest.start()
+
+    await ingest.feed(b"\x01\x02" * 5, 16000)
+    await ingest.flush()  # first utterance: finish() fires one on_final
+    assert finals.audio[0] == b"\x01\x02" * 5
+
+    # A second utterance's window must not carry over the first's audio.
+    await ingest.feed(b"\x03\x04" * 5, 16000)
+    await ingest.flush()
+    assert finals.audio[1] == b"\x03\x04" * 5
 
 
 # --- B. main._build_telephony_ingest selection + degrade ----------------------
@@ -215,7 +248,7 @@ async def _noop_transcribe(pcm16: bytes, sample_rate: int) -> TranscriptResult |
     return None
 
 
-async def _noop_utterance(stt: TranscriptResult) -> None:  # noqa: ARG001
+async def _noop_utterance(stt: TranscriptResult, pcm16: bytes) -> None:  # noqa: ARG001
     return None
 
 

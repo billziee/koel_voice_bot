@@ -7,7 +7,7 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from koel.voicebot.pipeline.warm_transfer import start_warm_transfer
+from koel.voicebot.pipeline.warm_transfer import end_twilio_call, start_warm_transfer
 
 
 async def test_skips_when_unconfigured():
@@ -100,3 +100,42 @@ async def test_operator_call_failure_is_reported_false():
 
     assert started is False
     assert call_count == 2
+
+
+# --- end_twilio_call (REST hangup for an orchestrator-initiated mid-call end) -
+
+
+async def test_end_twilio_call_skips_when_unconfigured():
+    ended = await end_twilio_call(call_sid="CA1", account_sid="", auth_token="")
+    assert ended is False
+
+
+async def test_end_twilio_call_posts_status_completed():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"sid": "CA123", "status": "completed"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    ended = await end_twilio_call(
+        call_sid="CA123", account_sid="AC1", auth_token="tok", client=client
+    )
+    await client.aclose()
+
+    assert ended is True
+    assert len(requests) == 1
+    req = requests[0]
+    assert req.url.path.endswith("/Calls/CA123.json")
+    fields = parse_qs(req.read().decode())
+    assert fields["Status"] == ["completed"]
+
+
+async def test_end_twilio_call_failure_is_reported_false():
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+    ended = await end_twilio_call(
+        call_sid="CA_gone", account_sid="AC1", auth_token="tok", client=client
+    )
+    await client.aclose()
+
+    assert ended is False

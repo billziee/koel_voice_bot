@@ -33,6 +33,7 @@ account is configured).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
@@ -70,6 +71,16 @@ _STT_SAMPLE_RATE = 16000
 # Outbound audio the bridge already receives pre-transcoded as raw 8 kHz µ-law
 # (SynthesizeRequest.telephony=True path) carries this format tag.
 _ULAW_FORMAT = "ulaw"
+
+# Twilio Media Streams sends a frame (media/mark/etc) roughly every 20ms for the
+# life of a real call — the carrier, not silence on the line, drives the cadence
+# (comfort-noise media keeps flowing even when the caller says nothing). Total
+# silence on the socket for this long means the TCP connection wedged without a
+# clean close (NAT/firewall drop, half-open socket) rather than a quiet caller —
+# the browser transport catches the equivalent failure via its heartbeat
+# timeout; Media Streams has no ping/pong of its own, so this read timeout is
+# the telephony analogue.
+_DEFAULT_FRAME_IDLE_TIMEOUT_S = 30.0
 
 
 class TwilioWebSocket(Protocol):
@@ -136,6 +147,9 @@ class TwilioMediaBridge:
         dtmf_map: Mapping[str, str] | None = None,
         on_caller_audio: CallerAudioHook | None = None,
         inbound_sample_rate: int = _STT_SAMPLE_RATE,
+        on_started: Callable[[], Awaitable[None]] | None = None,
+        on_outbound: Callable[[ServerMessage], Awaitable[None]] | None = None,
+        frame_idle_timeout_s: float = _DEFAULT_FRAME_IDLE_TIMEOUT_S,
     ) -> None:
         self._ws = websocket
         self._orch = orchestrator
@@ -143,6 +157,21 @@ class TwilioMediaBridge:
         self._dtmf_map: Mapping[str, str] = dtmf_map or {}
         self._on_caller_audio = on_caller_audio
         self._inbound_sample_rate = inbound_sample_rate
+        # Fired once the Media Streams `start` frame lands and the CallSid is
+        # captured onto `state` — the route's hook to persist it to Redis
+        # immediately (previously nothing did, so a fresh SessionState.load()
+        # elsewhere — e.g. the operator warm-transfer endpoint — always saw
+        # twilio_call_sid=None for a real call).
+        self._on_started = on_started
+        # Observer fired on EVERY dispatched ServerMessage, regardless of
+        # whether it came from the route's own turn-handling or from this
+        # bridge's own greet()/DTMF calls into the orchestrator — the seam the
+        # call session hooks cross-cutting bookkeeping onto (first-audio
+        # latency, the no-input clock, the recording buffer, the live monitor
+        # tee, and detecting `call_ended` to actually terminate the PSTN leg).
+        # Best-effort: an observer failure must never break the live call.
+        self._on_outbound = on_outbound
+        self._frame_idle_timeout_s = frame_idle_timeout_s
         # ``streamSid`` scopes every outbound frame; learned from the first frame
         # that carries it (``start``, and echoed on later frames).
         self._stream_sid: str | None = None
@@ -164,6 +193,13 @@ class TwilioMediaBridge:
     def is_bot_speaking(self) -> bool:
         return self._bot_speaking
 
+    @property
+    def stopped(self) -> bool:
+        """Whether Twilio already knows this call ended (a clean `stop` frame
+        or a prior :meth:`hangup`) — the discriminator the call session uses
+        to decide whether an in-turn `call_ended` still needs a REST hangup."""
+        return self._stopped
+
     def mark_customer_turn(self) -> None:
         """Call once the customer's utterance has been handed to the
         orchestrator (a final transcript) — the bot is no longer the one
@@ -184,7 +220,17 @@ class TwilioMediaBridge:
             await self._play(message.data)
         elif message.type == ServerMessageType.tts_kill:
             await self.send_clear()
-        # Other message types have no Media Streams representation → ignore.
+        # Other message types have no Media Streams representation on the wire
+        # but may still matter to the call session's observer below.
+        if self._on_outbound is not None:
+            try:
+                await self._on_outbound(message)
+            except Exception:  # noqa: BLE001 — bookkeeping must never break the live call
+                logger.warning(
+                    "twilio_outbound_hook_failed",
+                    extra={"extra_fields": {"session_id": self._state.session_id}},
+                    exc_info=True,
+                )
 
     async def send_audio(self, pcm16: bytes, sample_rate: int) -> None:
         """:class:`CarrierBridge` entry point — play synthesized PCM to the
@@ -260,7 +306,26 @@ class TwilioMediaBridge:
             "twilio_bridge_open", extra={"extra_fields": {"session_id": self._state.session_id}}
         )
         try:
-            async for raw in self._ws.iter_text():
+            frames = self._ws.iter_text()
+            while True:
+                try:
+                    raw = await asyncio.wait_for(
+                        frames.__anext__(), timeout=self._frame_idle_timeout_s
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    # No carrier frame at all (not even comfort-noise media) for the
+                    # whole window — a wedged socket, not a quiet caller. Fall through
+                    # to the same abnormal-disconnect handling a dropped socket gets.
+                    logger.warning(
+                        "twilio_frame_idle_timeout",
+                        extra={"extra_fields": {
+                            "session_id": self._state.session_id,
+                            "timeout_s": self._frame_idle_timeout_s,
+                        }},
+                    )
+                    break
                 try:
                     await self._on_frame(raw)
                 except Exception:  # noqa: BLE001 — a single frame must never drop the call
@@ -330,6 +395,8 @@ class TwilioMediaBridge:
         # that feature is never used.
         if event.call_sid:
             self._state.twilio_call_sid = event.call_sid
+            if self._on_started is not None:
+                await self._on_started()
         # Opening turn — same entry point the browser handler uses for a fresh call.
         await self._orch.greet(self._state, self.send)
 
@@ -393,6 +460,9 @@ async def run_twilio_bridge(
     dtmf_map: Mapping[str, str] | None = None,
     on_caller_audio: CallerAudioHook | None = None,
     inbound_sample_rate: int = _STT_SAMPLE_RATE,
+    on_started: Callable[[], Awaitable[None]] | None = None,
+    on_outbound: Callable[[ServerMessage], Awaitable[None]] | None = None,
+    frame_idle_timeout_s: float = _DEFAULT_FRAME_IDLE_TIMEOUT_S,
 ) -> None:
     """Construct a :class:`TwilioMediaBridge` and run it to completion."""
     bridge = TwilioMediaBridge(
@@ -402,5 +472,8 @@ async def run_twilio_bridge(
         dtmf_map=dtmf_map,
         on_caller_audio=on_caller_audio,
         inbound_sample_rate=inbound_sample_rate,
+        on_started=on_started,
+        on_outbound=on_outbound,
+        frame_idle_timeout_s=frame_idle_timeout_s,
     )
     await bridge.run()

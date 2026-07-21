@@ -36,6 +36,7 @@ from typing import Protocol
 
 from koel.common.logging import get_logger
 from koel.stt.schemas import TranscriptResult
+from koel.stt.streaming_session import FinalCallback as _SessionFinalCallback
 
 logger = get_logger("koel.voicebot.telephony.ingest")
 
@@ -45,9 +46,16 @@ _PCM_WIDTH = 2
 # STT seam callbacks the route injects.
 #  - ``transcribe`` wraps ``clients.transcribe`` (PCM16 + sample-rate → result);
 #    may return ``None`` when the provider yields nothing usable.
-#  - ``on_utterance`` receives a FINAL, non-empty transcript (→ the orchestrator).
+#  - ``on_utterance`` receives a FINAL, non-empty transcript plus the raw PCM16
+#    audio behind it (→ the orchestrator; the audio feeds the smart-turn gate,
+#    which needs the actual waveform, not just its transcript).
+#  - ``on_voice_activity`` (buffered ingest only) fires once per utterance the
+#    moment real speech is first detected — the RMS-endpointed analogue of the
+#    browser's client-side VAD worklet, i.e. Gate 1 for a transport with no true
+#    STT partials to stand in for it.
 TranscribeCallback = Callable[[bytes, int], Awaitable[TranscriptResult | None]]
-UtteranceCallback = Callable[[TranscriptResult], Awaitable[None]]
+UtteranceCallback = Callable[[TranscriptResult, bytes], Awaitable[None]]
+VoiceActivityCallback = Callable[[], Awaitable[None]]
 
 # --- default thresholds (STARTING POINT — see module docstring) --------------
 # RMS energy below which a frame is treated as silence. PCM16 amplitude runs
@@ -92,6 +100,7 @@ class TelephonyAudioIngest:
         *,
         transcribe: TranscribeCallback,
         on_utterance: UtteranceCallback,
+        on_voice_activity: VoiceActivityCallback | None = None,
         silence_rms_threshold: int = _DEFAULT_SILENCE_RMS_THRESHOLD,
         trailing_silence_ms: int = _DEFAULT_TRAILING_SILENCE_MS,
         min_utterance_ms: int = _DEFAULT_MIN_UTTERANCE_MS,
@@ -99,6 +108,7 @@ class TelephonyAudioIngest:
     ) -> None:
         self._transcribe = transcribe
         self._on_utterance = on_utterance
+        self._on_voice_activity = on_voice_activity
         self._cfg = EndpointingConfig(
             silence_rms_threshold=silence_rms_threshold,
             trailing_silence_ms=trailing_silence_ms,
@@ -110,6 +120,7 @@ class TelephonyAudioIngest:
         self._sample_rate = 0  # locked from the first non-empty frame
         self._speech_ms = 0.0  # voiced audio accumulated in the buffer
         self._trailing_silence_ms = 0.0  # consecutive silence at the buffer tail
+        self._voice_activity_fired = False  # at most one on_voice_activity per utterance
 
     @property
     def config(self) -> EndpointingConfig:
@@ -120,9 +131,12 @@ class TelephonyAudioIngest:
         """Append one decoded caller frame and flush if the utterance is complete.
 
         Voiced frames (RMS ≥ threshold) reset the trailing-silence timer and grow
-        the speech total; silent frames extend the trailing-silence timer. A flush
-        fires when trailing silence ≥ ``trailing_silence_ms`` AND accumulated
-        speech ≥ ``min_utterance_ms``, OR when the buffer reaches
+        the speech total; silent frames extend the trailing-silence timer. The
+        FIRST voiced frame of a fresh utterance also fires ``on_voice_activity``
+        once — this is Gate 1 (voice detected) for a transport with no true STT
+        partials to stand in for it, mirroring the browser's client-side VAD. A
+        flush fires when trailing silence ≥ ``trailing_silence_ms`` AND
+        accumulated speech ≥ ``min_utterance_ms``, OR when the buffer reaches
         ``max_utterance_ms``. Never raises into the caller.
         """
         try:
@@ -136,6 +150,10 @@ class TelephonyAudioIngest:
             if self._rms(pcm16) >= self._cfg.silence_rms_threshold:
                 self._trailing_silence_ms = 0.0
                 self._speech_ms += frame_ms
+                if not self._voice_activity_fired:
+                    self._voice_activity_fired = True
+                    if self._on_voice_activity is not None:
+                        await self._on_voice_activity()
             else:
                 self._trailing_silence_ms += frame_ms
 
@@ -180,7 +198,7 @@ class TelephonyAudioIngest:
             return
 
         try:
-            await self._on_utterance(result)
+            await self._on_utterance(result, pcm16)
         except Exception:  # noqa: BLE001 — a turn-handler failure is the route's to own
             logger.warning("telephony_ingest_on_utterance_failed", exc_info=True)
 
@@ -190,6 +208,7 @@ class TelephonyAudioIngest:
         self._buffer = bytearray()
         self._speech_ms = 0.0
         self._trailing_silence_ms = 0.0
+        self._voice_activity_fired = False
 
     def _bytes_to_ms(self, num_bytes: int) -> float:
         if self._sample_rate <= 0:
@@ -233,9 +252,19 @@ class StreamingSttSession(Protocol):
 
 # Builds a session bound to the ingest's own (partial, final) forwarders. The
 # ingest owns the callbacks; the factory only supplies transport (api key/url/…).
+# NOTE: the session's own on_final contract is `_SessionFinalCallback` (one
+# arg — Deepgram gives back a transcript only, never audio), distinct from
+# this module's outward-facing `UtteranceCallback` (two args) that
+# `_forward_final` translates into.
 StreamingSessionFactory = Callable[
-    [PartialCallback, UtteranceCallback], StreamingSttSession
+    [PartialCallback, _SessionFinalCallback], StreamingSttSession
 ]
+
+# Rolling audio window kept alongside the streaming session so on_utterance still
+# gets real PCM16 (Deepgram returns text only) — the smart-turn gate needs the
+# waveform, not the transcript. 10s at 16 kHz/16-bit mono comfortably covers the
+# gate's own 8s analysis window (see pipeline/endpointing.py) with margin.
+_MAX_STREAMING_AUDIO_WINDOW_BYTES = 320_000
 
 
 class StreamingTelephonyIngest:
@@ -270,6 +299,8 @@ class StreamingTelephonyIngest:
         self._session = session_factory(self._forward_partial, self._forward_final)
         self._started = False
         self._degraded = False
+        # Rolling PCM16 window — see _MAX_STREAMING_AUDIO_WINDOW_BYTES.
+        self._audio_window = bytearray()
 
     @property
     def started(self) -> bool:
@@ -293,6 +324,9 @@ class StreamingTelephonyIngest:
         contract) but unused here. Never raises into the caller."""
         if self._degraded or not self._started or not pcm16:
             return
+        self._audio_window.extend(pcm16)
+        if len(self._audio_window) > _MAX_STREAMING_AUDIO_WINDOW_BYTES:
+            del self._audio_window[: len(self._audio_window) - _MAX_STREAMING_AUDIO_WINDOW_BYTES]
         try:
             await self._session.send_frame(pcm16)
         except Exception:  # noqa: BLE001 — a session send error degrades, never drops the call
@@ -326,10 +360,15 @@ class StreamingTelephonyIngest:
             logger.warning("streaming_telephony_ingest_partial_failed", exc_info=True)
 
     async def _forward_final(self, result: TranscriptResult) -> None:
+        # Snapshot + clear the rolling window regardless of outcome below — a
+        # discarded (empty/partial) result must not leak its audio into the next
+        # utterance's window.
+        audio = bytes(self._audio_window)
+        self._audio_window.clear()
         if result is None or not result.is_final or not result.text.strip():
             # Empty/partial/None → nothing worth a turn (mirrors TelephonyAudioIngest).
             return
         try:
-            await self._on_utterance(result)
+            await self._on_utterance(result, audio)
         except Exception:  # noqa: BLE001 — a turn-handler failure is the route's to own
             logger.warning("streaming_telephony_ingest_on_utterance_failed", exc_info=True)

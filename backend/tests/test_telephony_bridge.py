@@ -8,6 +8,7 @@ are deterministic: ``iter_text`` yields the scripted frames then stops, so
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -373,3 +374,99 @@ async def test_send_audio_entry_point_also_marks_bot_speaking():
     await bridge._on_frame(_start("MZ13"))
     await bridge.send_audio(b"\x00\x01" * 800, 8000)
     assert bridge.is_bot_speaking is True
+
+
+# --- on_started hook (Redis persistence of twilio_call_sid) -----------------
+
+
+async def test_on_started_fires_once_call_sid_is_captured():
+    calls: list[str | None] = []
+
+    async def on_started() -> None:
+        calls.append(state.twilio_call_sid)
+
+    state = _state("tw_started")
+    ws = FakeTwilioWS([_start("MZ14")])
+    bridge = TwilioMediaBridge(
+        websocket=ws, orchestrator=RecordingOrchestrator(), state=state, on_started=on_started
+    )
+    await bridge.run()
+
+    assert calls == ["CA1"]  # callSid from the scripted _start() frame
+
+
+async def test_on_started_not_fired_on_duplicate_start():
+    calls = 0
+
+    async def on_started() -> None:
+        nonlocal calls
+        calls += 1
+
+    ws = FakeTwilioWS([_start("MZ15"), _start("MZ15")])
+    bridge = TwilioMediaBridge(
+        websocket=ws,
+        orchestrator=RecordingOrchestrator(),
+        state=_state("tw_dup"),
+        on_started=on_started,
+    )
+    await bridge.run()
+
+    assert calls == 1  # the duplicate-start guard skips the whole handler
+
+
+async def test_no_on_started_hook_is_fine():
+    ws = FakeTwilioWS([_start("MZ16")])
+    bridge = TwilioMediaBridge(websocket=ws, orchestrator=RecordingOrchestrator(), state=_state())
+    await bridge.run()  # must not raise with on_started left at its None default
+
+
+# --- idle-frame watchdog -----------------------------------------------------
+
+
+class _NeverEndingWS:
+    """A socket that never yields a frame and never raises — models a wedged
+    (not cleanly closed) Twilio Media Streams connection."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def iter_text(self) -> AsyncIterator[str]:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+        yield ""  # pragma: no cover — makes this an async generator
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(json.loads(data))
+
+
+async def test_idle_frame_timeout_ends_the_bridge_as_a_dropped_call():
+    from koel.voicebot.session.models import CallStatus
+
+    orch = RecordingOrchestrator()
+    state = _state("tw_wedged")
+    ws = _NeverEndingWS()
+    bridge = TwilioMediaBridge(
+        websocket=ws, orchestrator=orch, state=state, frame_idle_timeout_s=0.05
+    )
+
+    await bridge.run()
+
+    # Same outcome as an abnormal disconnect — a wedged socket must not leave
+    # the call stuck "in_progress" forever.
+    assert state.outcome == "call_dropped"
+    assert state.status == CallStatus.ended
+    assert orch.ended is None
+
+
+async def test_frames_within_the_idle_window_are_not_affected():
+    # A short (but non-zero) idle timeout must not disturb a normal, fast-flowing
+    # scripted call — regression guard against the watchdog firing too eagerly.
+    orch = RecordingOrchestrator()
+    ws = FakeTwilioWS([_start("MZ17"), _stop("MZ17")])
+    bridge = TwilioMediaBridge(
+        websocket=ws, orchestrator=orch, state=_state("tw_fast"), frame_idle_timeout_s=5.0
+    )
+
+    await bridge.run()
+
+    assert orch.ended == "completed"
