@@ -3,7 +3,7 @@
 // Mirrors koel.voicebot.ws.protocol on the backend. The dashboard authenticates
 // over REST (JWT), starts a session, then drives a live call over the socket.
 
-import type { ModelConnection, ModelConnectionKind } from '../types';
+import type { ModelConnection, ModelConnectionKind, Org, PlatformRole, PlatformUser } from '../types';
 
 export const KOEL_API: string =
   (import.meta as any).env?.VITE_KOEL_API || 'http://localhost:8100';
@@ -137,18 +137,46 @@ export function clearStoredToken(): void {
   }
 }
 
-// Milliseconds until the JWT's `exp`, or null if it can't be decoded. Only the
-// payload is base64-decoded (never signature-verified — that's the server's job);
-// used to schedule a proactive refresh at a fraction of the remaining lifetime.
-export function tokenExpiresInMs(token: string): number | null {
+// Decodes a JWT's payload segment client-side — NEVER signature-verified (that's
+// the server's job on every request); used only to drive UI decisions (nav
+// gating, refresh scheduling), never to authorize an action. Returns null on any
+// malformed/missing segment rather than throwing, so a bad token just degrades
+// the UI (e.g. hides the admin nav item) instead of crashing the app.
+interface TokenClaims {
+  sub?: string;
+  role?: string;
+  org_id?: string | null;
+  exp?: number;
+}
+
+function decodeTokenClaims(token: string): TokenClaims | null {
   try {
     const payload = token.split('.')[1];
     if (!payload) return null;
-    const claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-    return typeof claims.exp === 'number' ? claims.exp * 1000 - Date.now() : null;
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
   } catch {
     return null;
   }
+}
+
+// Milliseconds until the JWT's `exp`, or null if it can't be decoded. Used to
+// schedule a proactive refresh at a fraction of the remaining lifetime.
+export function tokenExpiresInMs(token: string): number | null {
+  const claims = decodeTokenClaims(token);
+  return typeof claims?.exp === 'number' ? claims.exp * 1000 - Date.now() : null;
+}
+
+// The token's role claim (UI gating ONLY — e.g. showing the Admin nav item; the
+// backend re-checks role on every request regardless of what the FE decodes).
+export function tokenRole(token: string): string | null {
+  return decodeTokenClaims(token)?.role ?? null;
+}
+
+// The token's org_id claim — null means platform admin ("sees all"). UI gating
+// only (e.g. hiding the org picker for a tenant-scoped admin); the backend is
+// the actual authority on what each request may reach.
+export function tokenOrgId(token: string): string | null {
+  return decodeTokenClaims(token)?.org_id ?? null;
 }
 
 function authHeaders(token: string): HeadersInit {
@@ -420,6 +448,166 @@ export async function testConnection(token: string, id: string): Promise<Connect
     detail: String(body.detail ?? ''),
     latencyMs: typeof body.latency_ms === 'number' ? body.latency_ms : undefined,
   };
+}
+
+// ---- Org registry (backend koel/voicebot/api/orgs.py) ----------------------
+// Platform-admin only (unscoped token, org_id=None); a tenant-scoped token 403s.
+
+interface BackendOrg {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  created_at: string | null;
+}
+
+function mapOrg(row: BackendOrg): Org {
+  return { id: row.id, name: row.name, slug: row.slug, active: row.active, createdAt: row.created_at };
+}
+
+export async function listOrgs(token: string): Promise<Org[]> {
+  const rows: BackendOrg[] = await jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/orgs`, { headers: authHeaders(token) }),
+  );
+  return rows.map(mapOrg);
+}
+
+export async function createOrg(token: string, name: string, slug: string): Promise<Org> {
+  const res = await fetch(`${KOEL_API}/v1/orgs`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ name, slug }),
+  });
+  return mapOrg(await jsonOrThrow(res));
+}
+
+export async function deactivateOrg(token: string, id: string): Promise<Org> {
+  const res = await fetch(`${KOEL_API}/v1/orgs/${encodeURIComponent(id)}/deactivate`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  return mapOrg(await jsonOrThrow(res));
+}
+
+// ---- User accounts (backend koel/voicebot/api/users.py) --------------------
+// Any role="admin" token: a platform admin (org_id=None) manages any org; a
+// tenant-scoped admin (org_id set) is confined server-side to their own org.
+
+interface BackendUser {
+  id: string;
+  username: string | null;
+  email: string | null;
+  org_id: string | null;
+  role: PlatformRole;
+  active: boolean;
+  invite_pending: boolean;
+  created_at: string | null;
+}
+
+function mapUser(row: BackendUser): PlatformUser {
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    orgId: row.org_id,
+    role: row.role,
+    active: row.active,
+    invitePending: row.invite_pending,
+    createdAt: row.created_at,
+  };
+}
+
+export interface InviteUserInput {
+  username: string;
+  email: string;
+  role?: PlatformRole;
+  orgId?: string | null; // ignored server-side for a tenant-scoped admin (forced to their own org)
+}
+
+export interface InviteResult {
+  user: PlatformUser;
+  inviteUrl: string; // always present — the copyable fallback when email is dormant
+  emailSent: boolean;
+}
+
+function mapInviteResult(body: { user: BackendUser; invite_url: string; email_sent: boolean }): InviteResult {
+  return { user: mapUser(body.user), inviteUrl: body.invite_url, emailSent: body.email_sent };
+}
+
+// orgId: platform-admin-only filter (a tenant-scoped admin always sees just
+// their own org server-side regardless of this param).
+export async function listUsers(token: string, orgId?: string): Promise<PlatformUser[]> {
+  const qs = orgId ? `?org_id=${encodeURIComponent(orgId)}` : '';
+  const rows: BackendUser[] = await jsonOrThrow(
+    await fetch(`${KOEL_API}/v1/users${qs}`, { headers: authHeaders(token) }),
+  );
+  return rows.map(mapUser);
+}
+
+export async function inviteUser(token: string, input: InviteUserInput): Promise<InviteResult> {
+  const res = await fetch(`${KOEL_API}/v1/users/invite`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({
+      username: input.username,
+      email: input.email,
+      role: input.role ?? 'operator',
+      org_id: input.orgId ?? null,
+    }),
+  });
+  return mapInviteResult(await jsonOrThrow(res));
+}
+
+export async function updateUser(
+  token: string,
+  id: string,
+  patch: { role?: PlatformRole; active?: boolean },
+): Promise<PlatformUser> {
+  const res = await fetch(`${KOEL_API}/v1/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: authHeaders(token),
+    body: JSON.stringify(patch),
+  });
+  return mapUser(await jsonOrThrow(res));
+}
+
+async function _userAction(token: string, id: string, action: string): Promise<PlatformUser> {
+  const res = await fetch(`${KOEL_API}/v1/users/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  return mapUser(await jsonOrThrow(res));
+}
+
+export const deactivateUser = (token: string, id: string) => _userAction(token, id, 'deactivate');
+export const reactivateUser = (token: string, id: string) => _userAction(token, id, 'reactivate');
+
+export async function resetUserPassword(token: string, id: string): Promise<InviteResult> {
+  const res = await fetch(`${KOEL_API}/v1/users/${encodeURIComponent(id)}/reset-password`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  return mapInviteResult(await jsonOrThrow(res));
+}
+
+export async function resendInvite(token: string, id: string): Promise<InviteResult> {
+  const res = await fetch(`${KOEL_API}/v1/users/${encodeURIComponent(id)}/resend-invite`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  return mapInviteResult(await jsonOrThrow(res));
+}
+
+// Public — no auth. Redeems an invite/reset token and sets a password; returns
+// an access token so the acceptor lands logged in without a second login step.
+export async function acceptInvite(token: string, password: string): Promise<string> {
+  const res = await fetch(`${KOEL_API}/v1/users/accept-invite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, password }),
+  });
+  const body = await jsonOrThrow(res);
+  return body.access_token as string;
 }
 
 export async function startSession(

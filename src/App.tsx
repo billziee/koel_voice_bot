@@ -9,6 +9,7 @@ import {
   loadStoredToken,
   clearStoredToken,
   tokenExpiresInMs,
+  tokenRole,
   USE_CASE_CUSTOMER,
   type BackendBot,
   type NewBotPayload,
@@ -17,7 +18,7 @@ import {
 import {
   Settings, Clock, PhoneCall,
   BarChart2, CheckCircle2, X,
-  LogOut, Sun, Moon, Menu, Edit3, BookOpen, Plug
+  LogOut, Sun, Moon, Menu, Edit3, BookOpen, Plug, ShieldCheck
 } from 'lucide-react';
 import type {
   ViewState, UseCase, Bot, BotConfig, CallHistory, ConnectionSelection,
@@ -28,6 +29,7 @@ import { formatRelativeTime } from './lib/format';
 // flow-editor canvas components into the initial bundle.
 import { coerceFlow } from './components/FlowEditor/flowModel';
 import { LoginView } from './views/LoginView';
+import { AcceptInviteView } from './views/AcceptInviteView';
 import { DashboardView } from './views/DashboardView';
 
 // Login + Dashboard are the entry/landing screens — kept eager so first paint
@@ -38,6 +40,7 @@ const ConfigView = lazy(() => import('./views/ConfigView').then(m => ({ default:
 const BotBuilderView = lazy(() => import('./views/BotBuilderView').then(m => ({ default: m.BotBuilderView })));
 const KnowledgeBaseView = lazy(() => import('./views/KnowledgeBaseView').then(m => ({ default: m.KnowledgeBaseView })));
 const ConnectionsView = lazy(() => import('./views/ConnectionsView').then(m => ({ default: m.ConnectionsView })));
+const AdminView = lazy(() => import('./views/AdminView').then(m => ({ default: m.AdminView })));
 const ActiveCallView = lazy(() => import('./views/ActiveCallView').then(m => ({ default: m.ActiveCallView })));
 
 // Shared domain types now live in ./types; getTheme in ./lib/theme (Q-1 decomposition).
@@ -249,6 +252,13 @@ export default function KoelApp() {
   // True while we attempt to restore a persisted session on load (Q-2) — avoids
   // flashing the login screen before the silent refresh resolves.
   const [restoring, setRestoring] = useState<boolean>(() => !!loadStoredToken());
+  // Account-invite/reset link (?invite=<token>): this SPA has no client-side
+  // router, so a shared invite link is detected once at mount and rendered
+  // standalone, ahead of the normal restoring/login/dashboard flow below.
+  // Cleared (and the query param stripped) once redeemed or cancelled.
+  const [inviteToken, setInviteToken] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get('invite'),
+  );
   const [currentView, setCurrentView] = useState<ViewState>('dashboard');
   const [activeBotId, setActiveBotId] = useState<string | null>(null);
   const [configBotId, setConfigBotId] = useState<string | null>(null); // Item 1/30
@@ -443,6 +453,29 @@ export default function KoelApp() {
     return () => window.clearTimeout(id);
   }, [live, token]);
 
+  // Strips `?invite=...` from the address bar (so a reload doesn't re-trigger
+  // this screen) and clears the local flag; used on both success and cancel.
+  const clearInviteFromUrl = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('invite');
+    window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+    setInviteToken(null);
+  };
+
+  if (inviteToken) {
+    return (
+      <AcceptInviteView
+        token={inviteToken}
+        theme={theme}
+        onAccepted={(accessToken) => {
+          clearInviteFromUrl();
+          void handleLogin({ live: true, token: accessToken });
+        }}
+        onCancel={clearInviteFromUrl}
+      />
+    );
+  }
+
   if (restoring) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: theme.primary, fontFamily: '"DM Sans", sans-serif' }}>
@@ -454,6 +487,10 @@ export default function KoelApp() {
     return <LoginView onLogin={handleLogin} theme={theme} />;
   }
 
+  // UI gating only (hides the nav item) — the backend re-checks role on every
+  // /v1/orgs and /v1/users request regardless of what the FE decodes here.
+  const isAdmin = token ? tokenRole(token) === 'admin' : false;
+
   const viewLabels: Record<ViewState, string> = {
     dashboard: 'Bot Dashboard',
     call: 'Active Call',
@@ -462,6 +499,7 @@ export default function KoelApp() {
     builder: 'Bot Builder',
     knowledge: 'Knowledge Base',
     connections: 'Model Connections',
+    admin: 'Admin',
   };
 
   const operateNav: { view: ViewState; icon: React.ReactNode; label: string }[] = [
@@ -475,6 +513,7 @@ export default function KoelApp() {
     { view: 'config', icon: <Settings size={16} />, label: 'Configuration' },
     { view: 'knowledge', icon: <BookOpen size={16} />, label: 'Knowledge Base' },
     { view: 'connections', icon: <Plug size={16} />, label: 'Model Connections' },
+    ...(isAdmin ? [{ view: 'admin' as ViewState, icon: <ShieldCheck size={16} />, label: 'Admin' }] : []),
   ];
 
   return (
@@ -609,6 +648,7 @@ export default function KoelApp() {
           {currentView === 'builder' && <BotBuilderView onDeploy={(config) => { handleConfigSave('new', config); showToast('Bot deployed — available on the dashboard.'); }} onCancel={() => setCurrentView('dashboard')} theme={theme} token={token} />}
           {currentView === 'knowledge' && <KnowledgeBaseView theme={theme} token={token} onToast={showToast} />}
           {currentView === 'connections' && <ConnectionsView theme={theme} token={token} onToast={showToast} />}
+          {currentView === 'admin' && isAdmin && <AdminView theme={theme} token={token} onToast={showToast} />}
           </Suspense>
         </main>
       </div>

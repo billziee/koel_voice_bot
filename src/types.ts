@@ -3,7 +3,7 @@
 // Extracted from App.tsx (roadmap Q-1 decomposition) so view modules and hooks
 // can share one canonical set of types instead of reaching into the monolith.
 
-export type ViewState = 'dashboard' | 'call' | 'config' | 'history' | 'builder' | 'knowledge' | 'connections';
+export type ViewState = 'dashboard' | 'call' | 'config' | 'history' | 'builder' | 'knowledge' | 'connections' | 'admin';
 export type CallState =
   | 'idle' | 'connecting' | 'bot_speaking' | 'listening' | 'user_speaking'
   | 'processing' | 'reconnecting' | 'escalating' | 'ended';
@@ -179,3 +179,27 @@ export interface Scenario {
 }
 
 export interface SessionEvent { id: number; t: string; label: string; level: 'info' | 'warn' | 'ok' }
+
+// ── Org + user admin ─────────────────────────────────────────────────────────
+// Backend: koel/voicebot/api/orgs.py + koel/voicebot/api/users.py.
+
+export interface Org {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  createdAt: string | null;
+}
+
+export type PlatformRole = 'operator' | 'admin';
+
+export interface PlatformUser {
+  id: string;
+  username: string | null;
+  email: string | null;
+  orgId: string | null; // null = platform admin ("sees all")
+  role: PlatformRole;
+  active: boolean;
+  invitePending: boolean; // provisioned but the invite link was never redeemed
+  createdAt: string | null;
+}
