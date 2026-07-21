@@ -191,6 +191,63 @@ async def test_start_failure_degrades_to_buffered_path(test_db):
     assert [t["speaker"] for t in transcripts].count("bot") >= 2
 
 
+async def test_streaming_final_that_ends_call_persists_and_finalizes(test_db):
+    # Regression: a streaming utterance final that ENDS the call runs from the
+    # Deepgram reader task, NOT the receive loop — so nothing downstream persists
+    # it. _on_final must persist + finalize itself; otherwise the receive loop
+    # unwinds on the no-input timer (early-returns on `ended`) and the call is
+    # never recorded — a lost CallLog + a Redis session leaked on TTL.
+    from sqlalchemy import select
+
+    from koel.db.models import CallLog, CallOutcome
+
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp())
+    session = FakeStreamingSession()
+    call = _session(ws, _state("ws_end"), clients, factory=_factory_for(session))
+
+    async def ending_turn(state, send, stt):  # noqa: ANN001 — hangs up mid-turn
+        state.status = CallStatus.ended
+        state.outcome = "converted"
+
+    call._orch.handle_final_transcript = ending_turn  # type: ignore[assignment] # noqa: SLF001
+
+    frame = ClientMessage(type=ClientMessageType.audio_chunk, pcm16_b64=_PCM, is_final=False)
+    assert await call._stt_stream.feed(frame) is True  # noqa: SLF001 — opens the session
+    await session.on_final(TranscriptResult(session_id="s", text="theek hai bye", is_final=True))
+
+    # The out-of-band final persisted + finalized the call itself.
+    assert call._closed is True  # noqa: SLF001
+    assert call._finalized is True  # noqa: SLF001
+    assert "ws_end" in call._store.deleted  # noqa: SLF001 — Redis flushed only post-persist
+    async with test_db() as db:
+        row = (await db.execute(select(CallLog).where(CallLog.session_id == "ws_end"))).scalar_one()
+    assert row.outcome == CallOutcome.converted
+
+
+async def test_streaming_final_dropped_during_agent_hold(test_db):
+    # Regression: on an agent hold (waiting_agent) the human operator owns the
+    # call, so a streaming utterance final must be DROPPED — running it through the
+    # bot turn loop would speak over the live handoff. Mirrors _handle_audio's guard.
+    ws = FakeWebSocket([])
+    clients = ScriptedClients(nlp=_nlp())
+    session = FakeStreamingSession()
+    call = _session(ws, _state("ws_hold"), clients, factory=_factory_for(session))
+    call._state.status = CallStatus.waiting_agent  # noqa: SLF001
+
+    ran = False
+
+    async def _turn(state, send, stt):  # noqa: ANN001
+        nonlocal ran
+        ran = True
+
+    call._orch.handle_final_transcript = _turn  # type: ignore[assignment] # noqa: SLF001
+    await call._stt_stream._on_final(  # noqa: SLF001
+        TranscriptResult(session_id="s", text="haan operator se baat karni hai", is_final=True)
+    )
+    assert ran is False  # bot turn suppressed during the operator handoff
+
+
 async def test_teardown_closes_session(test_db):
     # A frame opens the session; end_call finalizes the CallSession, which must close
     # the streaming session so the Deepgram socket isn't leaked.

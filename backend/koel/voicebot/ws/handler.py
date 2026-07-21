@@ -100,7 +100,8 @@ class CallSession:
         self._background_tasks = background_tasks if background_tasks is not None else set()
         self._bot_speaking = False
         self._closed = False
-        self._finalized = False  # ensures the call is persisted exactly once
+        self._finalized = False  # set only once the call is safely in Postgres
+        self._teardown_done = False  # one-time live-resource teardown (survives persist retries)
         self._disconnect_started = False  # idempotent grace handling
         self._last_pong = time.monotonic()  # heartbeat liveness clock
         self._last_input_at = time.monotonic()  # last *real* client input (no-input timer)
@@ -436,6 +437,13 @@ class CallSession:
         )
         if self._state.status == CallStatus.ended:
             self._closed = True
+        # This runs in a detached background task (the smart-turn flush timer), NOT
+        # the receive loop — so unlike the inline turn in _handle_audio, nothing
+        # persists the resulting state afterwards. Persist here (and finalize when
+        # the held turn ended the call), else the flushed turn's transcript is lost
+        # until the next frame and, if it ENDED the call, the receive loop unwinds
+        # via the no-input timeout with the call never recorded (lost CallLog).
+        await self._persist_state()
 
     def _start_speculative_retrieval(self, held_text: str) -> None:
         """O-5: fire RAG retrieval for the held mid-thought text in the background
@@ -661,27 +669,34 @@ class CallSession:
         await self._finalize()
 
     async def _finalize(self) -> None:
-        # Exactly-once: reachable from _persist_state, _on_disconnect, and _fail_call.
+        # Reachable from _persist_state, _on_disconnect, _fail_call and the grace
+        # finalizer. `_finalized` (set only on persist success) is the exactly-once
+        # gate + re-entrancy guard; the live-resource teardown below is instead
+        # guarded by `_teardown_done` so a persist retry after a transient DB
+        # failure never re-runs its non-idempotent side effects (re-muxing +
+        # re-uploading the recording, re-abandoning the escalation).
         if self._finalized:
             return
         self._finalized = True
-        if self._pending_turn is not None:
-            # A held mid-thought turn can't be answered on a dead socket; cancel
-            # its flush timer so it doesn't fire into the torn-down session.
-            _, timer = self._pending_turn
-            self._pending_turn = None
-            timer.cancel()
-        # O-5: drop any in-flight speculative RAG pre-fetch on teardown.
-        self._cancel_speculative_retrieval()
-        await self._stt_stream.aclose()  # O-6 Wave 2: close the streaming STT session
-        # Drop the call from the live supervisor view (3.3).
-        self._monitor.close(self._state.session_id)
-        # Tear down any live human-handoff (3.1): drop the operator bridge and, if
-        # the handoff was never resolved (caller hung up mid-hold), mark it abandoned.
-        if self._escalation_id is not None:
-            self._escalations.unregister(self._state.session_id)
-            await abandon_escalation_by_session(self._state.session_id)
-        await self._upload_recording()
+        if not self._teardown_done:
+            self._teardown_done = True
+            if self._pending_turn is not None:
+                # A held mid-thought turn can't be answered on a dead socket; cancel
+                # its flush timer so it doesn't fire into the torn-down session.
+                _, timer = self._pending_turn
+                self._pending_turn = None
+                timer.cancel()
+            # O-5: drop any in-flight speculative RAG pre-fetch on teardown.
+            self._cancel_speculative_retrieval()
+            await self._stt_stream.aclose()  # O-6 Wave 2: close the streaming STT session
+            # Drop the call from the live supervisor view (3.3).
+            self._monitor.close(self._state.session_id)
+            # Tear down any live human-handoff (3.1): drop the operator bridge and, if
+            # the handoff was never resolved (caller hung up mid-hold), mark it abandoned.
+            if self._escalation_id is not None:
+                self._escalations.unregister(self._state.session_id)
+                await abandon_escalation_by_session(self._state.session_id)
+            await self._upload_recording()
         call_id = await persist_call(self._state)
         if call_id is not None:
             # Only flush Redis once the call is safely in PostgreSQL; otherwise
@@ -690,7 +705,7 @@ class CallSession:
             self._summarize_and_annotate_crm()  # fire-and-forget, never blocks teardown
             self._dispatch_followup()  # 2.4: outcome-based WhatsApp follow-up (dormant w/o gateway)
         else:
-            self._finalized = False  # allow a later attempt to persist
+            self._finalized = False  # allow a later attempt to persist (teardown won't re-run)
 
     def _dispatch_followup(self) -> None:
         """Fire the post-call follow-up (2.4) off the critical path. No-op unless a

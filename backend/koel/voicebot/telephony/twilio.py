@@ -31,7 +31,12 @@ def parse_twilio_message(raw: str) -> TwilioEvent:
     stream_sid = msg.get("streamSid") or msg.get("start", {}).get("streamSid")
     if event == "media":
         payload = msg.get("media", {}).get("payload", "")
-        return TwilioEvent("media", stream_sid, payload_ulaw=base64.b64decode(payload) if payload else b"")
+        # validate=True: a corrupt payload RAISES (→ the bridge's _on_frame skips the
+        # frame) instead of silently dropping non-alphabet bytes and feeding mangled
+        # audio into the decoder.
+        return TwilioEvent(
+            "media", stream_sid, payload_ulaw=base64.b64decode(payload, validate=True) if payload else b""
+        )
     if event == "dtmf":
         return TwilioEvent("dtmf", stream_sid, digit=msg.get("dtmf", {}).get("digit"))
     return TwilioEvent(event, stream_sid)

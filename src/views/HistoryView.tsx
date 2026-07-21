@@ -36,13 +36,19 @@ export function HistoryView({ calls, onExported, theme }: { calls: CallHistory[]
     return true;
   });
 
-  // Item 44: clear selection when filtered set excludes it; reset page
+  // Item 44: clear a selection the current filter no longer includes.
   useEffect(() => {
     if (selectedCallId && !filtered.find(c => c.id === selectedCallId)) {
       setSelectedCallId(null);
     }
-    setCurrentPage(1);
   }, [filtered.length, selectedCallId]);
+
+  // Reset to the first page when the FILTERED SET changes (filter/search/sort) —
+  // NOT when a row is merely selected, which must preserve the current page (else
+  // selecting a row on page 3 snaps the list back to page 1 and hides that row).
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filtered.length]);
 
   const sortedCalls = [...filtered].sort((a, b) => {
     if (sortBy === 'date_desc') return b.timestamp - a.timestamp;

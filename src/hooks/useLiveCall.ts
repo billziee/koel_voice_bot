@@ -49,6 +49,10 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   const outcomeRef = useRef<{ label: string; status: CallHistory['status'] }>({ label: 'Completed', status: 'green' });
   const transcriptRef = useRef<TranscriptMessageData[]>([]);
   const durationRef = useRef(0);
+  // Mirror of `events` — endCall runs from stale closures (scheduled timers,
+  // onEnded/onTtsKill captured at startLiveCall), so it must read the ref, not
+  // the closed-over `events` state, or the persisted CallHistory.events is empty.
+  const eventsRef = useRef<SessionEvent[]>([]);
   const endedRef = useRef(false);
   const lastFillerRef = useRef<number>(-1);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -73,6 +77,14 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   const audioQueueRef = useRef<AudioBuffer[]>([]);
   const audioPlayingRef = useRef(false);
   const audioSrcRef = useRef<AudioBufferSourceNode | null>(null);
+  // Live mirror of soundEnabled: ensureAudioGraph is invoked from a stale closure
+  // (the onAudio handler captured at call start), so reading the state directly
+  // could build the graph muted even after the user enabled sound. Read the ref.
+  const soundEnabledRef = useRef(soundEnabled);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  // Serializes decode+enqueue so streamed TTS chunks queue in ARRIVAL order —
+  // decodeAudioData is async and can resolve out of order for back-to-back chunks.
+  const enqueueChainRef = useRef<Promise<void>>(Promise.resolve());
 
   // Lazily build the playback graph: source -> analyser -> masterGain -> output.
   // masterGain is the mute switch; the analyser always sees audio so the
@@ -85,7 +97,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 64;
     const gain = ctx.createGain();
-    gain.gain.value = soundEnabled ? 1 : 0;
+    gain.gain.value = soundEnabledRef.current ? 1 : 0;
     analyser.connect(gain);
     gain.connect(ctx.destination);
     audioCtxRef.current = ctx;
@@ -115,17 +127,22 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
   };
 
   // Decode a base64 WAV chunk from the backend and enqueue it for gapless playback.
-  const enqueueAudio = async (audio_b64?: string) => {
+  // Decode+enqueue is chained through enqueueChainRef so back-to-back chunks preserve
+  // ARRIVAL order — decodeAudioData resolves at different speeds per chunk, so a bare
+  // async push could queue streamed TTS sentences out of order.
+  const enqueueAudio = (audio_b64?: string) => {
     if (!audio_b64) return;
-    const ctx = ensureAudioGraph();
-    if (!ctx) return;
-    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
-    try {
-      const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
-      const buffer = await ctx.decodeAudioData(bytes.buffer);
-      audioQueueRef.current.push(buffer);
-      if (!audioPlayingRef.current) playNextAudio();
-    } catch { /* undecodable chunk — skip rather than break the call */ }
+    enqueueChainRef.current = enqueueChainRef.current.then(async () => {
+      const ctx = ensureAudioGraph();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* user-gesture gated */ } }
+      try {
+        const bytes = Uint8Array.from(atob(audio_b64), (c) => c.charCodeAt(0));
+        const buffer = await ctx.decodeAudioData(bytes.buffer);
+        audioQueueRef.current.push(buffer);
+        if (!audioPlayingRef.current) playNextAudio();
+      } catch { /* undecodable chunk — skip rather than break the call */ }
+    });
   };
 
   // Stop playback immediately (barge-in TTS_KILL, or call end) and drop the queue.
@@ -319,7 +336,11 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
 
   const logEvent = (label: string, level: SessionEvent['level'] = 'info') => {
     const id = nextId();
-    setEvents(prev => [...prev, { id, t: formatTime(durationRef.current), label, level }]);
+    setEvents(prev => {
+      const next = [...prev, { id, t: formatTime(durationRef.current), label, level }];
+      eventsRef.current = next;  // keep the ref in sync so endCall (stale closure) persists them
+      return next;
+    });
   };
 
   // --- transcript autoscroll / call timer ---
@@ -424,7 +445,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     callStartTimeRef.current = Date.now();
     setTranscript([]);
     setPartialTranscript('');
-    setEvents([]);
+    setEvents([]); eventsRef.current = [];
     setDuration(0);
     setCallState('connecting');
     logEvent('WebSocket handshake — short-lived JWT presented, upgrading…');
@@ -508,7 +529,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
     const sid = `SES-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     setSessionId(sid);
     setTranscript([]);
-    setEvents([]);
+    setEvents([]); eventsRef.current = [];
     setDuration(0);
     setCallState('connecting');
     logEvent('WebSocket handshake — JWT presented, upgrading…');
@@ -571,7 +592,7 @@ export function useLiveCall({ bot, onCallCompleted, live, token }: UseLiveCallPa
       phone: customer.phone,
       avgLatencyMs: avgLat,
       transcript: finalTranscript,
-      events: [...events], // Item 35
+      events: [...eventsRef.current], // Item 35 — ref, not stale closure `events`
     });
   };
 

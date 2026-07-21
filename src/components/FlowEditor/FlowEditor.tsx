@@ -1,26 +1,51 @@
 import { useState } from 'react';
-import { AlertTriangle, CheckCircle2, Info } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Info, Sparkles } from 'lucide-react';
 
 import type { Flow, FlowNodeUi } from '../../types';
 import type { Theme } from '../../lib/theme';
 import { FlowCanvas } from './FlowCanvas';
 import { NodeInspector } from './NodeInspector';
 import {
-  addNode, deleteNode, renameNode, setBranches, setNodePosition, setNodePrompt, setStart, validateFlow,
+  addNode, coerceFlow, deleteNode, renameNode, setBranches, setNodePosition, setNodePrompt, setStart, validateFlow,
 } from './flowModel';
 
 interface FlowEditorProps {
   value: Flow;
   onChange: (flow: Flow) => void;
   theme: Theme;
+  // Auto node-builder (6.6): when provided, an "Auto-build from knowledge base"
+  // button appears. It should return the raw generated flow (or null); the editor
+  // coerces + loads it. Omit to hide the button (e.g. no RAG index configured).
+  onAutoBuild?: () => Promise<unknown>;
 }
 
 // Controlled editor: the parent owns the Flow, this component owns only the
 // canvas selection. The canvas and form stay in sync because both read `value`
 // and both write through `onChange` — a form edit redraws the canvas, a canvas
 // click drives the form.
-export function FlowEditor({ value, onChange, theme }: FlowEditorProps) {
+export function FlowEditor({ value, onChange, theme, onAutoBuild }: FlowEditorProps) {
   const [rawSelected, setRawSelected] = useState<string | null>(() => value.start || Object.keys(value.nodes)[0] || null);
+  const [building, setBuilding] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
+
+  const handleAutoBuild = async () => {
+    if (!onAutoBuild || building) return;
+    setBuilding(true);
+    setBuildError(null);
+    try {
+      const coerced = coerceFlow(await onAutoBuild());
+      if (coerced) {
+        onChange(coerced);
+        setRawSelected(coerced.start);
+      } else {
+        setBuildError('The generated flow could not be parsed — try again or build manually.');
+      }
+    } catch (err) {
+      setBuildError(err instanceof Error ? err.message : 'Flow generation failed.');
+    } finally {
+      setBuilding(false);
+    }
+  };
 
   // Effective selection: fall back if the raw selection was renamed/deleted.
   const selectedId =
@@ -51,6 +76,28 @@ export function FlowEditor({ value, onChange, theme }: FlowEditorProps) {
 
   return (
     <div>
+      {onAutoBuild && (
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <p className="text-[12px]" style={{ color: theme.faint }}>
+            Draft a flow automatically from this bot's knowledge base, then refine it below.
+          </p>
+          <button
+            type="button"
+            onClick={handleAutoBuild}
+            disabled={building}
+            className="flex items-center gap-1.5 text-[12.5px] font-medium px-3 py-1.5 rounded-md shrink-0"
+            style={{ backgroundColor: theme.primaryLight, color: theme.primary, opacity: building ? 0.6 : 1 }}
+          >
+            <Sparkles size={14} /> {building ? 'Building…' : 'Auto-build from knowledge base'}
+          </button>
+        </div>
+      )}
+      {buildError && (
+        <div className="flex items-start gap-2 text-[12px] mb-3 rounded-md p-2"
+             style={{ color: theme.destructive, backgroundColor: theme.inset }}>
+          <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} /> <span>{buildError}</span>
+        </div>
+      )}
       <div className="flex flex-col lg:flex-row gap-4">
         <div className="flex-1 min-w-0">
           <FlowCanvas

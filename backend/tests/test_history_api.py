@@ -45,6 +45,29 @@ async def test_list_calls_filters_by_outcome(app_client, access_headers, test_db
     assert [row["id"] for row in r.json()] == ["c_decl"]
 
 
+async def test_outcome_filter_finds_matches_beyond_the_limit_window(app_client, access_headers, test_db):
+    # Regression: the outcome filter must run in SQL BEFORE the limit. Seed the
+    # newest rows as 'escalated' and an older one as 'converted', then ask for
+    # converted with a small limit. Filtering-after-limit (the old bug) would
+    # fetch only the escalated rows and return [] despite a converted row existing.
+    client, _ = app_client
+    await seed_bot(test_db)
+    for i in range(5):
+        await _seed_call(test_db, call_id=f"esc_{i}", outcome=CallOutcome.escalated)
+    await _seed_call(test_db, call_id="old_conv", outcome=CallOutcome.converted)
+    r = await client.get("/v1/calls?outcome=converted&limit=3", headers=access_headers)
+    assert r.status_code == 200
+    assert [row["id"] for row in r.json()] == ["old_conv"]
+
+
+async def test_unknown_outcome_filter_returns_empty_not_500(app_client, access_headers, test_db):
+    client, _ = app_client
+    await seed_bot(test_db)
+    await _seed_call(test_db)
+    r = await client.get("/v1/calls?outcome=not_a_real_outcome", headers=access_headers)
+    assert r.status_code == 200 and r.json() == []
+
+
 async def test_get_call_returns_transcript(app_client, access_headers, test_db):
     client, _ = app_client
     await seed_bot(test_db)

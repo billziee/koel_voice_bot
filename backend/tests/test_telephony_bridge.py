@@ -255,6 +255,37 @@ async def test_stop_event_ends_the_call():
     assert orch.ended == "completed"
 
 
+async def test_abnormal_disconnect_marks_call_dropped():
+    # Regression: the carrier socket drops WITHOUT a Twilio `stop` (iter_text ends
+    # on its own). The bridge must mark the call `call_dropped` / ended so the
+    # owning route persists the true outcome instead of a stuck `in_progress` — and
+    # must NOT call end_call (its goodbye audio would only reach a dead socket).
+    from koel.voicebot.session.models import CallStatus
+
+    orch = RecordingOrchestrator()
+    state = _state("tw_drop")
+    ws = FakeTwilioWS([_start("MZ7")])  # no stop frame → abnormal disconnect
+
+    await run_twilio_bridge(ws, orchestrator=orch, state=state)
+
+    assert state.outcome == "call_dropped"
+    assert state.status == CallStatus.ended
+    assert orch.ended is None  # end_call not invoked on a dead socket
+
+
+async def test_clean_stop_is_not_overwritten_as_dropped():
+    # A clean `stop` ran end_call(outcome="completed"); the abnormal-disconnect
+    # guard must not then clobber it — _stopped is True so the finally is a no-op.
+    orch = RecordingOrchestrator()
+    state = _state("tw_clean")
+    ws = FakeTwilioWS([_start("MZ6"), _stop("MZ6")])
+
+    await run_twilio_bridge(ws, orchestrator=orch, state=state)
+
+    assert orch.ended == "completed"
+    assert state.outcome == "in_progress"  # end_call is orch-side; bridge left it alone
+
+
 async def test_duplicate_start_does_not_re_greet():
     calls: list[str] = []
     orch = RecordingOrchestrator()

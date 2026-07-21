@@ -202,6 +202,26 @@ export async function patchBot(token: string, botId: string, patch: BotConfigPat
   return jsonOrThrow(res);
 }
 
+// Auto node-builder (6.6): draft a conversation flow from a bot's RAG knowledge
+// base via the LLM. Returns the raw {start, nodes} flow (the caller coerces it
+// into a positioned Flow). Throws KoelApiError on 404 (no KB) / 503 (LLM off).
+export async function generateFlow(
+  token: string,
+  opts: { ragIndex: string; useCase?: string; language?: string },
+): Promise<unknown> {
+  const res = await fetch(`${KOEL_API}/v1/knowledge/generate-flow`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({
+      rag_index: opts.ragIndex,
+      use_case: opts.useCase,
+      language: opts.language ?? 'en',
+    }),
+  });
+  const body = await jsonOrThrow(res);
+  return body.flow;
+}
+
 // ---- Analytics (AE) --------------------------------------------------------
 
 export interface BotStats {

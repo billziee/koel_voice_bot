@@ -131,7 +131,9 @@ class FakeClients:
         self.flags: list[tuple[str, str, str | None]] = []
         self.call_summaries: list[tuple[str, dict]] = []
 
-    async def get_customer(self, customer_id: str) -> CustomerRecord:
+    async def get_customer(
+        self, customer_id: str, *, org_id: str | None = None
+    ) -> CustomerRecord | None:
         if self.customer is None:
             raise AssertionError("no customer configured on FakeClients")
         return self.customer

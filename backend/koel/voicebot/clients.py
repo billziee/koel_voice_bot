@@ -251,11 +251,19 @@ class ServiceClients:
         TTS_CLIP_CACHE.put(key, collected)
 
     # --- CRM ---
-    async def get_customer(self, customer_id: str) -> CustomerRecord:
+    async def get_customer(
+        self, customer_id: str, *, org_id: str | None = None
+    ) -> CustomerRecord | None:
+        """Fetch a customer, org-scoped (AF): pass the caller's org so CRM 404s a
+        cross-tenant id instead of leaking its PII. Returns None on 404 (unknown
+        or cross-tenant) so the caller maps it to a clean error, not a 500."""
         resp = await self._client.get(
             f"{self._settings.crm_svc_url}/v1/customers/{quote(customer_id, safe='')}",
             headers=self._headers(),
+            params={"org_id": org_id} if org_id is not None else None,
         )
+        if resp.status_code == 404:
+            return None
         resp.raise_for_status()
         return CustomerRecord.model_validate(resp.json())
 

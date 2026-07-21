@@ -69,6 +69,7 @@ Dev runs plaintext on localhost. Production **must** use:
 - [ ] `KOEL_JWT_SECRET` set to a strong secret (prod boot fails on the dev default).
 - [ ] `KOEL_CORS_ALLOW_ORIGINS` set to an explicit allowlist (no `*` in prod).
 - [ ] Postgres `?ssl=require`, Redis `rediss://` + AUTH.
-- [ ] Rotate the Groq + NVIDIA API keys that were shared in plaintext during dev.
+- [ ] Rotate every key shared in plaintext during dev: Groq, NVIDIA, Sarvam, Deepgram — plus the Render API token used to configure the deployment. (Groq/NVIDIA were flagged first; this is the complete list of what was actually pasted in-session — rotate all of it, not just those two.)
+- [ ] `KOEL_SECRET_KEY` (Fernet key for BYOK model-connection encryption) set in the `koel-secrets` env group — it's absent from `render.yaml`'s group comment today, so a deploy from a fresh group would silently leave BYOK disabled (`resolve_connection` fails closed with no key configured).
 - [ ] Rate-limit store moved to Redis for multi-worker deployments.
 - [ ] Secrets sourced from a secret manager, not `.env`.

@@ -54,6 +54,7 @@ To configure the web service by hand instead, use:
 - `KOEL_ENVIRONMENT=production`
 - `KOEL_GROQ_API_KEY`, `KOEL_NVIDIA_API_KEY`, `KOEL_SARVAM_API_KEY` — **rotate any keys ever shared outside a secret manager**
 - `KOEL_JWT_SECRET` — a strong secret (prod boot fails on the dev default)
+- `KOEL_SECRET_KEY` — Fernet key for BYOK model-connection encryption (see [`SECURITY.md`](./SECURITY.md)). Unlike `KOEL_JWT_SECRET`, a missing value does NOT fail boot — BYOK connections just silently never resolve. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
 - `KOEL_CORS_ALLOW_ORIGINS=https://koel-voice-bot.onrender.com` (the FE origin; no `*` in prod)
 - `KOEL_DATABASE_URL` (from the managed Postgres), `KOEL_REDIS_URL` (from Redis — use `rediss://`)
 - `KOEL_NLP_PROVIDER=groq`, `KOEL_STT_PROVIDER=groq`, `KOEL_TTS_PROVIDER=groq`, `KOEL_NLP_EMBEDDER=nvidia`

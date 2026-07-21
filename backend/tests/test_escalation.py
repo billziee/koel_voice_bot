@@ -250,6 +250,30 @@ async def test_operator_queue_claim_reply_resolve(app_client, test_db):
     assert resolved == [True]
 
 
+async def test_reply_and_resolve_reject_a_non_claiming_operator(app_client, test_db):
+    # Regression: org + claimed status is not enough — only the operator who
+    # CLAIMED the handoff may reply/resolve. A second operator in the SAME org must
+    # get 403, otherwise they could talk over (or end) another operator's live call.
+    client, _ = app_client
+    eid = await create_escalation(_state(session_id="live2", org_id=None), reason="request_human")
+
+    op2 = {"Authorization": f"Bearer {issue_token('op_2', kind='access', role='operator')}"}
+
+    # op_1 claims it.
+    r = await client.post(f"/v1/operator/escalations/{eid}/claim", headers=_op_headers())
+    assert r.status_code == 200
+
+    # op_2 (same org) may not reply — the ownership check short-circuits before the
+    # message is ever delivered to the caller.
+    r = await client.post(
+        f"/v1/operator/escalations/{eid}/reply", headers=op2, json={"text": "butting in"}
+    )
+    assert r.status_code == 403 and r.json()["code"] == "not_claim_owner"
+    # ...nor resolve.
+    r = await client.post(f"/v1/operator/escalations/{eid}/resolve", headers=op2)
+    assert r.status_code == 403 and r.json()["code"] == "not_claim_owner"
+
+
 async def test_operator_endpoints_require_auth(app_client, test_db):
     client, _ = app_client
     assert (await client.get("/v1/operator/queue")).status_code == 401

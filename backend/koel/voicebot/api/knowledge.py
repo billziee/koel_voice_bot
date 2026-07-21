@@ -20,6 +20,7 @@ from koel.db.models import KnowledgeChunk, UseCase
 from koel.db.session import session_scope
 from koel.nlp.chunking import chunk_text
 from koel.nlp.config import get_nlp_settings
+from koel.nlp.flow_gen import generate_flow
 from koel.nlp.rag import Embedder, build_embedder
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
@@ -41,7 +42,10 @@ class ChunkIn(BaseModel):
     use_case: UseCase
     language: str = Field(default="hinglish", max_length=16)
     title: str = Field(max_length=200)
-    content: str = Field(min_length=1)
+    # Bounded so a single chunk can't trigger an unbounded embedding call (cost /
+    # memory / provider-limit DoS). Long docs should be chunked (auto_chunk) rather
+    # than posted as one huge blob; 100k chars is a generous ceiling for one doc.
+    content: str = Field(min_length=1, max_length=100_000)
     # If true, split long content into multiple ~512-token passages before embedding.
     chunk: bool = False
 
@@ -216,6 +220,54 @@ async def delete_chunk(chunk_id: str, user: CurrentUser) -> None:
                 message=f"No knowledge chunk with id {chunk_id}.",
             )
         await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.id == chunk_id))
+
+
+class GenerateFlowIn(BaseModel):
+    rag_index: str = Field(max_length=64)
+    use_case: str | None = Field(default=None, max_length=64)
+    language: str = Field(default="en", max_length=16)
+
+
+class GenerateFlowOut(BaseModel):
+    flow: dict  # {start, nodes} — the FlowEditor's Flow shape (auto-layout added FE-side)
+    node_count: int
+    source_chunks: int
+
+
+@router.post("/knowledge/generate-flow", response_model=GenerateFlowOut)
+async def generate_flow_route(payload: GenerateFlowIn, user: CurrentUser) -> GenerateFlowOut:
+    """Auto node-builder (6.6): draft a conversation flow from this index's RAG
+    content via the LLM. Org-scoped; the operator refines the result in the editor.
+    404 when the index has no content; 503 when the LLM isn't configured."""
+    stmt = (
+        select(KnowledgeChunk)
+        .where(KnowledgeChunk.rag_index == payload.rag_index)
+        .order_by(KnowledgeChunk.created_at.desc())
+        .limit(20)
+    )
+    if user.org_id is not None:
+        stmt = stmt.where(KnowledgeChunk.org_id == user.org_id)
+    async with session_scope() as db:
+        rows = (await db.execute(stmt)).scalars().all()
+    if not rows:
+        raise ApiError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="no_kb_content",
+            message=f"No knowledge base content for index '{payload.rag_index}'.",
+        )
+    chunks = [{"title": r.title, "content": r.content} for r in rows]
+    use_case = payload.use_case or rows[0].use_case.value
+    flow = await generate_flow(
+        chunks=chunks, use_case=use_case, language=payload.language, settings=get_nlp_settings()
+    )
+    if flow is None:
+        raise ApiError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="generation_unavailable",
+            message="Flow generation is unavailable (LLM not configured or the draft "
+            "failed to parse). Build nodes manually in the editor.",
+        )
+    return GenerateFlowOut(flow=flow, node_count=len(flow["nodes"]), source_chunks=len(chunks))
 
 
 async def aclose_embedder() -> None:

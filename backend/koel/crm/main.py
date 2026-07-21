@@ -31,6 +31,19 @@ app = create_app(
 router = APIRouter(prefix="/v1/customers", tags=["crm"])
 
 
+def _normalize_phone(phone: str) -> str:
+    """Canonicalise a phone number to bare E.164-ish digits for exact-match ANI
+    lookup: strip spaces/dashes/parens/dots and map a leading '00' to '+'. A real
+    dialer ANI arrives as '+919000000001'; a hand-entered '+91-90000-00001' or
+    '+91 90000 00001' normalises to the same string so the lookup resolves."""
+    if not phone:
+        return ""
+    cleaned = "".join(c for c in phone if c.isdigit() or c == "+")
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    return cleaned
+
+
 def _to_record(row: CrmCustomer) -> CustomerRecord:
     return CustomerRecord(
         id=row.id,
@@ -45,9 +58,15 @@ def _to_record(row: CrmCustomer) -> CustomerRecord:
 
 
 @router.get("", response_model=list[CustomerRecord])
-async def list_customers(_: ServicePrincipal) -> list[CustomerRecord]:
+async def list_customers(_: ServicePrincipal, org_id: str | None = None) -> list[CustomerRecord]:
+    """List customers. Org-scoped like the other customer routes (AF): with
+    ``org_id`` set, only that tenant's records are returned so the list can't leak
+    another org's customer PII."""
+    stmt = select(CrmCustomer).order_by(CrmCustomer.id.asc())
+    if org_id is not None:
+        stmt = stmt.where(CrmCustomer.org_id == org_id)
     async with session_scope() as db:
-        rows = (await db.execute(select(CrmCustomer))).scalars().all()
+        rows = (await db.execute(stmt)).scalars().all()
     return [_to_record(r) for r in rows]
 
 
@@ -60,11 +79,24 @@ async def get_customer_by_phone(
     dynamic one. Org-scoped like the other customer routes — when ``org_id`` is
     given, only that tenant's records match (multi-tenant isolation, AF)."""
     with span("crm.get_customer_by_phone"):
-        stmt = select(CrmCustomer).where(CrmCustomer.phone == phone)
+        # Deterministic resolution: phone has no unique constraint (a real CRM
+        # enforces it; the seed may not), so order by id and take the lowest so the
+        # SAME caller always resolves to the SAME record — never an arbitrary row.
+        stmt = (
+            select(CrmCustomer)
+            .where(CrmCustomer.phone == _normalize_phone(phone))
+            .order_by(CrmCustomer.id.asc())
+        )
         if org_id is not None:
             stmt = stmt.where(CrmCustomer.org_id == org_id)
         async with session_scope() as db:
-            row = (await db.execute(stmt)).scalars().first()
+            rows = (await db.execute(stmt)).scalars().all()
+        if len(rows) > 1:
+            logger.warning(
+                "crm_ambiguous_phone_lookup",
+                extra={"extra_fields": {"phone": mask_account(phone), "matches": len(rows)}},
+            )
+        row = rows[0] if rows else None
         if row is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -75,11 +107,17 @@ async def get_customer_by_phone(
 
 
 @router.get("/{customer_id}", response_model=CustomerRecord)
-async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
+async def get_customer(
+    customer_id: str, _: ServicePrincipal, org_id: str | None = None
+) -> CustomerRecord:
+    """Fetch one customer. Org-scoped like the other customer routes (AF): when
+    ``org_id`` is given, a record from a different tenant 404s exactly like a
+    missing one — so the caller cannot read another org's customer PII, and the
+    record's existence isn't leaked cross-tenant."""
     with span("crm.get_customer", customer_id=customer_id):
         async with session_scope() as db:
             row = await db.get(CrmCustomer, customer_id)
-        if row is None:
+        if row is None or (org_id is not None and row.org_id != org_id):
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="customer_not_found",
@@ -91,13 +129,22 @@ async def get_customer(customer_id: str, _: ServicePrincipal) -> CustomerRecord:
 @router.post("/{customer_id}/interactions", status_code=status.HTTP_201_CREATED)
 async def log_interaction(customer_id: str, payload: InteractionLog, _: ServicePrincipal) -> dict:
     """Persist a CRM interaction (AD). Idempotent: a retry with the same key writes once."""
+    if payload.customer_id and payload.customer_id != customer_id:
+        raise ApiError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="customer_id_mismatch",
+            message="Body customer_id does not match the path.",
+        )
     async with session_scope() as db:
-        # Fast path: if this key was already recorded, return it unchanged.
+        # Fast path: if this key was already recorded FOR THIS CUSTOMER, return it
+        # unchanged. Scoped by customer_id so a reused key never returns (or leaks
+        # the id/event of) a DIFFERENT customer's interaction row.
         if payload.idempotency_key:
             existing = (
                 await db.execute(
                     select(InteractionLogRow).where(
-                        InteractionLogRow.idempotency_key == payload.idempotency_key
+                        InteractionLogRow.idempotency_key == payload.idempotency_key,
+                        InteractionLogRow.customer_id == customer_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -130,7 +177,15 @@ async def log_interaction(customer_id: str, payload: InteractionLog, _: ServiceP
 async def flag_customer(customer_id: str, payload: FlagRequest, _: ServicePrincipal) -> dict:
     """Set a compliance/retry flag (TRAI opt-out, retry, unsupported language)."""
     async with session_scope() as db:
-        row = await db.get(CrmCustomer, customer_id)
+        # FOR UPDATE: this is a read-modify-write on the JSON attributes column, so
+        # lock the row for the txn — otherwise a concurrent flag/summary write reads
+        # the same attrs and the last writer clobbers the other's change (lost flag).
+        # (No-op on SQLite tests; enforced on Postgres.)
+        row = (
+            await db.execute(
+                select(CrmCustomer).where(CrmCustomer.id == customer_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         if row is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -154,7 +209,14 @@ async def add_call_summary(customer_id: str, payload: CallSummaryRequest, _: Ser
     (visible via GET /v1/customers/{id}.attributes.call_notes). Deduped on
     session_id so a retry from the fire-and-forget caller never double-writes."""
     async with session_scope() as db:
-        row = await db.get(CrmCustomer, customer_id)
+        # FOR UPDATE: read-modify-write on the JSON attributes column — lock the row
+        # so a concurrent flag/summary write can't clobber this append (see
+        # flag_customer). No-op on SQLite tests; enforced on Postgres.
+        row = (
+            await db.execute(
+                select(CrmCustomer).where(CrmCustomer.id == customer_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         if row is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,

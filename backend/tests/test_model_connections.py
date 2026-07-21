@@ -77,3 +77,20 @@ async def test_bad_kind_and_bad_url_rejected(test_db):
 async def test_resolve_none_for_missing_or_empty(test_db):
     assert await resolve_connection(None) is None
     assert await resolve_connection("does-not-exist") is None
+
+
+async def test_resolve_re_validates_base_url_ssrf_on_the_live_path(test_db):
+    # Regression: a stored URL can be DNS-rebound (or inserted) to an internal /
+    # metadata address after create-time validation. resolve_connection MUST
+    # re-validate on the live path and fail closed, so the service never builds an
+    # outbound client (carrying the decrypted key) against a private target.
+    from koel.db.models import ModelConnection
+    from koel.db.session import session_scope
+
+    async with session_scope() as db:  # insert directly, bypassing create()'s guard
+        db.add(ModelConnection(
+            id="c_rebound", org_id="orgA", name="rebound", kind="llm",
+            provider="openai_compatible", base_url="http://169.254.169.254/v1",
+            api_key_encrypted=crypto.encrypt_secret("k"), model="m",
+        ))
+    assert await resolve_connection("c_rebound") is None
