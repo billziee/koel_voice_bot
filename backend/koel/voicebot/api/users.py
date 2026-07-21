@@ -223,18 +223,20 @@ async def invite_user(payload: InviteIn, admin: UserAdmin) -> InviteOut:
             # reconnaissance, and any 409 it raises never differs in code/detail
             # from the IntegrityError-fallback case below.
             #
-            # RESIDUAL LIMITATION (not fully closed by this — tracked as a
-            # follow-up): username/email are GLOBALLY unique at the DB level
+            # RESIDUAL LIMITATION, EXPLICITLY ACCEPTED (see docs/SECURITY.md):
+            # username/email are GLOBALLY unique at the DB level
             # (`users.username`/`users.email`, from the original single-tenant
             # schema), so a guessed identity that collides with ANOTHER org's
             # user still surfaces as 409 (via the IntegrityError catch below)
             # while a non-existent one returns 201 — that binary "exists
             # somewhere on the platform" bit is inherent to global uniqueness
-            # and isn't removed by scoping this proactive check alone. Actually
+            # and isn't removed by scoping this proactive check alone. Fully
             # closing it needs per-org unique constraints (composite on
             # org_id+username, org_id+email) plus a matching change to how
-            # /v1/auth/login resolves a bare username without an org hint —
-            # out of scope for this change, tracked separately.
+            # /v1/auth/login resolves a bare username without an org hint — a
+            # login-UX change for every user, not just admins. Deliberately not
+            # done: disproportionate to the narrow, admin-only, rate-limited
+            # signal it would close.
             existing_stmt = existing_stmt.where(User.org_id == admin.org_id)
         existing = (await db.execute(existing_stmt)).scalars().first()
         if existing is not None:

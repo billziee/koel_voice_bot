@@ -19,23 +19,57 @@ from koel.voicebot.telephony.twilio import (
 
 def test_pcm_to_ulaw_halves_bytes_and_survives_round_trip():
     pcm = b"\x00\x01" * 800  # 1600 bytes = 800 samples @ 16-bit
-    ulaw = pcm16_to_ulaw8k(pcm, sample_rate=8000)
+    ulaw, state = pcm16_to_ulaw8k(pcm, sample_rate=8000)
     assert len(ulaw) == 800  # µ-law is 1 byte/sample
-    back = ulaw8k_to_pcm16(ulaw, target_rate=8000)
+    assert state is None  # no resampling needed at 8kHz -> no continuation state
+    back, _ = ulaw8k_to_pcm16(ulaw, target_rate=8000)
     assert len(back) == 1600  # decoded back to 16-bit PCM, same sample count
 
 
 def test_resample_16k_pcm_to_8k_ulaw():
     pcm16k = b"\x10\x00" * 1600  # 1600 samples @ 16 kHz = 100ms
-    ulaw = pcm16_to_ulaw8k(pcm16k, sample_rate=16000)
+    ulaw, _ = pcm16_to_ulaw8k(pcm16k, sample_rate=16000)
     assert len(ulaw) == 800  # downsampled to 8 kHz → 800 samples in 100ms
 
 
 def test_inbound_ulaw_decodes_to_16k_for_stt():
     ulaw = b"\xff" * 800  # 100ms of 8 kHz µ-law
-    pcm = ulaw8k_to_pcm16(ulaw, target_rate=16000)
+    pcm, _ = ulaw8k_to_pcm16(ulaw, target_rate=16000)
     # ~1600 samples @ 16-bit @ 16 kHz (≈3200 bytes; ratecv has a 1-sample edge).
     assert abs(len(pcm) - 3200) <= 4 and len(pcm) % 2 == 0
+
+
+def test_resample_state_threads_across_chunks_without_discontinuity():
+    # Regression: resampling one long stream in TWO chunks with the state
+    # threaded through must match resampling it as ONE chunk (mod the final
+    # ratecv edge-effects) — proves the filter carries continuity across calls
+    # instead of resetting (which is what caused the reported audio artifacts).
+    import audioop
+    import math
+
+    pcm = b"".join(
+        int(8000 * math.sin(2 * math.pi * 440 * i / 16000)).to_bytes(2, "little", signed=True)
+        for i in range(1600)
+    )
+    whole, _ = pcm16_to_ulaw8k(pcm, sample_rate=16000)
+
+    half = len(pcm) // 2
+    first, state = pcm16_to_ulaw8k(pcm[:half], sample_rate=16000)
+    second, _ = pcm16_to_ulaw8k(pcm[half:], sample_rate=16000, resample_state=state)
+    chunked = first + second
+
+    # Decode both back to PCM and compare energy/shape rather than raw bytes —
+    # ratecv's edge sample count can differ by one between the two framings.
+    whole_pcm = audioop.ulaw2lin(whole, 2)
+    chunked_pcm = audioop.ulaw2lin(chunked, 2)
+    assert abs(len(whole_pcm) - len(chunked_pcm)) <= 4
+    # A fresh (state=None) second call would reintroduce a filter transient at
+    # the chunk boundary — assert the two encodings are near-identical instead.
+    common_len = min(len(whole), len(chunked))
+    mismatches = sum(
+        1 for a, b in zip(whole[:common_len], chunked[:common_len], strict=True) if a != b
+    )
+    assert mismatches / common_len < 0.05
 
 
 # --- Twilio Media Streams protocol -----------------------------------------

@@ -193,7 +193,8 @@ async def test_inbound_media_is_decoded_to_pcm_for_the_orchestrator():
     assert rate == 16000
     assert len(pcm) > 0
     # Exactly the codec's decode — the bridge adds no processing of its own.
-    assert pcm == ulaw8k_to_pcm16(ulaw, 16000)
+    expected_pcm, _ = ulaw8k_to_pcm16(ulaw, 16000)
+    assert pcm == expected_pcm
 
 
 async def test_media_without_an_audio_hook_is_dropped_not_crashed():

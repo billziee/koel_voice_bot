@@ -466,10 +466,16 @@ async def twilio_stream(websocket: WebSocket) -> None:
     """
     # (1) Fail-closed signature check. verify_twilio_signature returns False on an
     # empty auth token, so this is the dormancy gate — no token, no inbound calls.
+    # Twilio signs the exact request URL it hit (query string included) with no
+    # separately-appended params for a bodyless GET/WS-upgrade request — so the
+    # query string must stay IN the URL, not be re-sorted and appended as if it
+    # were POST form data (that produces a different, never-matching digest).
     signature = websocket.headers.get("x-twilio-signature", "")
+    raw_query = websocket.scope.get("query_string", b"").decode()
     signed_url = f"{settings.public_base_url}/twilio/stream"
-    params = dict(websocket.query_params)
-    if not verify_twilio_signature(signed_url, params, signature, settings.twilio_auth_token):
+    if raw_query:
+        signed_url = f"{signed_url}?{raw_query}"
+    if not verify_twilio_signature(signed_url, {}, signature, settings.twilio_auth_token):
         await websocket.close(code=1008, reason="invalid twilio signature")
         return
 

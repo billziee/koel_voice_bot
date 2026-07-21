@@ -46,6 +46,21 @@ Dev runs plaintext on localhost. Production **must** use:
   attaching to another operator's live call.
 - Tenant isolation (AF): `org_id` on the token scopes bot/call/KB/analytics reads;
   cross-tenant access returns 404 (no existence leak).
+- **Known exception, accepted risk:** `POST /v1/users/invite` narrows but does not
+  fully close cross-tenant enumeration — `users.username`/`users.email` are
+  GLOBALLY unique at the DB level (a carry-over from the original single-tenant
+  schema), so a tenant-scoped admin inviting a name that collides with another
+  org's user still gets 409 (vs 201 for a genuinely free name), leaking one bit:
+  "this identity exists somewhere on the platform" (never which org, never any
+  other detail). Requires an already-authenticated `role=admin` principal and is
+  rate-limited (`_credential_action_limit`/`_accept_limit`); there is no pre-auth
+  or anonymous path to this signal. Closing it fully needs composite
+  `(org_id, username)`/`(org_id, email)` unique constraints **plus** an
+  org-disambiguation step added to `/v1/auth/login` (today's lookup is a bare
+  `User.username == payload.username`, which assumes global uniqueness) — i.e. a
+  login UX change for every user, not just admins. Explicitly accepted as
+  disproportionate to the narrow, admin-only, rate-limited signal it would close;
+  see the code-level detail in `koel/voicebot/api/users.py` (`invite_user`).
 
 ## Abuse controls (M)
 
