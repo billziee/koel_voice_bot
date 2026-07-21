@@ -188,8 +188,9 @@ class MonitorCall(BaseModel):
 async def monitor_calls(
     user: CurrentUser, runtime: Runtime = Depends(get_runtime)
 ) -> list[dict]:
-    """Read-only list of in-flight calls on this instance (org-scoped)."""
-    return runtime.monitor.list_active(user.org_id)
+    """Read-only list of in-flight calls, org-scoped — every process/instance
+    when the monitor is Redis-backed, this one only when it isn't."""
+    return await runtime.monitor.list_active(user.org_id)
 
 
 @router.get("/monitor/{session_id}")
@@ -197,8 +198,9 @@ async def monitor_call_detail(
     session_id: str, user: CurrentUser, runtime: Runtime = Depends(get_runtime)
 ) -> dict:
     """Live detail for one call: status + recent transcript. 404 if the call
-    isn't live here (ended, or served by another process/instance)."""
-    detail = runtime.monitor.get(session_id, user.org_id)
+    isn't live (ended, or — only when the monitor is in-process, not
+    Redis-backed — served by a different instance)."""
+    detail = await runtime.monitor.get(session_id, user.org_id)
     if detail is None:
         raise ApiError(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from koel.db.models import EMBEDDING_DIM
-from koel.nlp.rag import HashEmbedder, NvidiaEmbedder, build_embedder
+from koel.nlp.rag import _UNIMPLEMENTED_EMBEDDERS, HashEmbedder, NvidiaEmbedder, build_embedder
 
 
 def _settings(**over):
@@ -32,16 +32,19 @@ def test_factory_selects_by_config():
     assert isinstance(build_embedder(_settings(nlp_embedder="nvidia")), HashEmbedder)
 
 
-def test_factory_rejects_unimplemented_provider_at_startup():
+def test_factory_rejects_unimplemented_provider_at_startup(monkeypatch):
     # Item Zero (FUTURE_PROCEEDINGS): selecting a provider that isn't implemented
     # must fail loudly at build time (startup) — not silently construct a stub
-    # whose embed() raises mid-call on the first real user.
-    with pytest.raises(NotImplementedError, match="bedrock"):
-        build_embedder(_settings(nlp_embedder="bedrock"))
+    # whose embed() raises mid-call on the first real user. bedrock is now a real
+    # provider (see test_bedrock_embedder.py), so exercise the guard mechanism
+    # itself via a fake not-yet-implemented entry rather than a hardcoded name.
+    monkeypatch.setitem(_UNIMPLEMENTED_EMBEDDERS, "notyet", "NotYetEmbedder")
+    with pytest.raises(NotImplementedError, match="notyet"):
+        build_embedder(_settings(nlp_embedder="notyet"))
 
     # Case-insensitive: the factory lower-cases the config value.
-    with pytest.raises(NotImplementedError, match="bedrock"):
-        build_embedder(_settings(nlp_embedder="BEDROCK"))
+    with pytest.raises(NotImplementedError, match="notyet"):
+        build_embedder(_settings(nlp_embedder="NOTYET"))
 
 
 async def test_hash_embedder_shape_and_input_type():

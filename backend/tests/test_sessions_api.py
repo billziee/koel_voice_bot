@@ -129,7 +129,7 @@ async def test_calling_hours_use_configured_tz(app_client, access_headers, test_
         def now(tz=None):  # noqa: ANN001
             return fixed.astimezone(tz) if tz else fixed
 
-    monkeypatch.setattr("koel.voicebot.api.sessions.datetime", _FrozenDatetime)
+    monkeypatch.setattr("koel.voicebot.pipeline.compliance.datetime", _FrozenDatetime)
     r = await _start(client, access_headers)
     assert r.status_code == 201, r.text  # allowed → tz honoured (would be 403 on UTC)
 

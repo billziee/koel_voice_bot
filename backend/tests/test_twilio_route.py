@@ -74,3 +74,83 @@ def test_genuine_signature_with_query_params_clears_the_gate(monkeypatch):
             pass
     assert exc.value.code == 1008
     assert exc.value.reason == "inbound telephony disabled"
+
+
+# --- /twilio/call-status webhook (1.2) --------------------------------------
+
+
+def _twilio_signature(url: str, params: dict, token: str) -> str:
+    data = url + "".join(f"{k}{params[k]}" for k in sorted(params))
+    digest = hmac.new(token.encode(), data.encode(), hashlib.sha1).digest()
+    return base64.b64encode(digest).decode()
+
+
+def test_call_status_webhook_rejects_bad_signature(monkeypatch):
+    monkeypatch.setattr(main.settings, "twilio_auth_token", "test-token")
+    monkeypatch.setattr(main.settings, "public_base_url", "https://example.com")
+    client = TestClient(main.app)
+    resp = client.post(
+        "/twilio/call-status?attempt_id=a1",
+        data={"CallStatus": "no-answer", "CallSid": "CA1"},
+        headers={"X-Twilio-Signature": "not-a-valid-signature"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_call_status_webhook_records_no_answer_and_reschedules(monkeypatch, test_db):
+    from koel.voicebot.campaigns import claim_due_attempts, enqueue_dial, get_attempt
+
+    monkeypatch.setattr(main.settings, "twilio_auth_token", "test-token")
+    monkeypatch.setattr(main.settings, "public_base_url", "https://example.com")
+
+    attempt_id = await enqueue_dial(
+        campaign_id=None, org_id="org1", customer_id="c1", phone="+911234567890"
+    )
+    await claim_due_attempts(limit=10)
+
+    params = {"CallStatus": "no-answer", "CallSid": "CA1"}
+    url = f"https://example.com/twilio/call-status?attempt_id={attempt_id}"
+    signature = _twilio_signature(url, params, "test-token")
+
+    client = TestClient(main.app)
+    resp = client.post(
+        f"/twilio/call-status?attempt_id={attempt_id}",
+        data=params,
+        headers={"X-Twilio-Signature": signature},
+    )
+    assert resp.status_code == 200, resp.text
+
+    updated = await get_attempt(attempt_id)
+    assert updated["status"] == "pending"  # no-answer -> retryable, rescheduled
+    assert updated["last_outcome"] == "no_answer"
+
+
+async def test_call_status_webhook_ignores_non_final_status(monkeypatch, test_db):
+    from koel.voicebot.campaigns import claim_due_attempts, enqueue_dial, get_attempt
+
+    monkeypatch.setattr(main.settings, "twilio_auth_token", "test-token")
+    monkeypatch.setattr(main.settings, "public_base_url", "https://example.com")
+
+    attempt_id = await enqueue_dial(
+        campaign_id=None, org_id="org1", customer_id="c1", phone="+911234567890"
+    )
+    await claim_due_attempts(limit=10)
+
+    params = {"CallStatus": "in-progress", "CallSid": "CA1"}
+    url = f"https://example.com/twilio/call-status?attempt_id={attempt_id}"
+    signature = _twilio_signature(url, params, "test-token")
+
+    client = TestClient(main.app)
+    resp = client.post(
+        f"/twilio/call-status?attempt_id={attempt_id}",
+        data=params,
+        headers={"X-Twilio-Signature": signature},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # "in-progress" isn't a final outcome — the attempt stays untouched
+    # (still in_progress, no last_outcome), left for twilio_stream's own
+    # teardown to report the real outcome once the call actually ends.
+    updated = await get_attempt(attempt_id)
+    assert updated["status"] == "in_progress"
+    assert updated["last_outcome"] is None

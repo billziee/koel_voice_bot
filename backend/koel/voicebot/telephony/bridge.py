@@ -121,6 +121,10 @@ class TwilioMediaBridge:
     :class:`SessionState`, the bot's ``dtmf_map`` and an inbound-audio hook, then
     ``await run()`` — it consumes carrier frames until the stream stops or the
     socket drops.
+
+    Also structurally satisfies :class:`koel.voicebot.telephony.carrier.CarrierBridge`
+    (``send_audio``/``send_clear``/``hangup``) — the carrier-agnostic surface a
+    future Exotel adapter is meant to match too.
     """
 
     def __init__(
@@ -162,8 +166,25 @@ class TwilioMediaBridge:
         if message.type in (ServerMessageType.audio_chunk, ServerMessageType.filler):
             await self._play(message.data)
         elif message.type == ServerMessageType.tts_kill:
-            await self._clear()
+            await self.send_clear()
         # Other message types have no Media Streams representation → ignore.
+
+    async def send_audio(self, pcm16: bytes, sample_rate: int) -> None:
+        """:class:`CarrierBridge` entry point — play synthesized PCM to the
+        caller, transcoding to 8 kHz µ-law for Twilio.
+
+        Shares the same instance-scoped resample state as the
+        ``ServerMessage``-driven :meth:`_play` path, so a caller mixing both
+        entry points still transcodes as one continuous stream, not a fresh
+        filter per call.
+        """
+        if self._stream_sid is None:
+            return
+        ulaw, self._outbound_resample_state = pcm16_to_ulaw8k(
+            pcm16, sample_rate, self._outbound_resample_state
+        )
+        if ulaw:
+            await self._ws.send_text(twilio_media_frame(self._stream_sid, ulaw))
 
     async def _play(self, data: dict) -> None:
         audio_b64 = data.get("audio_b64")
@@ -182,7 +203,10 @@ class TwilioMediaBridge:
         if ulaw:
             await self._ws.send_text(twilio_media_frame(self._stream_sid, ulaw))
 
-    async def _clear(self) -> None:
+    async def send_clear(self) -> None:
+        """:class:`CarrierBridge` entry point — flush audio the carrier has
+        buffered but not yet played. A confirmed barge-in must silence the
+        bot immediately (PRD §05)."""
         if self._stream_sid is None:
             return
         await self._ws.send_text(twilio_clear_frame(self._stream_sid))
@@ -320,6 +344,19 @@ class TwilioMediaBridge:
         await self._orch.handle_final_transcript(self._state, self.send, stt)
 
     async def _on_stop(self) -> None:
+        self._stopped = True
+        await self._orch.end_call(self._state, self.send, outcome="completed")
+
+    async def hangup(self) -> None:
+        """:class:`CarrierBridge` entry point — end the PSTN leg.
+
+        Mirrors :meth:`_on_stop`'s clean-stop path (same ``completed`` outcome
+        through the same orchestrator call) so a programmatically-triggered
+        hangup persists identically to a carrier-initiated ``stop`` frame.
+        A no-op if the call already ended, carrier-initiated or otherwise.
+        """
+        if self._stopped:
+            return
         self._stopped = True
         await self._orch.end_call(self._state, self.send, outcome="completed")
 

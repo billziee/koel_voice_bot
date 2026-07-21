@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 from abc import ABC, abstractmethod
 
+import boto3
 from sqlalchemy import select, text
 
 from koel.common.config import get_common_settings
@@ -155,18 +157,69 @@ class FastEmbedEmbedder(Embedder):
             return await self._fallback.embed(text, input_type=input_type)
 
 
-class BedrockTitanEmbedder(Embedder):  # pragma: no cover - production stub
+class BedrockTitanEmbedder(Embedder):
+    """Live embeddings via AWS Bedrock Titan Embeddings V2 (in-region ap-south-1).
+
+    Titan Embed Text v2 emits 1024-d vectors at its default config (matches
+    EMBEDDING_DIM) and keeps embedding calls inside the AWS region configured by
+    ``aws_region`` (PRD §11 data residency) rather than NVIDIA's US-hosted NIM.
+    Titan v2 has no separate query/passage mode (unlike nv-embedqa), so
+    ``input_type`` is accepted for interface symmetry but not sent to the API —
+    mirrors how FastEmbedEmbedder treats bge-m3 (also symmetric) the same way.
+    boto3 is synchronous, so invoke_model runs via asyncio.to_thread — mirrors
+    FastEmbedEmbedder's off-event-loop treatment of its own sync call. Degrades
+    to the hash stub on ANY failure so retrieval never crashes a turn (RAG is
+    best-effort).
+    """
+
+    def __init__(
+        self,
+        *,
+        region: str = "ap-south-1",
+        model_id: str = "amazon.titan-embed-text-v2:0",
+    ) -> None:
+        self._model_id = model_id
+        # Built once at construction (not per-call): boto3 clients are safe to
+        # reuse across calls, and re-creating one per embed() would add avoidable
+        # setup cost to every RAG turn.
+        self._client = boto3.client("bedrock-runtime", region_name=region)
+        self._fallback = HashEmbedder()
+        self._warned = False
+
+    def _invoke(self, text: str) -> list[float]:
+        # Runs inside asyncio.to_thread (see embed()) — boto3 is a blocking SDK.
+        response = self._client.invoke_model(
+            modelId=self._model_id,
+            body=json.dumps({"inputText": text, "dimensions": EMBEDDING_DIM, "normalize": True}),
+            contentType="application/json",
+            accept="application/json",
+        )
+        payload = json.loads(response["body"].read())
+        return [float(x) for x in payload["embedding"]]
+
     async def embed(self, text: str, *, input_type: str = "query") -> list[float]:
-        raise NotImplementedError("Invoke Bedrock Titan Embeddings v2 (ap-south-1) here.")
+        try:
+            # boto3 is synchronous + network-bound; keep it off the event loop.
+            vec = await asyncio.to_thread(self._invoke, text)
+            # Guard the dimension (mirrors NvidiaEmbedder/FastEmbedEmbedder): a
+            # wrong-width vector would break the pgvector query, so treat it as a
+            # failure and degrade to the stub.
+            if len(vec) != EMBEDDING_DIM:
+                raise ValueError(f"embedding dim {len(vec)} != {EMBEDDING_DIM}")
+            return vec
+        except Exception:  # noqa: BLE001 — RAG is best-effort; degrade to the stub
+            if not self._warned:
+                self._warned = True
+                logger.warning("bedrock_embed_failed; falling back to hash embedder", exc_info=True)
+            return await self._fallback.embed(text, input_type=input_type)
 
 
 # Embedders that are selectable via config but not yet implemented. Selecting
 # one is a boot-time misconfiguration, not a runtime condition — build_embedder
 # rejects it at startup (Item Zero in docs/FUTURE_PROCEEDINGS.md) so the failure
 # surfaces immediately instead of on the first RAG turn mid-call. When one is
-# implemented (roadmap 6.8 / O-7 Track B), remove it from this set and route to
-# the real provider above.
-_UNIMPLEMENTED_EMBEDDERS = {"bedrock": "BedrockTitanEmbedder"}
+# implemented, remove it from this set and route to the real provider above.
+_UNIMPLEMENTED_EMBEDDERS: dict[str, str] = {}
 
 
 def build_embedder(settings) -> Embedder:  # noqa: ANN001 — NlpSettings (avoid import cycle)
@@ -191,6 +244,11 @@ def build_embedder(settings) -> Embedder:  # noqa: ANN001 — NlpSettings (avoid
             model=settings.nvidia_embed_model,
             base_url=settings.nvidia_embed_base_url,
             timeout_s=settings.nvidia_embed_timeout_s,
+        )
+    if kind == "bedrock":
+        return BedrockTitanEmbedder(
+            region=settings.aws_region,
+            model_id=settings.bedrock_embed_model_id,
         )
     return HashEmbedder()
 

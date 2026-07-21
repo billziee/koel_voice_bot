@@ -87,3 +87,20 @@ async def test_demo_login_works_with_turnstile_unset(app_client):
     r = await client.post("/v1/auth/login", json={"username": "demo", "password": "koel-demo"})
     assert r.status_code == 200
     assert r.json()["access_token"]
+
+
+# --- _verify fails closed on a malformed stored hash --------------------------
+
+
+def test_verify_returns_false_on_malformed_hash():
+    # bcrypt.checkpw raises ValueError (not just False) when the stored hash
+    # isn't a well-formed bcrypt hash (bad salt/prefix). _verify must swallow
+    # that and report "no match" rather than let a 500 leak through — a corrupt
+    # row must fail the login, never crash it.
+    assert auth_mod._verify("any-password", b"not-a-valid-bcrypt-hash") is False
+
+
+def test_verify_still_true_for_a_genuinely_matching_hash():
+    hashed = auth_mod._hash("correct horse battery staple")
+    assert auth_mod._verify("correct horse battery staple", hashed) is True
+    assert auth_mod._verify("wrong", hashed) is False

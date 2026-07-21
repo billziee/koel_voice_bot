@@ -58,7 +58,7 @@ class NlpSettings(CommonSettings):
     # "fastembed" → local ONNX CPU embedder (O-4; no US round-trip). Needs the
     #               'local-embed' extra + a one-off KB re-embed (scripts/reembed_kb.py)
     # "nvidia"    → NVIDIA NIM multilingual embedder (handles Hindi/Hinglish)
-    # "bedrock"   → AWS Bedrock Titan v2 in ap-south-1 (in-region; stub for now)
+    # "bedrock"   → AWS Bedrock Titan Embeddings V2, in-region via aws_region (PRD §11)
     nlp_embedder: str = "hash"
     # Local embedder model (O-4); bge-m3 is 1024-d multilingual → matches EMBEDDING_DIM.
     fastembed_model: str = "BAAI/bge-m3"
@@ -66,6 +66,10 @@ class NlpSettings(CommonSettings):
     nvidia_embed_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_embed_model: str = "nvidia/nv-embedqa-e5-v5"  # 1024-d, matches EMBEDDING_DIM
     nvidia_embed_timeout_s: float = 20.0
+    # Titan Embeddings V2 (1024-d default, matches EMBEDDING_DIM). Region comes from
+    # the shared aws_region (CommonSettings), not a separate field, so it stays in
+    # sync with the rest of the AWS-touching config (S3 recording, etc.).
+    bedrock_embed_model_id: str = "amazon.titan-embed-text-v2:0"
     # Retrieval tuning (per-bot overrides land with the Alembic migration).
     # top_k=2 keeps the grounded prompt short (fewer input tokens → faster TTFT).
     rag_top_k: int = 2

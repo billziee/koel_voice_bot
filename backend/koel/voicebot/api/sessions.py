@@ -10,8 +10,6 @@ TRAI DND scrub (PRD §11): a DND customer is refused here before any dial.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
@@ -24,6 +22,7 @@ from koel.common.schemas import Language, Tone
 from koel.db.models import BotConfig
 from koel.db.session import session_scope
 from koel.voicebot.deps import Runtime, get_runtime
+from koel.voicebot.pipeline.compliance import is_within_calling_hours
 from koel.voicebot.pipeline.experiment import assign_variant
 from koel.voicebot.pipeline.flow import parse_flow
 from koel.voicebot.session.models import SessionState
@@ -191,23 +190,20 @@ async def start_session(
     user: CurrentUser,
     runtime: Runtime = Depends(get_runtime),
 ) -> StartSessionResponse:
-    # RBI fair-practice calling-hours window (PRD §11). Opt-in via config so
-    # demos run any time; when enabled, out-of-hours dials are refused.
-    if runtime.settings.enforce_calling_hours:
-        # Evaluate the window in the configured timezone (IST) — NOT the server's
-        # clock, which is UTC on the cloud host (a 9–21 window in UTC would be
-        # 14:30–02:30 IST, refusing legitimate daytime dials).
-        try:
-            tz = ZoneInfo(runtime.settings.calling_hours_tz)
-        except Exception:  # noqa: BLE001 — bad tz string → fail safe to UTC
-            tz = ZoneInfo("UTC")
-        hour = datetime.now(tz).hour
-        if not (runtime.settings.calling_hours_start <= hour < runtime.settings.calling_hours_end):
-            raise ApiError(
-                status_code=status.HTTP_403_FORBIDDEN,
-                code="outside_calling_hours",
-                message="Calls are only permitted within RBI fair-practice hours.",
-            )
+    # RBI fair-practice calling-hours window (PRD §11) — shared with the
+    # campaign dialer worker (pipeline/compliance.py) so both origination
+    # paths enforce the identical window, not two copies that can drift.
+    if not is_within_calling_hours(
+        enforce=runtime.settings.enforce_calling_hours,
+        tz_name=runtime.settings.calling_hours_tz,
+        start_hour=runtime.settings.calling_hours_start,
+        end_hour=runtime.settings.calling_hours_end,
+    ):
+        raise ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="outside_calling_hours",
+            message="Calls are only permitted within RBI fair-practice hours.",
+        )
 
     async with session_scope() as db:
         bot: BotConfig | None = await db.get(BotConfig, payload.bot_id)

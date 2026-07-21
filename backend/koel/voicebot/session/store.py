@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import redis.asyncio as redis
 
-from koel.voicebot.session.models import SessionState
+from koel.voicebot.session.models import CallStatus, SessionState
 
 _KEY_PREFIX = "koel:session:"
 
@@ -36,6 +36,14 @@ class RedisSessionStore:
     async def load(self, session_id: str) -> SessionState | None:
         raw = await self._redis.get(self._key(session_id))
         return SessionState.model_validate_json(raw) if raw else None
+
+    async def is_live(self, session_id: str) -> bool:
+        """Whether a session is still going, from any process's perspective —
+        the cross-process liveness signal for the escalation hub's pub/sub
+        path (Redis pub/sub itself has no delivery ack, so this is the best
+        available "did that land somewhere" check)."""
+        state = await self.load(session_id)
+        return state is not None and state.status != CallStatus.ended
 
     async def begin_grace(self, session_id: str) -> bool:
         """Shorten TTL to the 15s grace window on disconnect. Returns False if gone."""

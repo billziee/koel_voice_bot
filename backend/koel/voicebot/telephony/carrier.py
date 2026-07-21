@@ -7,9 +7,10 @@ shared, and only the carrier-specific WS framing differs.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
+@runtime_checkable
 class CarrierBridge(Protocol):
     """What the orchestrator drives to run a call over any PSTN carrier."""
 
