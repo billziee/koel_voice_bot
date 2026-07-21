@@ -26,9 +26,13 @@ nor NVIDIA NVCF currently offers an India region or a no-retention/region-pinnin
 - **DPDP field minimisation**: only use-case-relevant CRM fields load into a session.
 - **Transport encryption**: TLS to all providers; DB `sslmode=require`, Redis `rediss://` in prod.
 - **Embeddings can stay in-region**: set `KOEL_NLP_EMBEDDER=bedrock` to use AWS Bedrock
-  Titan v2 (ap-south-1) for KB embeddings instead of NVIDIA NIM (US) — **note:** this
-  provider is currently a stub (`embed()` raises `NotImplementedError`); see
-  `FUTURE_PROCEEDINGS.md` item **6.8**.
+  Titan v2 (`amazon.titan-embed-text-v2:0`, `ap-south-1`) for KB embeddings instead of
+  NVIDIA NIM (US) — **updated:** this is now a real implementation (`koel/nlp/rag.py`'s
+  `BedrockTitanEmbedder`, real `boto3 bedrock-runtime` `invoke_model`, degrades to the
+  hash-embedder fallback on any failure), not a stub — see `FUTURE_PROCEEDINGS.md` item
+  **6.8**. Requires an AWS account with Bedrock Titan Embeddings V2 enabled and the
+  `bedrock:InvokeModel` IAM permission (`infra/terraform/main.tf`'s `bedrock_invoke`
+  policy) — neither is provisioned yet (Terraform is written/validated, not applied).
 - **New since this doc was written — Sarvam AI is India-hosted** (`api.sarvam.ai`)
   and now handles Hindi/Hinglish STT and TTS live (`SarvamSttProvider`,
   `SarvamTtsProvider`). This is a **real, partial mitigation** — Hindi/Hinglish
