@@ -186,6 +186,62 @@ async def test_reset_password_keeps_old_password_valid_until_redeemed(app_client
     assert new_login.status_code == 200
 
 
+async def test_reset_password_with_no_email_on_file_skips_the_send_but_still_returns_a_link(
+    app_client, test_db
+):
+    # `_send_credential_email` short-circuits to `False` (never even reaches the
+    # channel) when the row has no email on file — an admin-created/imported
+    # account with no address yet. The caller must still get back a usable,
+    # immediately-redeemable link since nothing was (or could be) emailed.
+    client, _ = app_client
+    async with session_scope() as db:
+        db.add(
+            User(
+                id="u_noemail",
+                username="noemailuser",
+                email=None,
+                org_id="acme",
+                role="operator",
+                active=True,
+                password_hash=b"irrelevant-hash",
+            )
+        )
+        await db.flush()
+
+    admin = _admin_headers(org_id="acme")
+    reset = await client.post("/v1/users/u_noemail/reset-password", headers=admin)
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["email_sent"] is False
+    assert reset.json()["invite_url"] is not None and "?invite=" in reset.json()["invite_url"]
+
+
+async def test_patch_role_only_leaves_active_untouched(app_client, test_db):
+    # Partial patches must not clobber the field the caller didn't mention.
+    async with session_scope() as db:
+        db.add(User(id="u_role_only", username="roleonly", org_id="acme", role="operator", active=True))
+        await db.flush()
+
+    client, _ = app_client
+    admin = _admin_headers(org_id="acme")
+    r = await client.patch("/v1/users/u_role_only", headers=admin, json={"role": "admin"})
+    assert r.status_code == 200, r.text
+    assert r.json()["role"] == "admin"
+    assert r.json()["active"] is True  # unchanged — active was never in the payload
+
+
+async def test_patch_active_only_leaves_role_untouched(app_client, test_db):
+    async with session_scope() as db:
+        db.add(User(id="u_active_only", username="activeonly", org_id="acme", role="operator", active=True))
+        await db.flush()
+
+    client, _ = app_client
+    admin = _admin_headers(org_id="acme")
+    r = await client.patch("/v1/users/u_active_only", headers=admin, json={"active": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["active"] is False
+    assert r.json()["role"] == "operator"  # unchanged — role was never in the payload
+
+
 async def test_resend_invite_rejects_an_already_accepted_account(app_client):
     client, _ = app_client
     admin = _admin_headers(org_id=None)

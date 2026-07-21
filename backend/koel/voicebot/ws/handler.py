@@ -124,15 +124,18 @@ class CallSession:
         async with self._send_lock:
             await self._ws.send_text(message.model_dump_json())
         # Supervisor monitor tee (3.3): mirror transcript + state into the live
-        # view. Cheap dict ops, best-effort — never affects the call.
+        # view. Cheap dict ops (or a Redis round-trip when Redis-backed),
+        # best-effort — never affects the call.
         if message.type == ServerMessageType.transcript:
-            self._monitor.record_turn(
+            await self._monitor.record_turn(
                 self._state.session_id,
                 str(message.data.get("speaker", "")),
                 str(message.data.get("text", "")),
             )
         elif message.type == ServerMessageType.call_state:
-            self._monitor.set_status(self._state.session_id, str(message.data.get("status", "")))
+            await self._monitor.set_status(
+                self._state.session_id, str(message.data.get("status", ""))
+            )
         # Barge-in gating: once we dispatch bot audio, the client may still be
         # *playing* it for several seconds — that whole window is when a
         # barge_in_candidate can legitimately arrive. So "bot speaking" stays
@@ -176,7 +179,7 @@ class CallSession:
         # it runs concurrently with the greeting and never blocks the call.
         warmup = asyncio.create_task(self._clients.warm_up())
         # Register this call in the live supervisor view (3.3).
-        self._monitor.open(self._state.session_id, self._state.bot_id, self._state.org_id)
+        await self._monitor.open(self._state.session_id, self._state.bot_id, self._state.org_id)
         if self._resumed:
             # PRD §05: emit a RECONNECTED span so resume latency is observable.
             with span(
@@ -690,7 +693,7 @@ class CallSession:
             self._cancel_speculative_retrieval()
             await self._stt_stream.aclose()  # O-6 Wave 2: close the streaming STT session
             # Drop the call from the live supervisor view (3.3).
-            self._monitor.close(self._state.session_id)
+            await self._monitor.close(self._state.session_id)
             # Tear down any live human-handoff (3.1): drop the operator bridge and, if
             # the handoff was never resolved (caller hung up mid-hold), mark it abandoned.
             if self._escalation_id is not None:

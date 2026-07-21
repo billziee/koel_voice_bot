@@ -110,6 +110,10 @@ class SessionState(BaseModel):
     # trace_id stitches the call to its OTel trace for the latency dashboards.
     recording_url: str | None = None
     trace_id: str | None = None
+    # The underlying Twilio Call SID for a PSTN leg (None on a browser call) —
+    # captured from the Media Streams start frame. Lets the operator API
+    # REST-control the live call for a warm transfer (3.1 Phase B).
+    twilio_call_sid: str | None = None
 
     status: CallStatus = CallStatus.connecting
     # CRM fields seeded at session init (name, product, offer, dpd…).

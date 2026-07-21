@@ -133,6 +133,16 @@ class CommonSettings(BaseSettings):
     # behind a proxy (e.g. https://koel.example.com). Empty ⇒ verify uses the
     # request URL as-is.
     public_base_url: str = ""
+    # Outbound origination (1.2): Twilio's REST Calls API needs the account SID
+    # (public, not a secret — pairs with the auth token above) + a caller-id
+    # number owned on the account. Either empty ⇒ the dialer worker stays
+    # dormant (claims nothing), matching every other carrier-credential gate.
+    twilio_account_sid: str = ""
+    twilio_from_number: str = ""
+    # Dialer worker poll cadence + claim batch size (1.2). Only runs at all when
+    # twilio_account_sid/auth_token/from_number are all set.
+    dialer_poll_interval_s: float = 30.0
+    dialer_batch_size: int = 10
     # Exotel (1.4, India-hosted PSTN). Empty token ⇒ signatures fail closed /
     # adapter dormant. media_mode: "pcm" (raw 8 kHz slin, no transcode) or "ulaw".
     exotel_auth_token: str = ""

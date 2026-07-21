@@ -20,6 +20,7 @@ from opentelemetry.propagate import extract
 
 from koel import __version__
 from koel.common.config import CommonSettings, get_common_settings
+from koel.common.crypto import secrets_available
 from koel.common.errors import register_exception_handlers
 from koel.common.logging import configure_logging, get_logger, set_correlation_id
 from koel.common.schemas import HealthResponse, HealthStatus
@@ -49,6 +50,24 @@ def _apply_security_headers(response: Response, path: str, settings: CommonSetti
             "Content-Security-Policy",
             "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
         )
+
+
+def warn_if_byok_secret_unset(settings: CommonSettings, logger) -> bool:  # noqa: ANN001 - stdlib Logger
+    """BYOK model connections (koel.common.crypto) are legitimately optional —
+    NOT a hard boot fail like the JWT/CORS checks in create_app — but silently
+    dormant with no signal is its own footgun (docs/SECURITY.md: "easy to miss
+    since BYOK fails closed silently"). One clear line at boot instead.
+    Returns whether it warned (for tests), mirroring
+    ``koel.voicebot.main.warn_if_turnstile_unenforced``."""
+    if settings.is_production and not secrets_available():
+        logger.warning(
+            "byok_secret_key_unset_in_production: KOEL_SECRET_KEY is not set (or "
+            "invalid) — BYOK model-connection creation/use will fail closed. Set "
+            "it from a secret manager if BYOK is needed; harmless to ignore "
+            "otherwise (env-configured providers are unaffected)."
+        )
+        return True
+    return False
 
 
 def create_app(
@@ -81,6 +100,7 @@ def create_app(
     configure_telemetry(service_name, settings)
     configure_metrics(service_name, settings)
     logger = get_logger(f"koel.{service_name}")
+    warn_if_byok_secret_unset(settings, logger)
 
     @asynccontextmanager
     async def _default_lifespan(_: FastAPI):

@@ -12,10 +12,11 @@ import io
 import wave
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket, status
 
 from koel.common.app_factory import create_app
 from koel.common.auth import authenticate_websocket
+from koel.common.errors import ApiError
 from koel.common.logging import get_logger, set_correlation_id
 from koel.common.model_connections import resolve_connection
 from koel.common.schemas import Language
@@ -38,13 +39,21 @@ from koel.voicebot.api import (
     sessions,
     users,
 )
+from koel.voicebot.api.sessions import _minimise_attributes, build_session_state
+from koel.voicebot.campaigns import get_attempt, record_dial_result
 from koel.voicebot.config import get_voicebot_settings
 from koel.voicebot.deps import build_runtime
 from koel.voicebot.inbound import build_inbound_session
 from koel.voicebot.pipeline import localization
+from koel.voicebot.pipeline.dialer_worker import dialer_enabled, run_dialer_loop
 from koel.voicebot.pipeline.filler import FILLER_PHRASES, filler_tone_for
+from koel.voicebot.pipeline.outbound_dialer import (
+    call_outcome_to_dial_outcome,
+    call_status_to_dial_outcome,
+)
 from koel.voicebot.pipeline.transliteration import SarvamTransliterator
 from koel.voicebot.session.models import CallStatus, SessionState
+from koel.voicebot.telephony.bargein_gate import TelephonyBargeInGate
 from koel.voicebot.telephony.bridge import TwilioMediaBridge
 from koel.voicebot.telephony.ingest import (
     PartialCallback,
@@ -166,7 +175,37 @@ async def lifespan(app: FastAPI):
     warn_if_turnstile_unenforced(settings)
     await _warm_localization()
     await _warm_filler_cache(runtime)
+    # Outbound dialer (1.2): dormant unless the full Twilio origination config
+    # is set (mirrors every other carrier-credential gate in this codebase).
+    # An infinite loop, so it's CANCELLED on shutdown below — not awaited
+    # alongside the grace finalizers, which are expected to run to completion.
+    dialer_task: asyncio.Task | None = None
+    if dialer_enabled(settings):
+        dialer_task = asyncio.create_task(
+            run_dialer_loop(
+                account_sid=settings.twilio_account_sid,
+                auth_token=settings.twilio_auth_token,
+                from_number=settings.twilio_from_number,
+                public_base_url=settings.public_base_url,
+                default_bot_id=settings.twilio_default_bot_id,
+                crm=runtime.clients,
+                calling_hours=settings,
+                poll_interval_s=settings.dialer_poll_interval_s,
+                batch_size=settings.dialer_batch_size,
+            )
+        )
+        logger.info("outbound_dialer_started")
+    # Cross-process escalation fan-in (3.1): dormant with no redis_client, but
+    # build_runtime always wires one (Redis is required infra here, unlike the
+    # carrier/AWS integrations above) — so this always runs. Infinite loop,
+    # cancelled on shutdown like the dialer.
+    escalation_listener_task = asyncio.create_task(runtime.escalations.run_listener())
     yield
+    if dialer_task is not None:
+        dialer_task.cancel()
+        await asyncio.gather(dialer_task, return_exceptions=True)
+    escalation_listener_task.cancel()
+    await asyncio.gather(escalation_listener_task, return_exceptions=True)
     # Graceful SIGTERM drain (P): stop accepting new calls, let live ones finish
     # (or hit the grace-TTL finalizer) before tearing down pools.
     waited = 0.0
@@ -189,6 +228,8 @@ async def lifespan(app: FastAPI):
             logger.warning("grace_finalizers_did_not_drain_in_time")
     await runtime.clients.aclose()
     await runtime.store.close()
+    if runtime.shared_redis is not None:
+        await runtime.shared_redis.aclose()
     await knowledge.aclose_embedder()
 
 
@@ -450,6 +491,31 @@ async def _build_telephony_ingest(
     return TelephonyAudioIngest(transcribe=transcribe, on_utterance=on_utterance)
 
 
+async def _build_outbound_telephony_session(runtime, bot: BotConfig, attempt_id: str) -> SessionState:
+    """Seed the SessionState for an OUTBOUND campaign-dial leg (1.2) — the
+    Stream connected, meaning the customer answered.
+
+    No direction override in crm_context: KOEL's default (the absence of the
+    inbound.DIRECTION_KEY override) is the pitch-first outbound prompt,
+    matching ``POST /v1/sessions`` (the existing HTTP-triggered outbound
+    path) exactly. Calling-hours + DND were already enforced by the dialer
+    worker before this call was ever placed — not re-checked here.
+    """
+    attempt = await get_attempt(attempt_id)
+    customer_id = attempt["customer_id"] if attempt else None
+    crm_context: dict[str, object] = {}
+    if customer_id:
+        customer = await runtime.clients.get_customer(customer_id, org_id=bot.org_id)
+        if customer is not None:
+            crm_context = {
+                "name": customer.name,
+                "bank": customer.bank,
+                "phone": customer.phone,
+                **_minimise_attributes(bot.use_case.value, customer.attributes),
+            }
+    return build_session_state(bot, customer_id=customer_id, crm_context=crm_context)
+
+
 @app.websocket("/twilio/stream")
 async def twilio_stream(websocket: WebSocket) -> None:
     """Inbound PSTN call bridge over Twilio Media Streams (roadmap 1.1 / 1.3).
@@ -479,27 +545,42 @@ async def twilio_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1008, reason="invalid twilio signature")
         return
 
-    # (2) Inbound needs a bound bot: the WS URL carries no session_id (unlike the
-    # browser path), so a configured default BotConfig identifies the callee.
-    if not settings.twilio_default_bot_id:
+    # (2) The WS URL carries no session_id (unlike the browser path), so the
+    # callee bot must come from elsewhere: an outbound leg (the campaign
+    # dialer, 1.2) carries its own attempt_id + bot_id query params (added by
+    # outbound_dialer.originate_call, protected by the signature check above
+    # since they're part of the signed URL); inbound falls back to the
+    # configured default BotConfig.
+    attempt_id = websocket.query_params.get("attempt_id")
+    outbound_bot_id = websocket.query_params.get("bot_id") if attempt_id else None
+    bot_id = outbound_bot_id or settings.twilio_default_bot_id
+    if not bot_id:
         await websocket.close(code=1008, reason="inbound telephony disabled")
         return
 
     runtime = websocket.app.state.runtime
     async with session_scope() as db:
-        bot: BotConfig | None = await db.get(BotConfig, settings.twilio_default_bot_id)
+        bot: BotConfig | None = await db.get(BotConfig, bot_id)
     if bot is None or not bot.active:
         await websocket.close(code=1008, reason="inbound bot unavailable")
         return
 
     await websocket.accept()
 
-    # (4) Seed the call. The caller's number may arrive as a templated WS query
-    # param (e.g. <Stream url=".../twilio/stream?From={{From}}">). Inbound (3.2):
-    # resolve the caller by ANI → CRM lookup → intent-first session; an unknown
-    # or absent number still yields an anonymous inbound session.
-    caller_phone = websocket.query_params.get("From") or websocket.query_params.get("from")
-    state = await build_inbound_session(runtime.clients, bot, caller_phone=caller_phone)
+    # (4) Seed the call.
+    if attempt_id:
+        # Outbound (1.2): the dialer already ran the calling-hours + DND gate
+        # before ever placing this call — no direction override (KOEL's
+        # default, matching the HTTP-triggered outbound path, is the
+        # pitch-first prompt; only inbound needs the intent-first override).
+        state = await _build_outbound_telephony_session(runtime, bot, attempt_id)
+    else:
+        # Inbound (3.2): the caller's number may arrive as a templated WS
+        # query param (e.g. <Stream url=".../twilio/stream?From={{From}}">).
+        # Resolve the caller by ANI → CRM lookup → intent-first session; an
+        # unknown or absent number still yields an anonymous inbound session.
+        caller_phone = websocket.query_params.get("From") or websocket.query_params.get("from")
+        state = await build_inbound_session(runtime.clients, bot, caller_phone=caller_phone)
     set_correlation_id(state.session_id)
     await runtime.store.save(state)
 
@@ -518,21 +599,47 @@ async def twilio_stream(websocket: WebSocket) -> None:
             )
         )
 
+    # Barge-in Gate 1+2 on telephony (previously missing — only the browser
+    # transport, via its client VAD worklet, ever ran bargein.evaluate()). See
+    # TelephonyBargeInGate's docstring for why the interim partial itself
+    # stands in for Gate 1 here.
+    partial_gate = TelephonyBargeInGate(runtime.bargein)
+
     async def _on_utterance(stt: TranscriptResult) -> None:
-        # bridge.send translates the orchestrator's reply back into Twilio frames.
+        partial_gate.reset()
         if bridge is None:
             return
+        bridge.mark_customer_turn()
+        # bridge.send translates the orchestrator's reply back into Twilio frames.
         await runtime.orchestrator.handle_final_transcript(state, bridge.send, stt)
 
     async def _send_partial(text: str) -> None:
         """Forward an interim STT partial through the transport as a best-effort
-        ``partial_transcript`` (O-6). The Twilio bridge has no carrier
-        representation for it and drops it; on a browser transport it surfaces as a
-        live caption. NEVER authoritative — the turn still runs on the final."""
+        ``partial_transcript`` (O-6) — a live caption on the browser transport,
+        dropped by the Twilio bridge (no carrier representation), never
+        authoritative on its own (the turn still runs on the final). Also runs
+        Gate 2 barge-in classification while the bot is speaking, since this is
+        telephony's only voice-activity signal."""
         if bridge is None or not text.strip():
             return
         await bridge.send(
             ServerMessage.of(ServerMessageType.partial_transcript, text=text, speaker="customer")
+        )
+        if not bridge.is_bot_speaking:
+            partial_gate.reset()
+            return
+        extra = {w.lower() for w in state.backchannels.get(state.language.value, [])}
+        decision = partial_gate.evaluate_partial(
+            text=text, language=state.language, extra_backchannels=extra or None
+        )
+        if not decision.interrupt:
+            return
+        if state.transcript and state.transcript[-1].speaker == "bot":
+            state.transcript[-1].interrupted = True
+        await bridge.send_clear()
+        logger.info(
+            "telephony_barge_in",
+            extra={"extra_fields": {"session_id": state.session_id, "reason": decision.reason}},
         )
 
     # (6) STT ingest: the long-lived Deepgram streaming session (true continuous
@@ -574,6 +681,41 @@ async def twilio_stream(websocket: WebSocket) -> None:
         if aclose is not None:
             await aclose()
         websocket.app.state.active_calls -= 1
+        # Outbound (1.2): report this leg's outcome back to the dial queue so
+        # the retry policy can act on it — a customer never reached (dropped
+        # mid-ring, etc.) should be retried; one who was must not be.
+        if attempt_id:
+            await record_dial_result(attempt_id, call_outcome_to_dial_outcome(state.outcome))
+
+
+@app.post("/twilio/call-status")
+async def twilio_call_status(request: Request) -> dict[str, bool]:
+    """Twilio call-status webhook (1.2) — reports outbound legs that never
+    reached ``/twilio/stream`` at all (no answer / busy / failed / canceled).
+    A leg that DID connect reports its outcome from ``twilio_stream``'s own
+    teardown instead; those statuses are ignored here (see
+    ``call_status_to_dial_outcome``).
+
+    A real POST webhook with a form body — unlike ``/twilio/stream`` (a
+    bodyless WS upgrade), Twilio's signature here covers the URL plus the
+    sorted POST params, exactly as ``verify_twilio_signature`` implements.
+    """
+    form = await request.form()
+    attempt_id = request.query_params.get("attempt_id")
+    signature = request.headers.get("x-twilio-signature", "")
+    url = f"{settings.public_base_url}/twilio/call-status?attempt_id={attempt_id or ''}"
+    params = {k: str(v) for k, v in form.items()}
+    if not verify_twilio_signature(url, params, signature, settings.twilio_auth_token):
+        raise ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="invalid_twilio_signature",
+            message="Invalid Twilio signature.",
+        )
+    if attempt_id:
+        outcome = call_status_to_dial_outcome(str(form.get("CallStatus", "")))
+        if outcome is not None:
+            await record_dial_result(attempt_id, outcome)
+    return {"ok": True}
 
 
 # Re-export the supported-language set for clients/tests.

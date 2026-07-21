@@ -1,0 +1,18 @@
+# Local provider plugin cache from `terraform init` — regenerated on demand,
+# never commit (large binaries, platform-specific).
+.terraform/
+
+# Local state + plan files — this project uses no backend config yet, so any
+# state that gets created locally during `plan`/`apply` could contain secrets
+# (DB passwords, Redis auth tokens) in plaintext. Never commit.
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Variable files often carry real secrets (db_password, redis_auth_token) —
+# pass them via -var-file or environment instead of committing one.
+*.tfvars
+*.tfvars.json
+
+# .terraform.lock.hcl IS meant to be committed (pins provider versions) —
+# deliberately not ignored here.

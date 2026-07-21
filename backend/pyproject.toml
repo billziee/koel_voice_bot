@@ -20,6 +20,7 @@ dependencies = [
     "websockets>=12.0",
     "numpy>=1.26",  # synthesized ambient babble bed (koel.tts.mixer)
     "nvidia-riva-client>=2.15",  # NVIDIA Magpie TTS (Hindi) over NVCF gRPC
+    "boto3>=1.34.100",  # AWS Bedrock Titan Embeddings V2 (RAG) + SageMaker Whisper/Orpheus runtime.invoke_endpoint
     "opentelemetry-api>=1.24",
     "opentelemetry-sdk>=1.24",
     "opentelemetry-instrumentation-fastapi>=0.45b0",
@@ -97,6 +98,18 @@ testpaths = ["tests"]
 [tool.coverage.run]
 source = ["koel"]
 omit = ["koel/*/main.py", "*/__init__.py"]
+# SQLAlchemy's async ORM bridges every await through `greenlet` internally (Core
+# is sync under the hood even for async drivers like aiosqlite/asyncpg) — without
+# telling coverage.py about that, its tracer loses sync on the greenlet switch
+# and silently under-reports everything from that point in the coroutine onward.
+# This was previously making DB-touching routes across the codebase (users.py,
+# orgs.py, knowledge.py, auth.py, ...) look far less tested than they actually
+# are — e.g. users.py measured 70% (65 "missing" lines) when every one of those
+# lines was demonstrably executing (verified via a raw sys.settrace probe
+# bypassing coverage.py entirely). `thread` is included alongside `greenlet`
+# per coverage's own docs recommendation when both are in play (aiosqlite runs
+# its DBAPI calls on a background thread; OTel's span processor does too).
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 # Achieved ~90%; the gate is set a few points below as a floor so ordinary

@@ -6,40 +6,40 @@ from koel.common.auth import issue_token
 from koel.voicebot.monitor import LiveMonitor
 
 
-def test_monitor_open_record_status_get_close():
+async def test_monitor_open_record_status_get_close():
     m = LiveMonitor()
-    m.open("s1", "bot_x", "org1")
-    assert [c["session_id"] for c in m.list_active(org_id="org1")] == ["s1"]
+    await m.open("s1", "bot_x", "org1")
+    assert [c["session_id"] for c in await m.list_active(org_id="org1")] == ["s1"]
 
-    m.record_turn("s1", "bot", "Namaste")
-    m.record_turn("s1", "customer", "Haan")
-    m.set_status("s1", "processing")
-    detail = m.get("s1", "org1")
+    await m.record_turn("s1", "bot", "Namaste")
+    await m.record_turn("s1", "customer", "Haan")
+    await m.set_status("s1", "processing")
+    detail = await m.get("s1", "org1")
     assert detail["turn_count"] == 2
     assert detail["status"] == "processing"
     assert [e["speaker"] for e in detail["events"]] == ["bot", "customer"]
 
-    m.close("s1")
-    assert m.list_active(org_id="org1") == []
-    assert m.get("s1", "org1") is None
+    await m.close("s1")
+    assert await m.list_active(org_id="org1") == []
+    assert await m.get("s1", "org1") is None
 
 
-def test_monitor_is_tenant_scoped():
+async def test_monitor_is_tenant_scoped():
     m = LiveMonitor()
-    m.open("a", "bot", "orgA")
-    m.open("b", "bot", "orgB")
-    assert [c["session_id"] for c in m.list_active("orgA")] == ["a"]
-    assert m.get("a", "orgB") is None  # cross-tenant → hidden
+    await m.open("a", "bot", "orgA")
+    await m.open("b", "bot", "orgB")
+    assert [c["session_id"] for c in await m.list_active("orgA")] == ["a"]
+    assert await m.get("a", "orgB") is None  # cross-tenant → hidden
     # An unscoped/admin caller sees everything.
-    assert len(m.list_active(None)) == 2
+    assert len(await m.list_active(None)) == 2
 
 
-def test_monitor_events_are_capped():
+async def test_monitor_events_are_capped():
     m = LiveMonitor()
-    m.open("s", "bot", None)
+    await m.open("s", "bot", None)
     for i in range(120):
-        m.record_turn("s", "bot", f"line {i}")
-    detail = m.get("s", None)
+        await m.record_turn("s", "bot", f"line {i}")
+    detail = await m.get("s", None)
     assert detail["turn_count"] == 120  # count is cumulative
     assert len(detail["events"]) == 50  # buffer is bounded
     assert detail["events"][-1]["text"] == "line 119"  # keeps the most recent
@@ -51,9 +51,9 @@ def _hdr(org: str | None = None) -> dict[str, str]:
 
 async def test_monitor_api_lists_and_details_live_calls(app_client, test_db):
     client, runtime = app_client
-    runtime.monitor.open("live9", "bot_x", None)
-    runtime.monitor.record_turn("live9", "bot", "Namaste ji")
-    runtime.monitor.set_status("live9", "listening")
+    await runtime.monitor.open("live9", "bot_x", None)
+    await runtime.monitor.record_turn("live9", "bot", "Namaste ji")
+    await runtime.monitor.set_status("live9", "listening")
 
     r = await client.get("/v1/operator/monitor", headers=_hdr())
     assert r.status_code == 200

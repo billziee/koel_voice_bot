@@ -1,8 +1,11 @@
 """STT provider interface + stub implementation.
 
-``WhisperSageMakerProvider`` is intentionally a stub: the real implementation
-invokes a SageMaker Whisper endpoint. The interface is what the rest of the
-system is built against, so swapping the body is a config change, not a rewrite.
+``WhisperSageMakerProvider`` invokes a self-hosted SageMaker Whisper endpoint.
+The interface is what the rest of the system is built against, so swapping the
+body is a config change, not a rewrite. See its docstring for an important
+caveat: the boto3 SDK mechanics are real and verified, but (unlike the public
+REST APIs — Groq, Sarvam, Deepgram) there is no live endpoint yet to verify the
+request/response JSON shape against, so that part is a documented assumption.
 """
 
 from __future__ import annotations
@@ -729,13 +732,136 @@ class DeepgramSttProvider(SttProvider):
 
 
 class WhisperSageMakerProvider(SttProvider):
-    """Real provider — invokes a SageMaker Whisper endpoint. Not wired in MVP boilerplate."""
+    """Real provider — invokes a self-hosted Whisper model on a SageMaker real-time
+    endpoint, via boto3's ``sagemaker-runtime`` client.
+
+    IMPORTANT CAVEAT (read before touching the payload shape below): unlike a
+    public REST API (Groq's documented ``/audio/transcriptions``, Sarvam's
+    ``/speech-to-text``), a SageMaker endpoint's exact request/response JSON is
+    whatever the team's own inference script chooses to return — there is no
+    fixed public contract to code against. And unlike Orpheus's SageMaker
+    counterpart in ``koel/tts/providers.py`` (deployed against a documented
+    Orpheus inference contract), **no endpoint is deployed for this one yet**:
+    the Terraform for this infra (``infra/``) is written but has not been
+    applied. So there is nothing live to verify the JSON shape against today.
+
+    Split accordingly:
+      * The boto3 SDK mechanics — building the client once, invoking the
+        endpoint, running the blocking call via ``asyncio.to_thread`` (mirrors
+        ``FastEmbedEmbedder.embed`` in ``koel/nlp/rag.py`` for the same "sync
+        SDK off the event loop" reason) — are 100% correct and knowable
+        regardless of which model sits behind the endpoint.
+      * The response JSON shape parsed in :meth:`transcribe` —
+        ``{"text": str, "language": str, "confidence": float}`` — is an
+        ASSUMED convention for a self-hosted Whisper deployment (the shape a
+        plain HuggingFace ``transformers`` Whisper pipeline would naturally
+        emit), NOT a verified spec. CONFIRM AND ADJUST this parsing once a real
+        endpoint exists (see ``infra/`` Terraform + the team's inference
+        script).
+
+    Error handling deliberately differs from Groq/Sarvam/Deepgram in this file:
+    those wrap a ``fallback`` provider and degrade to it on failure (a
+    "never-drop-a-turn" convention, appropriate once a provider is live and
+    its contract is verified). This provider has no fallback wired — its
+    constructor only takes ``endpoint_name``/``region`` — and its payload shape
+    is an unverified assumption, so silently degrading here would risk masking
+    a genuine integration bug (wrong contract, endpoint down, cold start,
+    auth failure) behind a plausible-looking stub transcript. Any boto3 or
+    parsing failure is therefore raised, not swallowed, so it surfaces loudly
+    until this has a real endpoint to be verified — and, later, a deliberate
+    decision — against.
+    """
 
     def __init__(self, endpoint_name: str, region: str) -> None:
+        import boto3  # lazy: only needed when the SageMaker Whisper provider is enabled
+
         self.endpoint_name = endpoint_name
         self.region = region
+        # Built once here, not per-call, so every transcribe() reuses the same
+        # pooled connection (mirrors the persistent httpx client every other
+        # live provider in this file builds in __init__).
+        self._client = boto3.client("sagemaker-runtime", region_name=region)
 
-    async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:  # pragma: no cover
-        raise NotImplementedError(
-            "Wire boto3 sagemaker-runtime invoke_endpoint here; return TranscriptResult."
+    async def transcribe(self, request: TranscribeRequest) -> TranscriptResult:
+        try:
+            raw = base64.b64decode(request.audio_b64) if request.audio_b64 else b""
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(
+                f"WhisperSageMakerProvider: invalid base64 audio_b64 "
+                f"(session_id={request.session_id!r})"
+            ) from exc
+        if not raw:
+            raise ValueError(
+                f"WhisperSageMakerProvider: empty audio payload "
+                f"(session_id={request.session_id!r})"
+            )
+
+        fmt = (request.audio_format or "wav").lower()
+        content_type = "audio/wav" if fmt == "wav" else "application/octet-stream"
+
+        try:
+            response = await asyncio.to_thread(
+                self._client.invoke_endpoint,
+                EndpointName=self.endpoint_name,
+                ContentType=content_type,
+                Body=raw,
+            )
+            body_bytes = await asyncio.to_thread(response["Body"].read)
+            data = json.loads(body_bytes)
+        except Exception as exc:  # noqa: BLE001 — deliberately re-raised, never swallowed (see docstring)
+            raise RuntimeError(
+                f"WhisperSageMakerProvider: invoke_endpoint failed for "
+                f"endpoint={self.endpoint_name!r} region={self.region!r} "
+                f"session_id={request.session_id!r}"
+            ) from exc
+
+        if not isinstance(data, dict) or "text" not in data:
+            raise RuntimeError(
+                "WhisperSageMakerProvider: unexpected SageMaker response shape — "
+                "expected a JSON object with a 'text' field (the ASSUMED self-hosted "
+                f"Whisper contract; see class docstring). Got: {data!r}"
+            )
+
+        text = str(data.get("text") or "").strip()
+        # ASSUMED: `language` is a Whisper-style language name (e.g. "english",
+        # "hindi"), matching how GroqWhisperProvider maps its own live responses
+        # (_WHISPER_LANG below) — a reasonable default for a self-hosted Whisper
+        # inference script, not a verified contract. Fall back to the request's
+        # hint (mirrors GroqWhisperProvider) when the response doesn't specify —
+        # or doesn't map to — a supported language.
+        lang = _WHISPER_LANG.get(str(data.get("language", "")).lower(), Language.other)
+        if request.language_hint and lang is Language.other:
+            lang = request.language_hint
+
+        # ASSUMED: a single scalar `confidence` (no separate word/language score in
+        # the assumed contract) — applied to both signals until a real endpoint
+        # defines them separately. 0.9 mirrors the "reasonable default" used
+        # elsewhere in this file (e.g. GroqWhisperProvider._confidence's empty case).
+        confidence = data.get("confidence")
+        conf = float(confidence) if confidence is not None else 0.9
+
+        # ASSUMED contract has no duration field; if a future script adds one,
+        # honour it, else estimate the same way GroqWhisperProvider does when
+        # Whisper's own `duration` comes back falsy.
+        duration = data.get("duration")
+        duration_ms = int(float(duration) * 1000) if duration is not None else 0
+
+        return TranscriptResult(
+            session_id=request.session_id,
+            text=text,
+            is_final=True,
+            language_id=lang,
+            language_confidence=conf,
+            speech_duration_ms=duration_ms or max(120, len(text) * 60),
+            word_confidence=conf,
         )
+
+    async def warm(self) -> None:
+        # No-op: boto3's sagemaker-runtime client has no connection pool to
+        # prime the way the httpx-based providers above do (see SttProvider.warm).
+        return None
+
+    async def aclose(self) -> None:
+        # No-op: boto3 clients don't hold a resource that needs explicit closing
+        # (unlike the httpx.AsyncClient instances the other live providers own).
+        return None

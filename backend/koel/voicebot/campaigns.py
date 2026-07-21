@@ -102,6 +102,14 @@ async def schedule_callback(
     )
 
 
+async def get_attempt(attempt_id: str) -> dict | None:
+    """Look up one dial attempt by id (e.g. to resolve the bot/campaign for an
+    outbound origination, or to correlate a Twilio status-callback)."""
+    async with session_scope() as db:
+        row = await db.get(DialAttempt, attempt_id)
+        return _attempt_to_dict(row) if row is not None else None
+
+
 async def claim_due_attempts(limit: int = 10, now: datetime | None = None) -> list[dict]:
     """Atomically claim up to ``limit`` due dials (``pending`` + ``scheduled_at`` <=
     now), mark them ``in_progress``, bump ``attempt_count``, and return them. On

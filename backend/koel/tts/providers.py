@@ -747,13 +747,112 @@ class RoutingTtsProvider(TtsProvider):
                 await aclose()
 
 
-class OrpheusSageMakerProvider(TtsProvider):  # pragma: no cover - production stub
+class OrpheusSageMakerProvider(TtsProvider):
+    """Self-hosted Orpheus TTS via a custom AWS SageMaker real-time endpoint.
+
+    An alternate deployment of the same Orpheus family as ``GroqOrpheusProvider``
+    (self-hosted on SageMaker instead of Groq-hosted), so it follows the same
+    never-drop-a-turn convention used by every other live provider in this file:
+    any failure degrades to ``StubOrpheusProvider`` and tags ``fallback_used``.
+
+    IMPORTANT — no SageMaker endpoint is deployed yet, so the request/response
+    payload below is an ASSUMED convention, not a fixed public API (unlike Groq's
+    documented ``/audio/speech`` contract). The boto3 SDK mechanics (client
+    construction, ``invoke_endpoint``, running the blocking call off the event
+    loop) are real; the JSON/audio shape must be verified — and likely adjusted —
+    once the actual model is deployed. See ``_invoke_endpoint`` for the exact
+    assumed shape.
+    """
+
     def __init__(self, endpoint_name: str, region: str) -> None:
+        import boto3  # lazy: only needed when the SageMaker Orpheus provider is enabled
+
         self.endpoint_name = endpoint_name
         self.region = region
+        self._client = boto3.client("sagemaker-runtime", region_name=region)
+        self._fallback = StubOrpheusProvider()
+        self._warned = False  # log the first failure only, not per turn
+
+    def _invoke_endpoint(self, request: SynthesizeRequest, prosody: Prosody) -> tuple[bytes, str]:
+        """Blocking boto3 ``invoke_endpoint`` call — run via ``asyncio.to_thread``.
+
+        ASSUMED REQUEST/RESPONSE CONTRACT (flagged per the task: verify/adjust
+        against the real deployed model — this is a reasonable default, not a
+        spec):
+          * Request body (JSON): ``{"text", "voice", "language", "speed"}``.
+            ``speed`` carries the resolved prosody rate (tone × per-bot
+            ``speaking_rate``); add ``pitch``/``energy`` keys here too if the
+            deployed model exposes separate controls for those.
+          * Response: raw audio bytes in ``Body`` (no JSON/base64 envelope),
+            with the container/codec named by the ``ContentType`` response
+            header (e.g. ``"audio/wav"``). If the real endpoint instead wraps
+            audio in JSON (e.g. ``{"audio": "<base64>"}``), this needs to
+            change to decode that shape instead of reading ``Body`` raw.
+        """
+        body = json.dumps(
+            {
+                "text": request.text,
+                "voice": request.voice,
+                "language": request.language.value,
+                "speed": prosody.rate,
+            }
+        ).encode()
+        response = self._client.invoke_endpoint(
+            EndpointName=self.endpoint_name,
+            ContentType="application/json",
+            Body=body,
+        )
+        audio: bytes = response["Body"].read()
+        content_type = (response.get("ContentType") or "").split(";")[0].strip()
+        audio_format = content_type.split("/", 1)[-1] if "/" in content_type else "wav"
+        return audio, audio_format
 
     async def synthesize(self, request: SynthesizeRequest) -> SynthesisResult:
-        raise NotImplementedError("Invoke Orpheus SageMaker endpoint; map prosody → params.")
+        prosody = resolve_prosody(request)
+        try:
+            audio, audio_format = await asyncio.to_thread(self._invoke_endpoint, request, prosody)
+            if not audio:
+                raise ValueError("Orpheus SageMaker endpoint returned no audio")
+        except Exception:  # noqa: BLE001 — never drop a turn; degrade to stub like every
+            # other live provider in this file (Groq/Nvidia/Sarvam/Deepgram/OpenAI-compatible).
+            if not self._warned:
+                self._warned = True
+                logger.warning(
+                    "orpheus_sagemaker_failed; falling back to stub (endpoint not deployed, "
+                    "cold-starting, or the assumed payload contract doesn't match the live "
+                    "model yet — see _invoke_endpoint). Suppressing further warnings.",
+                    exc_info=True,
+                )
+            result = await self._fallback.synthesize(request)
+            result.fallback_used = True
+            return result
 
-    def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
-        raise NotImplementedError("Stream from Orpheus with response-stream invoke.")
+        if request.ambient and request.ambient_profile:
+            # No-op if `audio` isn't parseable mono 16-bit PCM WAV (mix_into_wav never raises).
+            audio = mix_into_wav(audio, request.ambient_profile, request.ambient_gain)
+        return SynthesisResult(
+            session_id=request.session_id,
+            audio_b64=base64.b64encode(audio).decode(),
+            duration_ms=_wav_duration_ms(audio) or self._fallback._duration_ms(request.text, prosody),  # noqa: SLF001
+            prosody=prosody,
+            sample_rate=wav_sample_rate(audio) or CANONICAL_SAMPLE_RATE,
+            audio_format=audio_format,
+        )
+
+    async def stream(self, request: SynthesizeRequest) -> AsyncIterator[SynthesisChunk]:
+        # SageMaker supports InvokeEndpointWithResponseStream, but the chunk framing
+        # (audio-per-event boundaries, header/trailer format) is model-specific and
+        # unknowable without the live endpoint. Falls back to this file's existing
+        # single-chunk pattern (see GroqOrpheusProvider._stream_whole_clip): synthesize
+        # the whole clip, then yield it as one final chunk. Revisit once the endpoint
+        # is live and its real streaming response contract is known.
+        result = await self.synthesize(request)
+        yield SynthesisChunk(
+            session_id=request.session_id,
+            seq=0,
+            audio_b64=result.audio_b64,
+            is_final=True,
+            duration_ms=result.duration_ms,
+            sample_rate=result.sample_rate,
+            audio_format=result.audio_format,
+        )

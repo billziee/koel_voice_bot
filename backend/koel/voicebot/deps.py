@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
+import redis.asyncio as redis
 from fastapi import Request
 
 from koel.voicebot.clients import ServiceClients
@@ -40,6 +41,9 @@ class Runtime:
     # Strong refs to detached grace-window finalizers (PRD §05 dropped calls),
     # so they survive after the WebSocket handler returns.
     background_tasks: set[asyncio.Task] = field(default_factory=set)
+    # The raw client backing escalations/monitor (None in tests, which use the
+    # in-process default) — kept so the lifespan can close it on shutdown.
+    shared_redis: redis.Redis | None = None
 
 
 def build_runtime(settings: VoiceBotSettings) -> Runtime:
@@ -62,6 +66,14 @@ def build_runtime(settings: VoiceBotSettings) -> Runtime:
     )
     filler = FillerCache()
     orchestrator = Orchestrator(settings=settings, clients=clients, filler_cache=filler)
+    # Redis-backed monitor/escalation (a follow-up noted in docs/FUTURE_PROCEEDINGS.md,
+    # now implemented): a separate connection from the session store's own, since
+    # RedisSessionStore doesn't expose its client and the pool cost is negligible.
+    # Redis is already required infra for this app (the session store has no
+    # in-process fallback), so this is unconditional, not dormant-until-configured.
+    monitor_redis = redis.from_url(settings.redis_url, decode_responses=True)
+    monitor = LiveMonitor(redis_client=monitor_redis)
+    escalations = EscalationHub(redis_client=monitor_redis, liveness=store)
     return Runtime(
         settings=settings,
         store=store,
@@ -70,6 +82,9 @@ def build_runtime(settings: VoiceBotSettings) -> Runtime:
         smart_turn=smart_turn,
         filler=filler,
         orchestrator=orchestrator,
+        escalations=escalations,
+        monitor=monitor,
+        shared_redis=monitor_redis,
     )
 
 
