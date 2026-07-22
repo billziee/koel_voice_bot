@@ -191,18 +191,22 @@ If any of these regress, that's a real signal — this whole codebase has been k
 
 ## 8. Documentation map — what's current vs. stale
 
+The versioned doc set (PRD/HLD/LLD/SECURITY/RESIDENCY/TELEPHONY/DEPLOY/PRODUCTION_MASTERPLAN/SLO) now has a **V4** bump, written after this handoff doc, that folds in everything below plus the 30 commits of admin/dialer/security-hardening work between the V3 docs and today. **Read the `_V4.md` files, not the `_V3.md` or earlier ones, for anything they cover** — each carries a full v1→v2→v3→v4 evolution table, so the history is preserved, not lost.
+
 | Doc | Status |
 |---|---|
-| **This file** | Current, authoritative for handoff |
-| `docs/SECURITY.md` | Current — the credential-rotation checklist and security posture here are accurate and actively maintained |
-| `docs/RESIDENCY.md` | Current on the residency gap analysis (Section 5 above summarizes it) |
-| `docs/PRD_V2.md` | Mostly current for product requirements and the compliance table; cross-check anything telephony-specific against this doc and the source, since even PRD_V2 predates the final telephony parity work |
+| **This file** | Current, authoritative for handoff — read first |
+| `docs/PRD_V4.md`, `docs/HLD_V4.md`, `docs/LLD_V4.md` | **Current, authoritative** — supersede all earlier PRD/HLD/LLD versions. Confirm telephony/PSTN calling at full feature parity, the outbound dialer, PSTN warm transfer, real org/user admin, Google Sign-In, and real (not stubbed) AWS SageMaker/Bedrock provider code |
+| `docs/SECURITY_V4.md` | **Current, authoritative** — supersedes `SECURITY_V3.md`. Covers the 4 bug-hunt rounds, the cross-tenant enumeration accepted risk, and the 5-item credential-rotation list. The non-versioned `docs/SECURITY.md` is also kept current and actively maintained; use either, they agree |
+| `docs/RESIDENCY_V4.md` | **Current, authoritative** — supersedes `RESIDENCY_V3.md`. Confirms the residency gap is **unchanged** — Bedrock/SageMaker being real code now is implementation readiness, not a compliance status change |
+| `docs/TELEPHONY_V4.md` | **Current, authoritative** — supersedes `TELEPHONY_V3.md`, `TELEPHONY.md`, and this handoff doc's Section 2.2 for depth (this doc's Section 2.2 is still accurate, just a summary). Telephony is a fully built, feature-parity transport now, not a seam |
+| `docs/DEPLOY_V4.md` | **Current, authoritative** — supersedes `DEPLOY_V3.md`. Adds the Twilio/dialer/Google-login/org-admin env vars and documents (does not fix) the render.yaml service-naming and frontend/backend branch-tracking drift |
+| `docs/PRODUCTION_MASTERPLAN_V4.md` | **Current, authoritative** — supersedes `PRODUCTION_MASTERPLAN_V3.md`. Moves telephony/PSTN out of "remaining for GA" entirely; residency/legal ruling remains the headline blocker |
+| `docs/SLO_V4.md` | **Current, authoritative** — supersedes `SLO_V3.md`. Short and deliberately so: no targets moved, no new metric instruments; telephony now just contributes to the same first-audio-latency histogram the browser transport already had |
+| `docs/RESIDENCY.md`, `docs/SECURITY.md` | Non-versioned, actively-maintained files — still current, consistent with their `_V4` counterparts |
+| `docs/PRD_V2.md`, `docs/PRD_V3.md`, `docs/HLD_V2.md`, `docs/HLD_V3.md`, `docs/LLD_V2.md`, `docs/LLD_V3.md`, `docs/SECURITY_V3.md`, `docs/RESIDENCY_V3.md`, `docs/TELEPHONY.md`, `docs/TELEPHONY_V3.md`, `docs/DEPLOY_V3.md`, `docs/PRODUCTION_MASTERPLAN_V3.md`, `docs/SLO_V3.md` | **Superseded by their `_V4` (or `_V2`/`_V3`) successors above** — kept for history, each still readable as "what was true as of that version," but don't treat any of them as current |
 | `docs/FUTURE_PROCEEDINGS.md` | A roadmap **snapshot** — several items it lists as future work (outbound dialer, PSTN warm transfer, Twilio bridge, BYOK connections) are now built and tested. Treat it as historical context, not a current backlog, without cross-checking the source first |
-| `docs/HLD_V2.md`, `docs/HLD_V3.md`, `docs/LLD_V2.md`, `docs/LLD_V3.md` | **Stale on telephony** — describe Twilio/Exotel as an unbuilt seam. Everything else in them (browser transport, data model, service boundaries) is still broadly accurate |
-| `docs/TELEPHONY.md`, `docs/TELEPHONY_V3.md` | **Superseded** — telephony is fully built now; read `koel/voicebot/telephony/session.py` and this handoff's Section 2.2 instead |
-| `docs/PRODUCTION_MASTERPLAN.md` | Current for the pre-go-live checklist (rotate keys, residency ruling, `terraform apply`, staging, TLS everywhere, Redis rate-limiter, compliance sign-off) |
-| `docs/DEPLOY.md` | Current for the Render deployment mechanics |
-| `docs/SLO.md`, `docs/LOADTEST.md` | Not verified as part of this handoff pass — review before relying on them |
+| `docs/LOADTEST.md` | Not verified as part of this handoff pass — review before relying on it |
 
 ---
 
