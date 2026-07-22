@@ -32,14 +32,12 @@
 
 ---
 
-## Item zero — fix the footgun (do this first, before anything else, hours not days)
+## Item zero — fix the footgun — DONE
 
-Config can select `BedrockTitanEmbedder` today (`backend/koel/nlp/rag.py:98`) and
-its `embed()` raises `NotImplementedError` **at first use, mid-call** — not at
-boot. Add a startup validation that fails loudly the instant an unimplemented
-provider is selected in config, instead of the first real user hitting a crash.
-This is a one-function fix; the full stub completion (SageMaker Whisper/Orpheus,
-Bedrock Titan) is tracked as item **6.8** in Part C and overlaps **O-7 Track B**.
+Both halves shipped: `build_embedder()` fails loudly at boot (not mid-call) if
+config selects a still-unimplemented embedder (`_UNIMPLEMENTED_EMBEDDERS`
+guard), and separately, `BedrockTitanEmbedder` itself is no longer a stub —
+see item **6.8** in Part C for the full status of the SageMaker/Bedrock track.
 
 ---
 
@@ -132,9 +130,11 @@ Bedrock Titan) is tracked as item **6.8** in Part C and overlaps **O-7 Track B**
 
 **Dependencies:** O-4 (re-scopes the win); endpointing signal already merged (`e1d6c38`).
 
-### O-6 · Streaming STT partials — M-L
+### O-6 · Streaming STT partials — M-L (browser: done; telephony barge-in extension: done)
 
-**What:** Real-time STT so the transcript is (mostly) ready when the user stops talking.
+**Status (updated):** The browser-transport half described below shipped (Sarvam WS streaming STT, `BrowserStreamingStt` in `backend/koel/voicebot/ws/streaming_stt.py`, enabled by default). Separately, telephony (PSTN) had interim STT partials arriving (`StreamingTelephonyIngest`/`DeepgramStreamingSession`) but nothing acted on them for barge-in — flagged in an earlier audit as "no partial-transcript barge-in" for the carrier transport specifically. Now closed: `backend/koel/voicebot/telephony/bargein_gate.py`'s `TelephonyBargeInGate` + `TwilioMediaBridge.is_bot_speaking` treat the interim partial's mere non-empty arrival (while the bot is speaking) as the carrier-side Gate 1 stand-in (no client VAD worklet exists on a phone call), running the same `BargeInClassifier` Gate 2 the browser path already had.
+
+**What (original, browser path):** Real-time STT so the transcript is (mostly) ready when the user stops talking.
 
 **Why:** Both providers are batch REST (`stt/providers.py`: `GroqWhisperProvider.transcribe`, `SarvamSttProvider.transcribe`) — the full utterance uploads *after* end-of-speech, costing ~300–800ms before NLP can start. Groq Whisper is batch-only; Sarvam ships a WebSocket streaming STT (`speech-to-text/streaming` on `api.sarvam.ai` — **verify current API shape at implementation time**).
 
@@ -441,39 +441,27 @@ seam.
 
 ## Theme 3 — Human-in-the-Loop & Inbound
 
-### 3.1 Real human-escalation handoff — M
+### 3.1 Real human-escalation handoff — DONE
 
-**What:** Replace the `_escalate` stub (which today just ends the call at `backend/koel/voicebot/pipeline/orchestrator.py:445`) with a real transfer: an agent queue plus either (a) a simple operator console (browser calls) or (b) Twilio TaskRouter warm transfer (PSTN).
+**Status (updated):** Both phases are built. Phase A (browser, no carrier): `_escalate` parks the call in `waiting_agent` playing hold filler, pushes the context payload onto the `escalation_requests` queue (`backend/koel/voicebot/persistence.py`), and a logged-in operator claims/replies/resolves via `backend/koel/voicebot/api/operators.py` — replies go through the existing TTS path. `EscalationHub`/`LiveMonitor` (see 3.3) are Redis-backed so this now also works across multiple worker processes/instances, not just one.
 
-**Why:** PRD §02 sets Escalation Quality = 100% and the payload work is done — `_escalate` already emits `call_state: escalating` carrying the full transcript and `crm_context`; nothing receives it.
+Phase B (PSTN) shipped via Twilio's **Conference API**, not TaskRouter — TaskRouter is a routing/queueing product needing a provisioned Workspace/Workflow/TaskQueue that no live Twilio account here could set up or verify against; a Conference-based warm transfer (redirect the live call + a new outbound whisper call into one ad-hoc conference room) gets the identical real-world outcome — operator ends up on the phone with the customer — through a smaller, stable, well-documented REST surface. See `backend/koel/voicebot/pipeline/warm_transfer.py` and `POST /v1/operator/escalations/{id}/warm-transfer`. Needed capturing the Twilio CallSid at all (added: `SessionState.twilio_call_sid`, set from the Media Streams start frame — nothing captured it before).
 
-**Files:** `backend/koel/voicebot/pipeline/orchestrator.py` (`_escalate` — hold instead of `end_call`); new `backend/koel/voicebot/api/operators.py` (agent presence, claim queue) + `backend/koel/voicebot/ws/` operator socket; `src/App.tsx` (operator console view: live transcript pane, claim button, text-or-audio reply); later `telephony/` TaskRouter integration per the `twilio-taskrouter-routing` pattern named in docs/TELEPHONY.md.
+**Not done:** `escalation_resolved`/`escalation_abandoned` as distinct `CallOutcome` values for 6.2 — the queue-side `EscalationStatus` enum already has `resolved`/`abandoned`, but `CallOutcome` itself still just uses `escalated`.
 
-**Approach:** Phase A (browser, no carrier): on escalate, park the session in a `waiting_agent` state playing hold filler (the filler-audio machinery exists), push the already-built context payload onto an in-DB queue, and let a logged-in operator claim it over a second WS; the operator's typed replies go through the existing TTS path so the customer experience stays voice. Phase B (PSTN): map the same queue onto TaskRouter tasks and do a carrier-level warm transfer with a whisper summary generated by `pipeline/summarizer.py` (reuse `transcript_text` + a shortened prompt). Outcome taxonomy: keep `escalated` but add `escalation_resolved`/`escalation_abandoned` to `CallOutcome` for 6.2.
+### 3.2 Inbound Koel_bot (intent detection / self-service / IVR replacement) — PARTIALLY DONE
 
-**Dependencies:** Phase A none; Phase B needs 1.1.
+**Status (updated):** The core inbound path works: `/twilio/stream` resolves an inbound leg with no `attempt_id`/`bot_id` query params via the ANI (caller-number) lookup path (`backend/koel/voicebot/inbound.py`), binds it to `twilio_default_bot_id`, and seeds an intent-first session (`DIRECTION_KEY` in `crm_context`, read by `koel.nlp.providers.select_system_prompt`). DTMF-as-IVR (1.3) works via `TwilioMediaBridge._on_dtmf` → `dtmf_to_turn`.
 
-### 3.2 Inbound Koel_bot (intent detection / self-service / IVR replacement) — L
+**Not done:** "smart escalation" — `BotConfig.config["escalation_rules"]` is a reserved column comment only; nothing reads it (`grep -rn escalation_rules koel` → zero hits), so there's no intent/sentiment-based auto-escalation routing. Also no dedicated `inbound_support` `UseCase` — inbound reuses whichever bot `twilio_default_bot_id` points at, not a bot-type-scoped behavior split.
 
-**What:** Inbound calling product: customer dials in, bot identifies them, detects intent, self-serves from RAG, and smart-escalates — PRD §10's "Koel_bot".
+**Dependencies (remaining):** the escalation-rules routing logic itself; a decision on whether a dedicated bot type is actually needed or whether the current generic-bot-plus-direction-flag approach is sufficient.
 
-**Why:** Doubles the addressable product surface with mostly-existing machinery; `CallLog.direction` already models `incoming`.
+### 3.3 Live supervisor monitor — DONE
 
-**Files:** `backend/koel/voicebot/telephony/webhooks.py` (inbound call webhook → session bootstrap); `backend/koel/voicebot/session/` (a session-start path with *unknown* customer: ANI lookup against CRM via `GET /customers`, else an identify-yourself sub-flow); `backend/koel/nlp/` (an inbound system-prompt family: intent-first, not pitch-first); `backend/koel/db/models.py` (`UseCase` gains `inbound_support`); reuse RAG indexes + file-upload ingestion as the self-service knowledge source.
+**Status (updated):** `backend/koel/voicebot/monitor.py`'s `LiveMonitor` + `GET /v1/operator/monitor` / `/v1/operator/monitor/{session_id}` ship a read-only live view (status, turn count, recent transcript events), org-scoped. Now Redis-backed (optional `redis_client`) so it reflects calls served by any worker/instance, not just the process the request happened to land on — in-process by default when unconfigured, matching every other cross-instance feature in this codebase.
 
-**Approach:** The pipeline is direction-agnostic already (STT→NLP→TTS, barge-in, endpointing all per-turn); the delta is session bootstrap (no pre-loaded `crm_context` — resolve by caller number, fall back to a verification dialog), a different prompt posture, and DTMF menus (1.3) as an IVR bridge for low-confidence cases. Smart escalation reuses 3.1's queue with intent+sentiment routing rules read from `BotConfig.config["escalation_rules"]` (the column comment already reserves this). Ship behind a dedicated bot type so outbound behavior is untouched.
-
-**Dependencies:** 1.1, 1.3, 3.1; RAG content per client (existing KB admin API covers it).
-
-### 3.3 Live supervisor monitor — M *(stretch, after 3.1)*
-
-**What:** Read-only live view of in-flight calls (transcript streaming, sentiment, elapsed), with a "barge/claim" action that folds into 3.1's console.
-
-**Why:** Collections/insurance buyers ask for QA oversight; the transcript already streams over the session WS so this is largely fan-out.
-
-**Files:** `backend/koel/voicebot/ws/handler.py` (tee `ServerMessage`s to a monitor channel), `backend/koel/voicebot/api/operators.py`, `src/App.tsx`.
-
-**Dependencies:** 3.1 Phase A.
+**Not done:** a live "barge/claim" action folding directly into the browser dashboard's supervisor view (the API exists; no dedicated FE supervisor screen was built — `AdminView`/`operators` API consumption from a supervisor-specific UI is still open if wanted).
 
 ## Theme 4 — Language & Voice Expansion
 
@@ -659,17 +647,15 @@ seam.
 
 **Dependencies:** Cloudflare site registration (free tier fine).
 
-### 6.8 AWS-residency provider completion (SageMaker Whisper/Orpheus, Bedrock Titan) — M
+### 6.8 AWS-residency provider completion (SageMaker Whisper/Orpheus, Bedrock Titan) — MOSTLY DONE
 
-**What:** Turn the three provider stubs into working alternates: `WhisperSageMakerProvider` (`backend/koel/stt/providers.py:333`), `OrpheusSageMakerProvider` (`backend/koel/tts/providers.py:566`), and `BedrockTitanEmbedder` (`backend/koel/nlp/rag.py:98`).
+**Status (updated):** `BedrockTitanEmbedder` (`backend/koel/nlp/rag.py`) is fully implemented — real `boto3 bedrock-runtime` `invoke_model` against `amazon.titan-embed-text-v2:0`, wired into `build_embedder()`, degrades to the hash fallback on any failure (mirrors `NvidiaEmbedder`'s convention). No longer a stub, no longer in `_UNIMPLEMENTED_EMBEDDERS`.
 
-**Why:** `docs/RESIDENCY.md` positioning for data-residency-sensitive clients; **also a live footgun fixed as Item Zero above** — this item is the full stub completion, not just the guard.
+`WhisperSageMakerProvider` (`backend/koel/stt/providers.py`) and `OrpheusSageMakerProvider` (`backend/koel/tts/providers.py`) now implement the real boto3 SDK mechanics (client construction, `invoke_endpoint`, `asyncio.to_thread` offloading) — but the request/response **payload shape is an assumed convention, clearly flagged in each class's docstring**, since no SageMaker endpoint has ever been deployed to verify the real contract against. Genuinely done once a real model artifact exists: the SDK plumbing won't need to change, only the payload mapping if the deployed model's actual I/O differs from the documented assumption.
 
-**Files:** the three stub classes; `backend/koel/nlp/rag.py` (note: switching embedders requires re-embedding all `KnowledgeChunk` rows and possibly `EMBEDDING_DIM` — plan a re-ingestion path via the existing knowledge-files upload flow); config plumbing in each service's `config.py`.
+**Remaining:** provisioning the actual SageMaker endpoints (see `infra/terraform/main.tf`'s closing comment — deliberately NOT added there either, for the same "no real model artifact to point at" reason) — this needs a trained/packaged Whisper/Orpheus model pushed to S3/ECR before there's anything for Terraform or these providers to actually invoke. Also still open: the embedding-dimension re-ingestion plan if a future embedder ever changes `EMBEDDING_DIM` (Titan v2 is already 1024-d, matching today's default, so no migration was needed for Bedrock specifically).
 
-**Approach:** Each stub already sits behind its service's provider ABC, so implementation is boto3 invocation code plus the startup-validation guard (Item Zero). Prioritize Bedrock Titan (unblocks residency RAG), then SageMaker Whisper, then Orpheus (lowest value — Sarvam/Magpie cover TTS). Overlaps **O-7 Track B**.
-
-**Dependencies:** AWS account/endpoints (Masterplan procurement); embedding-dimension migration plan.
+**Dependencies:** AWS account (Masterplan procurement) + a real Whisper/Orpheus model artifact for the SageMaker half; Bedrock half has no further dependency (real AWS credentials + IAM permission — see `infra/terraform/main.tf`'s `bedrock_invoke` policy — is all it needs).
 
 ---
 
@@ -722,10 +708,10 @@ whichever wave touches the same files:
 
 The files that nearly every item in this document touches, across all three parts:
 
-- **`backend/koel/voicebot/pipeline/orchestrator.py`** — warm-up coordination (O-1), streaming sentence loop (O-2), speculative retrieval (O-5), per-call budgets (O-9), escalation stub (3.1), action dispatch (2.1/2.2), tone mapping (4.3), flow interpreter hook (6.6) — nearly every feature and optimization touches it.
+- **`backend/koel/voicebot/pipeline/orchestrator.py`** — warm-up coordination (O-1), streaming sentence loop (O-2), speculative retrieval (O-5), per-call budgets (O-9), escalation hold (3.1, done), action dispatch (2.1/2.2), tone mapping (4.3), flow interpreter hook (6.6) — nearly every feature and optimization touches it.
 - **`backend/koel/db/models.py`** — `BotConfig.config` seam, `CallLog`/`TranscriptTurn`, `org_id` columns; schema home for campaigns, experiments, consent, exports, per-bot overrides.
-- **`backend/koel/nlp/providers.py`** / **`backend/koel/nlp/rag.py`** — NLP first-token streaming (O-2), local embedder (O-4), Sarvam NLP provider (O-7 Track A), per-call cost recording (O-9).
-- **`backend/koel/tts/providers.py`** — Sarvam language map (line 354), `RoutingTtsProvider` telephony/µ-law choke point (line 512), voice threading (4.2), SageMaker stub (line 566).
+- **`backend/koel/nlp/providers.py`** / **`backend/koel/nlp/rag.py`** — NLP first-token streaming (O-2), local embedder (O-4), Sarvam NLP provider (O-7 Track A), `BedrockTitanEmbedder` (6.8, done), per-call cost recording (O-9).
+- **`backend/koel/tts/providers.py`** — Sarvam language map (line 354), `RoutingTtsProvider` telephony/µ-law choke point (line 512), voice threading (4.2), `OrpheusSageMakerProvider` (6.8 — real boto3 mechanics, payload contract assumed/flagged pending a live endpoint).
 - **`backend/koel/voicebot/clients.py`** — TTS cache wrapping (O-3), streaming clients (O-2/O-6), CRM adapter swap point (6.1).
 - **`backend/koel/voicebot/ws/handler.py`** — reference transport for the Twilio bridge (1.1); `_finalize` hook where the summarizer, WhatsApp follow-up (2.4), and QA scoring (5.5) attach.
 - **`backend/koel/crm/schemas.py`** — the frozen contract the live-CRM adapter protocol (6.1), PTP capture (2.1), and callback flags (2.5) all build on.
